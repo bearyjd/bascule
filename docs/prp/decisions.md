@@ -12,6 +12,7 @@ and record it here with its **reversal cost**.
 | [004](#adr-004) | Session runs in an expedited foreground Worker, not an FGS started from the receiver | Accepted | 0 |
 | [005](#adr-005) | Delivery expiry is time-based and anchored to `retryEpochMillis`; `BLOCKED_AUTH` is a fourth status | Accepted (amended in Phase 0 self-review) | 0 |
 | [006](#adr-006) | `HELD_CONFIRM` is a fifth status, not a flag on `PENDING`; decline is a terminal `DECLINED` | Accepted | 0 |
+| [007](#adr-007) | PRP §8.5 resolved live (Branch A): UDS register+consent handshake required, not just connect+subscribe | Accepted, evidence-backed | 1 (early) |
 
 ---
 
@@ -505,11 +506,104 @@ not contemplated.
 
 ---
 
+## ADR-007
+
+### PRP §8.5 resolved (Branch A): user attribution requires a UDS registration+consent handshake, not just connect+subscribe
+
+**Status:** Accepted · **Evidence:** `03-hardware-validation.md`, live capture 2026-08-22
+**Modifies:** `00-design.md` §2.6 (`ScaleDecoder`/handshake model), §7 (multi-user branch selection)
+
+#### What the live capture showed
+
+A throwaway diagnostic probe (`tools/hw-probe/`, not part of the Bascule
+codebase) connected to the physical BF720 and found it implements the
+standard Bluetooth SIG Weight/Body-Composition/User-Data profile (services
+`0x181D`/`0x181B`/`0x181C`), not the fully-proprietary opcode protocol
+openScale's older wiki page documents for other Beurer/Sanitas family
+members. Enabling notifications and simply waiting produced **zero**
+measurement traffic across multiple complete weigh-ins — the scale visibly
+completed weight + bioimpedance on its own display each time, but sent
+nothing to the connected, subscribed phone.
+
+The missing step, found by reading openScale's current
+`StandardWeightProfileHandler.kt` / `StandardBeurerSanitasHandler.kt`
+(GPL-3.0, reimplemented here from protocol understanding per ADR-002 — not
+copied): the scale gates Weight/Body-Composition indications behind the
+**User Data Service User Control Point** (`0x2A9F`), a Bluetooth SIG
+mechanism, not a Beurer-specific one. The working sequence:
+
+1. Write `[0x01, consentLo, consentHi]` (**Register New User**) to `2A9F`
+   with an app-chosen 16-bit consent code → scale indicates
+   `[0x20, 0x01, 0x01, scaleIndex]` (success, assigned index).
+2. Write `[0x02, scaleIndex, consentLo, consentHi]` (**Consent**) to `2A9F`
+   → scale indicates `[0x20, 0x02, 0x01]` (accepted).
+3. Only after step 2 succeeds does a subsequent weigh-in produce Weight
+   Measurement (`2A9D`) and Body Composition Measurement (`2A9C`)
+   indications, and the Weight Measurement frame carries the registered
+   **User ID** (confirmed: `scaleIndex=2` came back embedded in the live
+   weight frame, byte-for-byte matching the index assigned in step 1).
+
+This is privacy-by-design at the firmware level (standard practice for UDS
+scales, not a Beurer quirk): a scale storing multiple household members'
+body composition should not push any of them to an unauthenticated
+subscriber.
+
+#### Decision
+
+**Branch A of PRP §8.5 is confirmed live**, not just theoretically
+preferred: the BF720 exposes a real user index, delivered inside the
+Weight Measurement characteristic once a session is consented. `00-design.md`
+§7's Branch B (weight-range sanity gate) is now confirmed unnecessary for
+this device — it remains defined for portability to a future scale that
+lacks UDS, per PRP's own pluggable-decoder goal, but is dead code for v1's
+target hardware.
+
+**Design consequence — the handshake belongs in the connect sequence, not
+the decoder's `initSequence`.** `00-design.md` §2.6 modeled `HANDSHAKING`
+as a fixed, stateless `List<GattOp>` returned once by the decoder. The real
+handshake is stateful and conditional: register only if no local mapping
+exists yet for JD's app-level identity; otherwise send Consent directly
+using a **persisted** `scaleIndex → consentCode` pair. This mapping must be
+stored — EncryptedSharedPreferences per the agent prompt's ground rule on
+credential storage, since a consent code is a shared secret with the scale
+in the same sense a token is a shared secret with VitalForge. `GattSession`
+needs a new dependency (a small consent-store interface) and `DecodeEvent`
+needs two new cases (`UserRegistered(scaleIndex)`, `UserConsented`) so the
+session can react to indications on `2A9F` the same way it already reacts
+to notifications on `2A9D`/`2A9C`. Full interface revision is Phase 2 work
+(this ADR records the requirement and evidence; it does not redesign
+`ScaleDecoder` — that redesign should happen with the devil's advocate
+pass in the room, not bolted on post-hoc here).
+
+**Second consequence — Body Composition frames do not self-identify.** The
+live Body Composition Measurement frame carried no timestamp or user ID
+(its own flags said so); only the paired Weight Measurement frame did.
+`DecodeEvent.Stable` as currently modeled (00-design.md §2.6) assumes each
+notification is independently a complete, attributable reading. It is not:
+the two characteristics must be correlated within one session before
+either is treated as complete and attributable. This is the same class of
+gap as the P1-A finding `01-plan.md` already flagged for Phase 2 (§8.8 vs.
+the capture tool) — another place where the connect-and-subscribe mental
+model undersold the real protocol's statefulness.
+
+#### Reversal cost
+
+**Low for the fact itself** (§8.5 is now evidence, not a coin flip — nothing
+to reverse). **Moderate for the design consequence**: the `ScaleDecoder`
+interface and `GattSession` handshake modeling need a real revision pass in
+Phase 2, informed by this ADR, before Phase 3 work packages WP-06/WP-07/WP-09
+are implemented against it. Treat `00-design.md` §2.6 as provisional until
+that revision lands — a note has been added there.
+
+---
+
 ## Deferred — not decisions, tracked here so they are not lost
 
 | PRP §8 | Question | Why not decided in Phase 0 | Owner / when |
 |---|---|---|---|
 | 2 | LAN-only vs Tailscale base URL from day one | No design impact — base URL is a validated config string either way | JD, any time before Phase 5 |
 | 4 | Repo under `ventouxlabs` org vs `bearyjd` | Administrative | JD, before first push |
-| 5 | Does the BF720 payload expose a user index | **Requires a live scan.** Both branches fully specified in `00-design.md` §7; the delivery path is identical either way | Milestone 1, evidence recorded in `03-hardware-validation.md` |
 | 6 | Body-comp trend handling (7-day moving average, keep out of recommendations) | Out of Bascule's scope in v1 — Bascule stores and delivers; presentation and the recommendations engine are VitalForge's | VitalForge side, milestone 7 |
+
+**Resolved:** PRP §8.5 (user index) — see ADR-007. Confirmed via live
+hardware capture, not deferred any further.
