@@ -644,8 +644,12 @@ is the blast radius this ADR claimed for itself.
 | PRP §8 | Question | Why not decided in Phase 0 | Owner / when |
 |---|---|---|---|
 | 2 | LAN-only vs Tailscale base URL from day one | No design impact — base URL is a validated config string either way | JD, any time before Phase 5 |
-| 4 | Repo under `ventouxlabs` org vs `bearyjd` | Administrative | JD, before first push |
 | 6 | Body-comp trend handling (7-day moving average, keep out of recommendations) | Out of Bascule's scope in v1 — Bascule stores and delivers; presentation and the recommendations engine are VitalForge's | VitalForge side, milestone 7 |
 
 **Resolved:** PRP §8.5 (user index) — see ADR-007. Confirmed via live
 hardware capture, not deferred any further.
+
+**Resolved:** PRP §8.4 (repo location) — `bearyjd/bascule` (JD's personal
+account, matching VitalForge's precedent), public, per the AGPL-3.0 license's
+own point of making source available. Pushed 2026-08-22:
+https://github.com/bearyjd/bascule.
