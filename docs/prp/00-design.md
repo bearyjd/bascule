@@ -261,6 +261,15 @@ worker start, applying only to sessions that entered `BONDING`.
 
 ### 2.6 `ScaleDecoder` — the interface ADR-001 forces
 
+> **Provisional — see ADR-007.** Live hardware capture (`03-hardware-validation.md`)
+> found the real handshake is a stateful, conditional UDS register/consent
+> exchange over the User Control Point, not the fixed one-shot `initSequence`
+> modeled below. `DecodeEvent` needs `UserRegistered`/`UserConsented` cases,
+> and Body Composition frames arrive without their own timestamp/user-ID and
+> must be correlated with the paired Weight frame before either is treated as
+> a complete, attributable reading. Revise this interface in Phase 2 before
+> WP-06/WP-07/WP-09 are implemented against it.
+
 The PRP §3 signature `fun decode(advertisement): ScaleReading?` is impossible
 here: a single advertisement carries no measurement. The decoder must describe a
 *conversation*. It stays free of Android BLE types so it is unit-testable and so
@@ -700,7 +709,15 @@ actionable message rather than presenting a broken bridge.
 
 ---
 
-## 7. Multi-user: both branches (PRP §8.5 unresolved)
+## 7. Multi-user: both branches (PRP §8.5 — resolved, see ADR-007)
+
+> **Resolved.** A live hardware capture (`03-hardware-validation.md`) confirmed
+> **Branch A**: the BF720 exposes a real user index via the standard Bluetooth
+> User Data Service, delivered inside the Weight Measurement characteristic
+> once a UDS register+consent handshake completes (ADR-007). Branch B below
+> remains defined — the decoder interface is pluggable per PRP's own goal, and
+> a future non-UDS scale would need it — but it is dead code for v1's target
+> hardware. Text below is preserved as originally written for that reason.
 
 PRP §8.5 cannot be resolved before a live scan. The design works either way; the
 branch is one decoder flag plus one dedup input, and the delivery path is
