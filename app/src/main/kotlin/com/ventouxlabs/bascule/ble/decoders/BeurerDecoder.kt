@@ -1,0 +1,233 @@
+package com.ventouxlabs.bascule.ble.decoders
+
+import com.ventouxlabs.bascule.ble.session.DecodeEvent
+import com.ventouxlabs.bascule.ble.session.DiscoveredServices
+import com.ventouxlabs.bascule.ble.session.GattOp
+import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import java.util.UUID
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+
+/**
+ * Beurer/Sanitas family decoder for the BF720, which speaks the standard
+ * Bluetooth SIG Weight Profile rather than a proprietary opcode protocol
+ * (ADR-007).
+ *
+ * Per-session stateful, performs no I/O.
+ */
+class BeurerDecoder(
+    private val clock: () -> Long = System::currentTimeMillis,
+) : ScaleDecoder {
+
+    override val id: String = DECODER_ID
+
+    override val requiredServices: Set<UUID> = setOf(
+        SigWeightProfile.WEIGHT_SCALE_SERVICE,
+        SigWeightProfile.BODY_COMPOSITION_SERVICE,
+        SigWeightProfile.USER_DATA_SERVICE,
+    )
+
+    override val measurementCharacteristics: Set<UUID> = setOf(
+        SigWeightProfile.WEIGHT_MEASUREMENT,
+        SigWeightProfile.BODY_COMPOSITION_MEASUREMENT,
+    )
+
+    private val correlator = MeasurementCorrelator(DECODER_ID, clock)
+
+    private var handshake: HandshakeState = HandshakeState.NotStarted
+    private var context: HandshakeContext? = null
+
+    var malformedCount: Int = 0
+        private set
+
+    /**
+     * The advertised service UUID is the primary signal; the name only
+     * disqualifies a device when one is actually advertised. Requiring both
+     * would be stricter than 00-design.md §10 A2 assumes — a scan record often
+     * omits the local name from the primary advertisement, and a name-and-UUID
+     * conjunction would then never match the scale at all.
+     */
+    override fun matches(advertisedName: String?, serviceUuids: Set<UUID>): Boolean =
+        SigWeightProfile.WEIGHT_SCALE_SERVICE in serviceUuids &&
+            (advertisedName == null || advertisedName.startsWith(ADVERTISED_NAME_PREFIX))
+
+    override fun beginHandshake(
+        discovered: DiscoveredServices,
+        context: HandshakeContext,
+    ): HandshakeDirective {
+        val hasControlPoint = discovered.hasCharacteristic(
+            SigWeightProfile.USER_DATA_SERVICE,
+            SigWeightProfile.USER_CONTROL_POINT,
+        )
+        if (!hasControlPoint) {
+            return HandshakeDirective.Abort("User Control Point 0x2A9F absent")
+        }
+        this.context = context
+
+        val stored = context.storedCredential
+        return if (stored == null) {
+            handshake = HandshakeState.AwaitingRegistration(context.freshConsentCode)
+            HandshakeDirective.Send(registerWrite(context.freshConsentCode), ACK_TIMEOUT)
+        } else {
+            handshake = HandshakeState.AwaitingConsent(stored, registered = false)
+            HandshakeDirective.Send(consentWrite(stored), ACK_TIMEOUT)
+        }
+    }
+
+    override fun onHandshakeEvent(event: DecodeEvent): HandshakeDirective =
+        when (val state = handshake) {
+            is HandshakeState.AwaitingRegistration -> onRegistrationEvent(state, event)
+            is HandshakeState.AwaitingConsent -> onConsentEvent(state, event)
+            else -> HandshakeDirective.Wait
+        }
+
+    private fun onRegistrationEvent(
+        state: HandshakeState.AwaitingRegistration,
+        event: DecodeEvent,
+    ): HandshakeDirective {
+        if (event !is DecodeEvent.RegistrationResult) return HandshakeDirective.Wait
+        val index = event.scaleIndex
+        if (!event.success || index == null) {
+            return HandshakeDirective.Abort("scale refused Register New User")
+        }
+        val credential = ScaleCredential(index, state.consentCode)
+        handshake = HandshakeState.AwaitingConsent(credential, registered = true)
+        return HandshakeDirective.Send(consentWrite(credential), ACK_TIMEOUT)
+    }
+
+    private fun onConsentEvent(
+        state: HandshakeState.AwaitingConsent,
+        event: DecodeEvent,
+    ): HandshakeDirective {
+        if (event !is DecodeEvent.ConsentResult) return HandshakeDirective.Wait
+        if (event.success) {
+            handshake = HandshakeState.Consented
+            return HandshakeDirective.Complete(state.credential.takeIf { state.registered })
+        }
+        if (state.registered) {
+            return HandshakeDirective.Abort("scale refused consent for a just-registered user")
+        }
+        // A stored credential the scale no longer honours — its user slot was
+        // deleted or reassigned. Registering again is the only recovery, and it
+        // is the branch a fixed initSequence could not express (ADR-007).
+        val freshCode = context?.freshConsentCode
+            ?: return HandshakeDirective.Abort("no consent code available to re-register")
+        handshake = HandshakeState.AwaitingRegistration(freshCode)
+        return HandshakeDirective.Send(registerWrite(freshCode), ACK_TIMEOUT)
+    }
+
+    override fun onNotification(characteristic: UUID, value: ByteArray): DecodeEvent =
+        when (characteristic) {
+            SigWeightProfile.USER_CONTROL_POINT -> decodeControlPoint(value)
+            SigWeightProfile.WEIGHT_MEASUREMENT -> decodeWeight(value)
+            SigWeightProfile.BODY_COMPOSITION_MEASUREMENT -> decodeBodyComposition(value)
+            // Unknown characteristic: log-and-skip, forward compatibility (E11).
+            else -> DecodeEvent.Ignored
+        }
+
+    private fun decodeControlPoint(value: ByteArray): DecodeEvent {
+        if (value.size < UCP_RESPONSE_MIN_LENGTH) {
+            return malformed("control point response too short", value.firstOrNull()?.toInt(), value.size)
+        }
+        val opcode = value[0].toInt() and BYTE_MASK
+        if (opcode != SigWeightProfile.UCP_RESPONSE_CODE) return DecodeEvent.Ignored
+
+        val requestOpcode = value[1].toInt() and BYTE_MASK
+        val success = (value[2].toInt() and BYTE_MASK) == SigWeightProfile.UCP_RESPONSE_SUCCESS
+        return when (requestOpcode) {
+            SigWeightProfile.UCP_REGISTER_NEW_USER -> DecodeEvent.RegistrationResult(
+                scaleIndex = if (success && value.size > UCP_INDEX_OFFSET) {
+                    value[UCP_INDEX_OFFSET].toInt() and BYTE_MASK
+                } else {
+                    null
+                },
+                success = success,
+            )
+
+            SigWeightProfile.UCP_CONSENT -> DecodeEvent.ConsentResult(success)
+            else -> DecodeEvent.Ignored
+        }
+    }
+
+    private fun decodeWeight(value: ByteArray): DecodeEvent {
+        if (value.size < WeightMeasurementParser.MIN_LENGTH) {
+            return malformed("weight frame too short", null, value.size)
+        }
+        val parsed = WeightMeasurementParser.parse(value)
+            ?: return malformed("weight frame truncated for its flags", null, value.size)
+        return correlator.onWeight(parsed)
+    }
+
+    private fun decodeBodyComposition(value: ByteArray): DecodeEvent {
+        if (value.size < BodyCompositionMeasurementParser.MIN_LENGTH) {
+            return malformed("body composition frame too short", null, value.size)
+        }
+        val parsed = BodyCompositionMeasurementParser.parse(value)
+            ?: return malformed("body composition frame truncated for its flags", null, value.size)
+        return correlator.onBodyComposition(parsed)
+    }
+
+    override fun flush(): DecodeEvent? = correlator.flush()
+
+    override fun teardownSequence(): List<GattOp> = emptyList()
+
+    /** 00-design.md §2.3 E9 / §3.3 diagnostics. */
+    val duplicateFramesSuppressed: Int get() = correlator.duplicateFramesSuppressed
+
+    /** 00-design.md §2.3 E18: frames dropped because correlation had closed. */
+    val unpairableFramesDropped: Int get() = correlator.unpairableFramesDropped
+
+    private fun malformed(reason: String, opcode: Int?, length: Int): DecodeEvent {
+        malformedCount++
+        // Diagnostics carry opcode and length only, never payload bytes, because
+        // those bytes are the user's body composition (00-design.md §8.8).
+        return DecodeEvent.Malformed(reason, opcode, length)
+    }
+
+    private fun registerWrite(consentCode: Int): GattOp.Write = GattOp.Write(
+        char = SigWeightProfile.USER_CONTROL_POINT,
+        bytes = byteArrayOf(
+            SigWeightProfile.UCP_REGISTER_NEW_USER.toByte(),
+            (consentCode and BYTE_MASK).toByte(),
+            ((consentCode shr BYTE_BITS) and BYTE_MASK).toByte(),
+        ),
+        expectAckWithin = ACK_TIMEOUT,
+    )
+
+    private fun consentWrite(credential: ScaleCredential): GattOp.Write = GattOp.Write(
+        char = SigWeightProfile.USER_CONTROL_POINT,
+        bytes = byteArrayOf(
+            SigWeightProfile.UCP_CONSENT.toByte(),
+            credential.scaleIndex.toByte(),
+            (credential.consentCode and BYTE_MASK).toByte(),
+            ((credential.consentCode shr BYTE_BITS) and BYTE_MASK).toByte(),
+        ),
+        expectAckWithin = ACK_TIMEOUT,
+    )
+
+    private sealed interface HandshakeState {
+        data object NotStarted : HandshakeState
+        data class AwaitingRegistration(val consentCode: Int) : HandshakeState
+        data class AwaitingConsent(
+            val credential: ScaleCredential,
+            val registered: Boolean,
+        ) : HandshakeState
+
+        data object Consented : HandshakeState
+    }
+
+    companion object {
+        const val DECODER_ID = "beurer-sanitas-sig"
+
+        /** Advertised name observed on the BF720 (docs/prp/03-hardware-validation.md). */
+        const val ADVERTISED_NAME_PREFIX = "BF"
+
+        /** 00-design.md §2.5: init ack timeout. */
+        val ACK_TIMEOUT: Duration = 3.seconds
+
+        private const val BYTE_MASK = 0xFF
+        private const val BYTE_BITS = 8
+        private const val UCP_RESPONSE_MIN_LENGTH = 3
+        private const val UCP_INDEX_OFFSET = 3
+    }
+}

@@ -1,8 +1,14 @@
 # Bascule — Phase 1 Plan
 
-Status: **complete, pending Phase 2 devil's advocate**
-Inputs: `00-design.md` (structure), `decisions.md` (ADR-001…006), `bascule-prp.md`
+Status: **complete; amended in Phase 2 against the devil's advocate findings**
+Inputs: `00-design.md` (structure), `decisions.md` (ADR-001…007), `bascule-prp.md`
 (requirements), `bascule-agent-prompt.md` (process)
+
+Sections amended in Phase 2, each marked in place: §1 (risk re-ranking, WP-08's
+rejection wording, the CI API-level gap), §2 (WP-00 added; WP-05, WP-19, WP-23,
+WP-25, WP-30 re-scoped), §2.1 (three counters added) and new §2.2 (Branch B's
+cost), §3.1, §3.4, §4.1, §4.3 (merge order), §5 (HW-25…HW-30), §6, §7. The
+per-objection record is `docs/prp/02-phase2-dispositions.md`.
 Decomposes: `00-design.md` §1.1 module graph, §2.3 failure edges E1–E16, §3.2
 delivery state machine, §4.3 versioned contract
 
@@ -99,7 +105,52 @@ The discriminating test used: *highest consequence if wrong × likelihood of bei
 wrong × fully retirable in this environment*. A risk that cannot be retired now
 does not benefit from being scheduled now.
 
-### RISK-1 — Stabilization detection → **WP-03 `StabilityDetector`**
+> ### Re-ranked in Phase 2 — the ranking below was written before the hardware evidence
+>
+> The verdict above is **superseded** (O-07). It was reached before
+> `03-hardware-validation.md` and ADR-007 existed, and the discriminating test
+> re-run with that evidence in hand inverts the top two:
+>
+> | | Was | Now |
+> |---|---|---|
+> | **RISK-1** | Stabilization detection (WP-03) | **UDS register/consent handshake (WP-07)** |
+> | **RISK-2** | Init handshake sequencing (WP-07) | **Stabilization detection (WP-03)**, demoted and rescheduled |
+> | **RISK-3** | Wake path (WP-08) | unchanged |
+>
+> **Why the handshake is RISK-1.** It scores high on all three factors.
+> *Consequence:* no consent, no data, ever — and the failure is silent, which is
+> the class §1 already calls the worst in the document. *Likelihood:* stateful,
+> conditional, persisted, with a first-use-versus-subsequent-use branch and a
+> third branch for a stored credential the scale no longer honours; it is
+> strictly harder than the fixed `List<GattOp>` WP-07 was originally scoped to
+> test, and the design has already been wrong twice about exactly this class of
+> timing/gating logic (self-review items 17 and 21). *Retirable now:* fully, in
+> CI, against `FakeGattTransport` — which is the point.
+>
+> **Why WP-03 is demoted, not deleted.** `03-hardware-validation.md` reports the
+> SIG Weight Measurement characteristic has no final/stabilized flag and simply
+> indicates once when the scale has a result, and `02-interface-revision.md` §5
+> concludes that **neither** branch of `00-design.md` §2.4's disjunction
+> describes this device: no flag to read, and no stream of intermediate frames to
+> settle over. WP-03's rationale changes from *live-path risk* to **portability
+> and fallback guard** — it is the detector a future Renpho or Xiaomi adapter
+> would need, and the guard if some other unit's flag proves unreliable. It keeps
+> its tests and its cheapness; it loses position 3, because building it first for
+> a device that cannot exercise it spends the plan's most valuable slot on
+> unreachable code. HW-08's pass criterion becomes **"confirm whether any
+> live/intermediate weight indications occur at all"** — the observation that
+> decides its fate, and the one that would restore it if the single capture
+> behind this demotion turns out to have been thin evidence for a negative claim.
+>
+> `02-interface-revision.md` §5 raised this re-ranking and deliberately declined
+> to act on it — "flagged for the lead rather than acted on unilaterally," since
+> it argued the plan's *ordering* was wrong rather than its content. The lead
+> authorised it as part of the Phase 2 reconciliation; this block is that
+> decision. The original reasoning is preserved unedited below, because it was
+> sound on the evidence available when it was written and a reader needs to see
+> what changed.
+
+### RISK-1 *(now RISK-2 — see the re-ranking above)* — Stabilization detection → **WP-03 `StabilityDetector`**
 
 - **Likelihood: high.** `00-design.md` §2.4 rests on an unvalidated disjunction —
   either the BF720 frame carries a final/stabilized flag, or it does not. Neither
@@ -121,20 +172,35 @@ does not benefit from being scheduled now.
   fully retired at position 3; its input fidelity is retired at WP-10 and
   confirmed at HW-08/HW-09.** That is still the earliest and highest-value
   position available to it.
-- **Scheduled at position 3** — the earliest position any behavioral package can
-  occupy, behind only the build skeleton and the domain types.
+- ~~**Scheduled at position 3**~~ — **rescheduled.** WP-03 moves out of the
+  strictly-ordered prefix entirely (§4.3) and merges in the decode lane after
+  WP-10, where a decoder that actually emits `Live` could exercise it. Its tests
+  are unchanged.
 
-### RISK-2 — Init handshake sequencing/logic → **WP-07**
+### RISK-2 *(now RISK-1)* — UDS register/consent handshake → **WP-07**
 
-Re-scoped explicitly to **sequencing and logic, not byte values**. The byte
-values are `SCALE`-bucket and unknowable now; the logic around them is fully
-`CI`-verifiable and is where the design can be wrong today:
+Originally scoped as "init handshake sequencing/logic" against
+`00-design.md` §2.6's fixed `initSequence(): List<GattOp>`. **ADR-007 retired
+that model**, and this package is re-scoped to what the handshake actually is: a
+stateful two-step User Data Service exchange over the User Control Point
+(`0x2A9F`), driven through `beginHandshake`/`onHandshakeEvent` per
+`02-interface-revision.md` §1. Still **sequencing and logic, not byte values** —
+except that the byte values are no longer `SCALE`-bucket either, since the
+capture confirmed them. What is `CI`-verifiable, and is where the design can be
+wrong today:
 
-- does `initSequence()` emit its `GattOp`s in the required order, and only after
-  discovery confirms the required characteristics exist;
-- does the session **refuse to subscribe before `InitAcknowledged`** — E6 is
-  explicit ("Do not proceed to subscribe"), and this gate exists in prose only
-  until a test enforces it;
+- does the decoder open with **Register** when no credential is stored and
+  **Consent** when one is, and does it fall back to re-registering when the scale
+  rejects a stored credential — the three branches a fixed list could not express;
+- is the `scaleIndex` the scale assigns in its *reply* to Register carried into
+  the Consent write, and **persisted** to `ConsentStore` (WP-19's neighbour), so
+  the next weigh-in does not burn a second profile slot;
+- does the session **refuse to subscribe before `ConsentResult(success = true)`**
+  — E6 is explicit ("Do not proceed to subscribe"), and post-ADR-007 this gate is
+  what keeps a lost consent from presenting as 45 s of silence (E7, O-11). It
+  exists in prose only until a test enforces it;
+- is a refused registration surfaced as **E19** with its counter and message,
+  rather than as a handshake that never completes;
 - does the 3 s ack timeout × 2 retries ladder actually fit inside the §2.5
   budgets alongside the connect phase;
 - what happens when an ack-shaped notification arrives on an *unexpected*
@@ -149,8 +215,10 @@ values are `SCALE`-bucket and unknowable now; the logic around them is fully
 - **Consequence: total silent failure.** No handshake means no notification
   stream means the app never produces a reading, in a way that looks like "the
   scale didn't work."
-- **Retirable now: fully**, against `FakeScaleGatt`.
+- **Retirable now: fully**, against `FakeGattTransport`.
 - **Scheduled at position 7**, the earliest position it can occupy — see §1.1.
+  It is now the **first** behavioural package in the prefix, since WP-03 has
+  moved out of it.
 
 ### Rejected from the top two — the wake path (ADR-004) → **WP-08, RISK-3**
 
@@ -169,24 +237,54 @@ The package splits cleanly into two halves with different buckets:
 | `ScaleScanner.arm()` registers a `ScanFilter` + `PendingIntent` scan, and the OS actually delivers that broadcast on a matching advertisement | Whether the wake trigger fires at all | **PHONE** — needs a real BLE stack |
 
 Because the second half cannot be retired here at any scheduling position,
-scheduling the package first would not buy what risk-first scheduling is for. The
-first half — the ADR-004 claim — *is* retired in CI at position 8, which is early
-enough that only WP-01…07 would need revisiting if it fails, and ADR-004 already
-notes the blast radius is contained: `GattSession` is host-agnostic and
-`ScaleSessionWorker` is a thin host over it.
+scheduling the package first would not buy what risk-first scheduling is for.
+
+**What position 8 actually retires, stated honestly (O-09).** The demotion
+stands — its reasoning survives — but the sentence that justified it did not.
+The CI tests (`ScaleSessionWorkerTest.setForegroundSucceedsOnApi31`,
+`...setForegroundSucceedsOnApi34WithConnectedDeviceType`) run a worker through
+`TestListenableWorkerBuilder`, which invokes it in isolation: it does not go
+through WorkManager's real expedited scheduling and is not subject to the
+platform's foreground-service background-start restrictions. Those restrictions
+are what ADR-004's claim is *about*. So position 8 retires the **plumbing** —
+does the receiver enqueue, does the worker call `setForeground` with the right
+type — and **not the platform-permission claim**, which is retired on a real
+device at **HW-01 / WP-29**. Describing the reversal risk as "retired at position
+8" was circular: WP-08 was demoted because its risky half was retired early, and
+its risky half is not retired early. The demotion is still right for a different
+reason — ADR-004's path (expedited work + `setForeground`) is documented Android
+practice rather than a novel bet, so its *likelihood* of being wrong is low even
+though its consequence and reversal cost are high.
+
+**The CI emulator matrix does not cover the only device that exists — tracked,
+not fixed here (O-09b).** WP-01 pins CI to API 26 / 31 / 34;
+`03-hardware-validation.md` names the test host as a Pixel 9 Pro Fold on
+**Android 17 (API 37)**. Every foreground-service, expedited-work and
+background-start restriction in this design is API-level-gated and each recent
+release has tightened them, so green on 26/31/34 is not evidence about 37.
+Re-imaging CI is **not** the fix and is not attempted: emulator system images lag
+the newest release, and WP-01's matrix should add the highest image actually
+available rather than chase one that may not exist. The gap is closed by running
+the wake path on the real API 37 device early — checklist row **HW-28** — before
+twenty more packages are built on ADR-004.
 
 **RISK-1 and RISK-2 are both fully retired, in CI, before any of the 23 packages
-downstream of them are written. RISK-3's retirable half is retired immediately
-after.** That is the strongest ordering available under the constraint.
+downstream of them are written. RISK-3's *plumbing* half is retired immediately
+after; its platform half waits for HW-01/HW-28.** That is the strongest ordering
+available under the constraint.
 
-### 1.1 Why RISK-2 is at position 7 and not position 4
+### 1.1 Why the handshake package is at position 7 and not position 4
+
+*(Written when the handshake was RISK-2; the reasoning is unchanged now that it
+is RISK-1 — if anything it is sharper, since position 7 is now the **first**
+behavioural position in the prefix rather than the second.)*
 
 WP-06 (`GattSession` connect/discover/teardown) is a mechanical prerequisite: the
 handshake gate is a transition *within* the session state machine, so a minimal
 session must exist to gate. WP-06 is deliberately scoped down to "reach
 `DISCOVERING` and tear down cleanly" — E1–E4, E12, E15 — and excludes everything
-after `HANDSHAKING`, precisely so RISK-2 lands as early as it physically can.
-WP-04 (`FakeScaleGatt`) and WP-05 (constants + fixtures) are likewise
+after `HANDSHAKING`, precisely so the handshake lands as early as it physically
+can. WP-04 (`FakeGattTransport`) and WP-05 (constants + fixtures) are likewise
 irreducible: there is nothing to drive the handshake with otherwise.
 
 Positions 1, 2, 4, 5, 6 are enablers with no behavioral risk of their own. They
@@ -204,6 +302,57 @@ merge. Every package lists the diagnostics counter it owns, if any (see §2.1).
 Column key — **B** = bucket (`CI` / `PHONE` / `SCALE`).
 
 ### Track A — Foundation
+
+---
+
+#### WP-00 — Interface revision per ADR-007 · **B: CI** · **landed in Phase 2**
+
+**Recorded retroactively.** This package did not exist when the plan was written;
+it is the work `02-interface-revision.md` performed, and it is entered here
+because §4.3's merge order otherwise builds the known-stale interface at position
+2 and rewrites it at 5, 7, 9 and 10 (O-05f). Nothing else merges ahead of it.
+
+**Files:** `ble/decoders/ScaleDecoder.kt`, `ble/session/DecodeEvent.kt`,
+`ble/session/GattOp.kt`, `ble/session/GattTransport.kt`,
+`ble/decoders/MeasurementCorrelator.kt`, `ble/session/ConsentStore.kt`,
+`ble/session/EncryptedConsentStore.kt`, `ble/ScaleReading.kt`,
+`data/ReadingEntity.kt`, `ble/decoders/SigWeightProfile.kt`
+
+**Does:** what ADR-007 recorded as required and deliberately did not design.
+
+- **Handshake as a state machine, not a list.** `initSequence(): List<GattOp>` →
+  `beginHandshake(discovered, HandshakeContext)` / `onHandshakeEvent(event)`
+  returning `HandshakeDirective`. A list cannot express the three branch points
+  the real handshake has, and the Consent write's operand is the `scaleIndex` the
+  scale returns in its reply to Register — it literally cannot be in a list built
+  beforehand.
+- **`DecodeEvent`:** `InitAcknowledged` **replaced** (not extended) by
+  `RegistrationResult(scaleIndex, success)` and `ConsentResult(success)`. `Live`
+  is kept though the BF720 never emits it — it is correct-but-unused rather than
+  wrong, and the pluggable-decoder goal needs it.
+- **Transport vocabulary:** `GattOp.EnableIndications` and
+  `GattTransport.enableIndications` added alongside the notify pair, and
+  `TransportEvent.SubscriptionEnabled(char, kind, status)` replaces
+  `NotificationsEnabled`. The BF720's `2A9D`/`2A9C`/`2A9F` are **indicate**, a
+  different CCCD bit; a notify-bit write succeeds and then produces silence,
+  which is the symptom `03-hardware-validation.md` already spent one hardware
+  session chasing (O-04).
+- **`MeasurementCorrelator`:** one weigh-in, one `Stable`. Owns E9's in-session
+  latch, now "one emission per session, full stop" (O-03).
+- **`ConsentStore`/`EncryptedConsentStore`:** the ADR-007 credential, stored the
+  way the ground rule requires, with `GattSession` depending on the interface.
+- **`ScaleReading`/`ReadingEntity`:** the field set the captured frame forces —
+  `impedanceOhms`, `softLeanMassKg`, `bodyWaterMassKg`, `muscleMassKg`,
+  `fatFreeMassKg`, `heightM`, `scaleTimestampMillis` added; `bodyWaterPct` and
+  `bmr` become persistence-boundary derivations; `boneMassKg` and `amr` are
+  retained-but-never-populated (O-01).
+
+**Tests:** `BeurerDecoderCaptureTest.*`, `BeurerHandshakeTest.*`,
+`FakeGattTransportTest.*`, `DedupPolicyTest.*`,
+`ScaleReadingTest.hasNoIsStableField` (moved from WP-02 with the file), and the
+deliberately-red `ScaleSessionContractTest` (`02-ci-notes.md`).
+
+**Counter:** `unpairableFramesDropped` (E18).
 
 ---
 
@@ -235,14 +384,23 @@ assemble, `testDebugUnitTest`, `connectedDebugAndroidTest` on an emulator matrix
 
 #### WP-02 — Core domain types + diagnostics interface · **B: CI**
 
-**Files:** `ble/ScaleReading.kt`, `ble/decoders/ScaleDecoder.kt` (interface only),
-`ble/session/SessionOutcome.kt`, `ble/session/GattOp.kt`, `ble/session/DecodeEvent.kt`,
-`network/ReadingField.kt`, `network/ContractVersion.kt`, `data/WeightUnit.kt`,
+**Files:** `ble/session/SessionOutcome.kt`, `network/ReadingField.kt`,
+`network/ContractVersion.kt`, `data/WeightUnit.kt`,
 `diagnostics/DiagnosticsCounters.kt`, `diagnostics/InMemoryDiagnosticsCounters.kt`
 
-**Does:** every pure type from `00-design.md` §2.6, §2.7, §4.3. No Android
-imports — this is a plain Kotlin source set so it is JVM-testable. `ScaleReading`
-has **no** `isStable` field (§2.7). `WeightUnit` conversion is kg-canonical.
+> **Re-scoped by the insertion of WP-00 (O-05f).** This package originally also
+> owned `ScaleReading.kt`, `ScaleDecoder.kt`, `GattOp.kt` and `DecodeEvent.kt` —
+> the four files ADR-007 requires revised, which is exactly why merging it at
+> position 2 and rewriting it at 5, 7, 9 and 10 was the sequencing defect O-05
+> names. **WP-00 owns those four now.** What is left here is the residue: the
+> pure types WP-00 did not touch. Leaving the old file list standing would
+> recreate O-05f's defect inside its own fix — two packages claiming the same
+> files, one of them stale.
+
+**Does:** the remaining pure types from `00-design.md` §4.3 and §2.1. No Android
+imports — this is a plain Kotlin source set so it is JVM-testable. `WeightUnit`
+conversion is kg-canonical. (`ScaleReading`'s no-`isStable` invariant moves to
+WP-00 along with the file.)
 
 Also introduces `DiagnosticsCounters` as an **interface** here, at position 2, so
 every later package increments through it rather than inventing its own field
@@ -254,8 +412,10 @@ is WP-26.
 - `WeightUnitTest.lbToKgMatchesKnownPairs`
 - `ContractVersionTest.v1SupportsWeightOnly`
 - `ContractVersionTest.v2SupportsAllReadingFields`
-- `ScaleReadingTest.hasNoIsStableField` (reflection guard on §2.7's invariant)
 - `InMemoryDiagnosticsCountersTest.incrementIsAdditivePerKey`
+
+(`ScaleReadingTest.hasNoIsStableField` — the reflection guard on §2.7's invariant
+— moves to WP-00 with the file.)
 
 **Counter:** owns the counter surface definition.
 
@@ -265,7 +425,7 @@ is WP-26.
 
 ---
 
-#### WP-03 — `StabilityDetector` · **B: CI** · ⚠ **RISK-1**
+#### WP-03 — `StabilityDetector` · **B: CI** · **RISK-2** *(was RISK-1; demoted to a portability/fallback guard and moved out of the strict prefix — §1, §4.3)*
 
 **Files:** `ble/decoders/StabilityDetector.kt`, `ble/decoders/WeightSample.kt`
 
@@ -336,47 +496,68 @@ translates callbacks to `TransportEvent` and nothing else, so that
 
 ---
 
-#### WP-05 — `BeurerProtocol` constants (unconfirmed) + fixture corpus · **B: CI**
+#### WP-05 — `SigWeightProfile` constants (**confirmed**) + fixture corpus · **B: CI**
 
-**Files:** `ble/decoders/BeurerProtocol.kt`,
+**Files:** `ble/decoders/SigWeightProfile.kt`,
 `app/src/test/resources/fixtures/beurer/*.scale` (the §3.3 corpus),
 `docs/prp/constants-provenance.md`
 
-**Does:** fills in `00-design.md` §9's symbolic table with values sourced from
-**openScale's public Beurer/Sanitas wiki page**
-(`github.com/oliexdev/openScale/wiki/Beurer-Sanitas`) and the corresponding
-handler, reimplemented from protocol description per ADR-002 — no source copied.
+> **Re-sourced and re-costed in Phase 2 (O-05b).** This package originally
+> populated `00-design.md` §9's symbolic table — `BEURER_SERVICE_UUID`,
+> `INIT_SEQUENCE`, `OPCODE_*`, `WEIGHT_SCALE_FACTOR` — from **openScale's
+> Beurer/Sanitas wiki page**. That page documents the older proprietary opcode
+> protocol used by *other* members of the family, and ADR-007 established the
+> BF720 does not speak it. Those symbols have no referent and are not
+> implemented. Twenty-four downstream packages were scheduled to go green against
+> a constants file built from the wrong source.
 
-Every constant carries the ADR-002 provenance comment plus an explicit
-unconfirmed marker:
+**Does:** implements `SigWeightProfile.kt` — the SIG-assigned 16-bit service and
+characteristic UUIDs (`0x181D`, `0x181B`, `0x181C`, `0x1805`, `2A9D`, `2A9C`,
+`2A9F`, `2A2B`), the User Control Point opcodes, and the spec-defined
+resolutions (`WEIGHT_KG_PER_LSB = 0.005`, and the body-comp multipliers). Sourced
+from the **Bluetooth SIG specifications** (Weight Scale Service / Weight
+Measurement, Body Composition Service / Body Composition Measurement, User Data
+Service / User Control Point, and Assigned Numbers for the 16-bit allocations and
+the Base UUID), cross-checked against openScale's
+`StandardWeightProfileHandler.kt` and `StandardBeurerSanitasHandler.kt`,
+reimplemented from protocol understanding per ADR-002 — no source copied.
 
-```kotlin
-// Provenance: openScale wiki, Beurer/Sanitas page
-// (github.com/oliexdev/openScale/wiki/Beurer-Sanitas), cross-checked against the
-// Beurer handler in openScale source. Reimplemented from protocol description;
-// no source copied.
-// UNCONFIRMED — pending live scan (WP-30 / HW-03). Confirmation date appended here.
-internal val BEURER_SERVICE_UUID: UUID = ...
-```
+**These constants are `CONFIRMED`, not `UNCONFIRMED`.** §0.1's "constants land
+early as unconfirmed" sequencing no longer applies to this file: the 2026-08-22
+capture decoded a complete frame with an internal consistency check, so the
+values are evidence rather than a plausible guess. The confirmation date and the
+device MAC are in the file header. Every constant still carries its ADR-002
+provenance comment, and a constant with none remains a review blocker (rule 3) —
+but a constant *falsely* marked `UNCONFIRMED` is now the failure mode to watch,
+because the marker would stop carrying information in both directions.
 
-A constant with **no** provenance comment is a review blocker (ADR-002 rule 3),
-and in this package a constant with no `UNCONFIRMED` marker and no confirmation
-date is equally a blocker — the marker is what stops an unverified value from
-silently reading as verified in Phase 4.
+**Re-costed:** the fixture corpus is the part of this package that grew. §3.4's
+`.scale` fixtures were written around `INIT_SEQ[0]`, `NOTIFY_CHAR`, `WRITE_CHAR`
+and `@onEnableNotify`, none of which map onto a UDS register/consent exchange
+over `2A9F` followed by indications on two separate characteristics. §3.2's
+"symbolic names mean a corrected constant propagates automatically" holds for
+**values**, not for a changed **shape**, and the shape changed. `happy_path`,
+`no_init_ack`, `late_init_ack`, `unstable_then_stable` and
+`second_user_index` need rewriting rather than re-valuing — and
+`second_user_index.scale` is **retired outright** under O-03.
 
 `constants-provenance.md` is the tracking table: symbol → value → source →
-confirmed date (blank until WP-30). It is the artifact WP-30 fills in and WP-31
-diffs against.
+confirmed date. For the standard-profile constants the date is **2026-08-22**,
+filled in now rather than at WP-30; WP-30 confirms the remainder and WP-31 diffs
+against it.
 
 **Tests:**
-- `BeurerProtocolTest.everyConstantHasAProvenanceComment` — a source-scanning
+- `SigWeightProfileTest.everyConstantHasAProvenanceComment` — a source-scanning
   test, so ADR-002 rule 3 is machine-enforced rather than review-enforced. It
-  scans **both** `BeurerProtocol.kt` and `FrameBounds.kt` (WP-09), because
-  ADR-002 rule 1 covers byte offsets and magic lengths too and those live in the
-  latter. The file list is a constant in the test; adding a constants file
-  without adding it here is itself a review blocker.
-- `BeurerProtocolTest.everyUnconfirmedConstantIsMarkedOrDated`
-- `BeurerProtocolTest.uuidsAreDistinct`
+  scans **both** `SigWeightProfile.kt` and the parser files carrying byte offsets
+  and magic lengths (`WeightMeasurement.kt`,
+  `BodyCompositionMeasurement.kt`), because ADR-002 rule 1 covers those too. The
+  file list is a constant in the test; adding a constants file without adding it
+  here is itself a review blocker.
+- `SigWeightProfileTest.everyConstantIsDatedOrMarkedUnconfirmed` — inverted from
+  the original: the standard-profile values are confirmed, so the failure this
+  guards is a stale `UNCONFIRMED` marker, not a missing one.
+- `SigWeightProfileTest.uuidsAreDistinct`
 - `FixtureCorpusTest.everyFixtureParses`
 - `FixtureCorpusTest.corpusCoversEveryNamedScenario` (asserts the §3.3 list by name)
 
@@ -422,36 +603,47 @@ constants so the arithmetic is testable in one place.
 
 ---
 
-#### WP-07 — Init handshake sequencing + E6 · **B: CI** · ⚠ **RISK-2**
+#### WP-07 — UDS register/consent handshake + E6, E19 · **B: CI** · ⚠ **RISK-1** *(was RISK-2; re-scoped from the retired `initSequence()` model — §1)*
 
-**Files:** `ble/decoders/BeurerDecoder.kt` (`initSequence()`, `InitAcknowledged`
-recognition only), `ble/session/GattSession.kt` (`HANDSHAKING` → `SUBSCRIBED`)
+**Files:** `ble/session/GattSession.kt` (`HANDSHAKING` → `SUBSCRIBED`, driving
+`beginHandshake`/`onHandshakeEvent` and persisting through `ConsentStore`). The
+decoder half — `BeurerDecoder`'s three-branch handshake state machine and the
+User Control Point decode — landed in **WP-00** and is already green
+(`BeurerHandshakeTest`); this package is the session that drives it.
 
-**Does:** RISK-2 as scoped in §1. `initSequence(discovered)` returns the ordered
-`List<GattOp>`; the session executes them and gates `SUBSCRIBED` on
-`DecodeEvent.InitAcknowledged`. **E6**: 3 s ack timeout, re-issue the init write,
-max 2 retries, then `TEARDOWN` with `HandshakeFailed` — and explicitly **do not
-subscribe**, because without init the BF720 does not stream measurements and
-continuing burns the connection window.
+**Does:** RISK-1 as scoped in §1. Executes the `HandshakeDirective` a decoder
+returns, one step per acknowledging indication, and **gates `SUBSCRIBED` on
+`DecodeEvent.ConsentResult(success = true)`** — not on an undifferentiated ack,
+which no longer exists. **Writes Current Time (`2A2B`) as the opening step**, per
+the decision recorded in `00-design.md` §4.4: the scale timestamps its
+measurement frames from it, and an unset RTC makes `scaleTimestampMillis`
+garbage. **E6**: 3 s ack timeout per write, re-issue, max 2 retries, then
+`TEARDOWN` with `HandshakeFailed` — and explicitly **do not subscribe**, because
+an unconsented subscriber receives nothing at all (ADR-007) and continuing burns
+the connection window for 45 s before reporting the wrong edge. **E19**: a
+refused Register is `HandshakeFailed` with the `registrationRejected` counter and
+the profiles-full message, never a silent stall.
 
 **Tests:**
-- `BeurerDecoderInitTest.initSequenceOrderIsDeterministic`
-- `BeurerDecoderInitTest.initSequenceRequiresBothCharacteristicsPresent`
-- `BeurerDecoderInitTest.ackFrameProducesInitAcknowledged`
-- `BeurerDecoderInitTest.nonAckFrameDuringHandshakeIsIgnoredNotMalformed`
-- `BeurerDecoderInitTest.ackOnUnexpectedCharacteristicIsNotAnAck`
-- `GattSessionHandshakeTest.doesNotSubscribeBeforeInitAcknowledged` ← **the E6
-  gate that exists in prose only until this test enforces it**
+- `GattSessionHandshakeTest.writesCurrentTimeBeforeRegisterOrConsent`
+- `GattSessionHandshakeTest.registersWhenNoCredentialIsStored`
+- `GattSessionHandshakeTest.sendsConsentDirectlyWhenACredentialIsStored`
+- `GattSessionHandshakeTest.rejectedStoredCredentialFallsBackToRegistering`
+- `GattSessionHandshakeTest.assignedScaleIndexIsPersistedToConsentStore` ← the
+  one that stops every weigh-in burning a profile slot (O-08)
+- `GattSessionHandshakeTest.doesNotSubscribeBeforeConsentIsGranted` ← **the E6
+  gate that exists in prose only until this test enforces it; O-11's item 1**
+- `GattSessionHandshakeTest.refusedRegistrationYieldsHandshakeFailedAndCounts` (E19)
 - `GattSessionHandshakeTest.missingAckReissuesWriteAfterThreeSeconds`
 - `GattSessionHandshakeTest.reissuesAtMostTwiceThenTearsDown`
-- `GattSessionHandshakeTest.handshakeFailureOutcomeIsHandshakeFailed`
 - `GattSessionHandshakeTest.lateAckAfterReissueDoesNotDoubleSubscribe`
 - `GattSessionHandshakeTest.duplicateAckIsIdempotent`
+- `GattSessionHandshakeTest.unrelatedIndicationMidHandshakeIsAWaitNotAFailure`
 - `GattSessionHandshakeTest.handshakeFailureRecordsOpcodeAndLengthOnly` (§8.8)
 - `SessionBudgetTest.handshakeLadderFitsWithinHardCeilingAfterConnectPhase`
 
-**Counter:** none.
-**Hardware checklist:** HW-04, HW-05.
+**Counter:** `registrationRejected` (E19).
+**Hardware checklist:** HW-04, HW-05, HW-26, HW-27.
 
 ---
 
@@ -536,17 +728,25 @@ failed field bounds → `Malformed`, `malformedCount++`; at 5, abort with
 
 ---
 
-#### WP-10 — Measurement phase: E7, E8, E9 + `EMITTED` persist point · **B: CI**
+#### WP-10 — Measurement phase: E7, E8, E9, E17, E18 + `EMITTED` persist point · **B: CI**
 
 **Files:** `ble/session/GattSession.kt` (`SUBSCRIBED` → `MEASURING` → `EMITTED`),
 `ble/session/SessionOutcome.kt`
 
-**Does:** wires WP-03's detector into the decoder's `Stable` emission. **E7**: no
-frame within 45 s → `NoMeasurement`. **E8**: disconnect while `MEASURING` →
-partial data **discarded, never persisted**; exactly one reconnect within a 5 s
-window. **E9**: in-session latch, at most one emission per `userIndex`, at most 2
-distinct indexes. Establishes §2.1's load-bearing rule: **the Room write completes
-at `EMITTED`, synchronously, before `disconnect()` is requested.**
+**Does:** consumes the decoder's `Stable` emission — which, post-WP-00, is the
+**correlated pair**, not a single frame. **E7**: no frame within 45 s →
+`NoMeasurement`, counter `noMeasurement`, 3-session streak (O-11). **E8**:
+disconnect while `MEASURING` → partial data **discarded, never persisted**;
+exactly one reconnect within a 5 s window. **E9**: in-session latch, **one
+emission per session** — the latch itself lives in `MeasurementCorrelator`
+(WP-00); this package proves the session honours it. **E17**: the 4 s
+body-composition correlation timer, whose expiry calls `ScaleDecoder.flush()` and
+**persists a weight-only reading rather than discarding it** — this is the timer
+the design had no name for, and it is why `EMITTED` is defined on the pair.
+**E18**: frames after correlation closes are counted, not attached. Establishes
+§2.1's load-bearing rule: **the Room write completes at `EMITTED`, synchronously,
+before `disconnect()` is requested** — and, since `EMITTED` is not reached until
+correlation closes, no row is ever written partial and amended later (§8.1).
 
 **Tests:**
 - `GattSessionMeasureTest.noNotificationWithinFortyFiveSecondsYieldsNoMeasurement` (E7)
@@ -555,16 +755,23 @@ at `EMITTED`, synchronously, before `disconnect()` is requested.**
 - `GattSessionMeasureTest.disconnectBeforeStabilityReconnectsExactlyOnce` (E8)
 - `GattSessionMeasureTest.reconnectWindowClosesAfterFiveSeconds` (E8)
 - `GattSessionMeasureTest.secondReconnectFailureYieldsMissedDropped` (E8)
+- `GattSessionMeasureTest.noNotificationWithinFortyFiveSecondsIncrementsNoMeasurement` (E7)
+- `GattSessionMeasureTest.thirdConsecutiveNoMeasurementRaisesNotification` (E7 streak)
+- `GattSessionMeasureTest.starvingConnectIsCountedAsNoMeasurement` (O-09c fixture)
 - `GattSessionMeasureTest.duplicateStableForSameUserIndexIsLatched` (E9)
-- `GattSessionMeasureTest.secondDistinctUserIndexIsEmitted` (E9)
-- `GattSessionMeasureTest.thirdDistinctUserIndexIsDropped` (E9)
+- ~~`secondDistinctUserIndexIsEmitted`~~, ~~`thirdDistinctUserIndexIsDropped`~~ —
+  **retired with the `EMITTED → MEASURING` edge (O-03)**; replaced by:
+- `GattSessionMeasureTest.secondDistinctWeightClosesCorrelationAndDropsLaterFrames` (E18)
+- `GattSessionMeasureTest.missingBodyCompositionFlushesWeightOnlyAfterFourSeconds` (E17)
+- `GattSessionMeasureTest.weightOnlyFlushIsPersistedNotDiscarded` (E17 — the
+  action that distinguishes this edge from E8)
 - `GattSessionMeasureTest.persistCompletesBeforeDisconnectIsRequested` ← §2.1's
   write-ahead rule, asserted on call ordering
 - `GattSessionMeasureTest.postEmissionIdleTearsDownAfterTenSeconds`
 - `GattSessionMeasureTest.hardCeilingTearsDownAtNinetySeconds`
 
-**Counter:** `duplicateStableSuppressed` (E9).
-**Hardware checklist:** HW-07, HW-13, HW-15, HW-20.
+**Counter:** `duplicateStableSuppressed` (E9), `noMeasurement` (E7).
+**Hardware checklist:** HW-07, HW-13, HW-15, HW-20, HW-25.
 
 ---
 
@@ -632,14 +839,30 @@ no transcription step. Off by default behind a debug-build-only toggle.
 **Files:** `data/ReadingEntity.kt`, `data/ReadingDao.kt`, `data/BasculeDatabase.kt`,
 `data/Converters.kt`, `app/schemas/**/1.json`
 
-**Does:** `00-design.md` §3.1 verbatim, all 18 columns including the ▲ additions
+**Does:** `00-design.md` §3.1, all columns including the ▲ additions
 (`retryEpochMillis`, `lastErrorClass`, `contractVersionAtDelivery`,
-`remoteDuplicate`, `source`, `displayUnit`). `Set<ReadingField>` ↔ sorted CSV
-converter. Schema version 1, exported, no migration.
-`fallbackToDestructiveMigration` is **never** enabled (§8.12).
+`remoteDuplicate`, `source`, `displayUnit`) and the three the hardware forced —
+`impedanceOhms`, `softLeanMassKg` (O-01) and `scaleTimestampMillis` (O-10). All
+three landed in WP-00 and are in the exported schema already. **No
+`registrationEpoch` column** — decided and recorded in §3.1, with the revisit
+trigger named. `Set<ReadingField>` ↔ sorted CSV converter. Schema version 1,
+exported, no migration. `fallbackToDestructiveMigration` is **never** enabled
+(§8.12).
+
+`ReadingMapper` is the other half of this package and is still a Phase 2 stub: it
+owns the two unit conversions `02-interface-revision.md` §3 deliberately kept out
+of the decoder — basal metabolism kJ → the `bmr` column's kcal, and body water
+**mass** → the `bodyWaterPct` column, which needs the weight to divide by. The
+DA's quiet point in O-01 was that this derivation is lossy and was specified
+nowhere; it is now specified here and located there.
 
 **Tests:**
 - `ReadingDaoTest.insertAndReadBackEveryColumn`
+- `ReadingDaoTest.scaleTimestampSurvivesTheRoundTripAndMayBeNull` (O-10)
+- `ReadingMapperTest.bodyWaterMassIsConvertedToAPercentageOfTheReadingsWeight`
+- `ReadingMapperTest.basalMetabolismKilojoulesAreConvertedToKilocalories`
+- `ReadingMapperTest.fieldsTheSigProfileDoesNotDefineMapToNull`
+  (`boneMassKg`, `amr` — not "the scale didn't report it this time")
 - `ReadingDaoTest.drainQuerySelectsOnlyPendingStatus` ← ADR-006's structural
   guarantee: asserts `HELD_CONFIRM`, `DECLINED`, `BLOCKED_AUTH`,
   `FAILED_PERMANENT`, `SENT` rows are all absent from the drain result
@@ -662,14 +885,36 @@ converter. Schema version 1, exported, no migration.
 their rationale comments. Compares against **all** rows in the window regardless
 of status, **except `DECLINED`**.
 
+**Also owns the two gaps this package's own tests exposed in Phase 2:**
+
+1. **The exact weight boundary is not decidable as written (§3.3).** `<=` on
+   `Double`s makes `90.20 - 90.00` = `0.2000000000000028`, so the nominal 0.20 kg
+   boundary case is *not* a duplicate. Fix by comparing scaled integers — the way
+   `MeasurementCorrelator`'s frame identity already does, and for the same reason
+   — or by restating the rule. Until then `DedupPolicyTest` brackets the
+   tolerance and says why.
+2. **The corpus filter lives in two places** — `DedupPolicy.isDuplicate` (Kotlin)
+   and `ReadingDao.dedupCandidates` (SQL `status != 'DECLINED'`). The Phase 2
+   membership tests cover the Kotlin half only; the SQL half needs a Room
+   instrumented test (O-06).
+
 **Tests:**
-- `DedupPolicyTest.weightBoundaryAtExactlyTwoHundredGrams` (0.20 vs 0.21 kg)
+- `DedupPolicyTest.everyStatusHasAnExplicitCorpusMembershipDecision` ← **O-06.**
+  Asserts the membership map covers exactly `ReadingStatus.entries`, so adding a
+  seventh status fails a test instead of silently joining the corpus. Written in
+  Phase 2; the §3.3 denylist is fail-open and this is what closes it.
+- `DedupPolicyTest.dedupCorpusMembershipIsExplicitPerStatus` ← O-06, parameterised
+  over all six. Written in Phase 2.
+- `DedupPolicyTest.weightBoundaryAtExactlyTwoHundredGrams` (0.20 vs 0.21 kg) —
+  **blocked on gap 1 above**; `weightToleranceBracketsTwoHundredGrams` stands in
 - `DedupPolicyTest.timeBoundaryAtExactlyFiveMinutes` (300 000 vs 300 001 ms)
 - `DedupPolicyTest.nullUserIndexMatchesNullUserIndex` (§7 Branch B)
 - `DedupPolicyTest.differentUserIndexIsNeverADuplicate`
 - `DedupPolicyTest.manualNeverDedupsAgainstScale` (`source` clause)
 - `DedupPolicyTest.pendingRowIsAValidDuplicateTarget` ← self-review item 11
 - `DedupPolicyTest.declinedRowIsExcludedFromCorpus` ← self-review item 23
+- `DedupPolicyTest.dedupCandidatesQueryExcludesDeclined` ← the SQL half of the
+  same invariant (Room instrumented)
 - `DedupPolicyTest.suppressionIncrementsCounterAndDoesNotInsert`
 
 **Counter:** `duplicatesSuppressed` (§3.3).
@@ -828,6 +1073,22 @@ Never returns the token for display — exposes `isSet(): Boolean` for the UI.
 - `AuthTokenStoreTest.clearRemovesToken`
 - `AuthTokenStoreTest.toStringNeverContainsTheToken`
 
+**Also owns the second credential's instrumented tests (O-08.1).** ADR-007's
+consent code is a shared secret with the scale in the same sense the token is one
+with VitalForge, and `EncryptedConsentStore` (implemented in WP-00) needs the
+mirror of the set above — the file-bytes test in particular, since that is the
+one that actually proves the ground rule rather than restating it:
+
+- `EncryptedConsentStoreTest.storesAndRetrievesCredentialPerDeviceAddress`
+- `EncryptedConsentStoreTest.underlyingPrefsFileDoesNotContainPlaintextConsentCode`
+- `EncryptedConsentStoreTest.newConsentCodeUsesACryptographicRng`
+- `EncryptedConsentStoreTest.clearRemovesTheMappingForOneDeviceOnly`
+
+These are instrumented and therefore unwritten in Phase 2: `EncryptedSharedPreferences`
+needs a real keystore, and no emulator was started (`02-ci-notes.md`). The JVM
+lane substitutes an in-memory `ConsentStore`, which proves the interface and
+proves nothing about the encryption.
+
 **Counter:** none.
 
 ---
@@ -901,6 +1162,15 @@ tested, and gated off. Enabling it is a Phase-5+ decision, not a merge decision.
 - `ReplayEligibilityTest.fullyDeliveredRowIsNotEligible`
 - `ReplayEligibilityTest.remoteDuplicateRowIsNeverEligible` ← self-review item 20:
   the clause without which the v2 upgrade bulk-injects every Atlas-won reading
+- `ReplayEligibilityTest.onlySentRowsAreEligible` ← **O-06.1, tracked test-debt.**
+  Parameterised over all six statuses. §4.4 scopes the predicate in prose ("**A
+  `SENT` row** is replay-eligible when…") and nothing enforces it, in a document
+  that elsewhere insists on machine-enforcing exactly this kind of invariant. A
+  `DECLINED` row satisfies both numbered clauses — `deliveredFields = ∅` and
+  `remoteDuplicate == false` — so if it ever entered this path it would be
+  delivered, which is the one-tap Garmin delivery ADR-006 exists to prevent,
+  arriving instead as a migration worker with no user action at all. Could not be
+  written in Phase 2: `ReplayEligibility` does not exist yet.
 - `ReplayEligibilityTest.emptyDeliveredFieldsAloneDoesNotImplyEligible`
 - `ReplayMigrationWorkerTest.requeuedRowResetsRetryEpochAndAttemptCount`
 - `ReplayMigrationWorkerTest.isDisabledUnderContractV1`
@@ -937,6 +1207,13 @@ tested, and gated off. Enabling it is a Phase-5+ decision, not a merge decision.
 - `HistoryScreenTest.blockedAuthBannerIsShownWhenAnyRowIsBlocked`
 - `HistoryScreenTest.showsPendingBacklogAge` (§8.5 — outage visible, not inferred)
 - `HistoryScreenTest.showsDiagnosticsCounters`
+- `HistoryScreenTest.showsSessionsThatProducedNoReading` ← **added under O-11.4.**
+  HistoryScreen is documented as "the single answer to *did my weigh-in reach
+  Garmin*", and a history that can only show rows answers it in every case except
+  the one where it is actually being asked. Under repeated E7 it shows nothing at
+  all, which is indistinguishable from "you didn't weigh yourself". Needs the
+  `noMeasurement` counter and the session diagnostics events (§2.2, WP-26) to be
+  surfaced as entries, not only as a number.
 
 **Counter:** consumes all.
 
@@ -973,7 +1250,21 @@ the attribution gate (§7 — a manual entry is attributed by construction).
 asks for location (§6.3). Base URL validated at save (scheme, parseable host).
 Token field renders "set" / "not set", never the value.
 
+> **Re-scoped (O-08.5).** "My user index (1–8), set during onboarding by weighing
+> once and picking the index that appeared" describes a mechanism that does not
+> exist. ADR-007's Register New User write is what assigns the index, and it
+> arrives from `ConsentStore`, not from user input. ConfigScreen **displays** the
+> registered index read-only, alongside a **"Re-register with the scale"** action
+> for the recovery case (app data cleared, scale profile deleted, stored
+> credential rejected) — which must warn that re-registering may consume one of
+> the scale's 8 profile slots (§8.8, HW-26). WP-15's
+> `branchAMatchingIndexPersistsAsPending` is likewise re-scoped: the value it
+> compares against now comes from the consent store, not from a config field the
+> user typed.
+
 **Tests:**
+- `ConfigViewModelTest.registeredUserIndexIsReadOnlyAndSourcedFromConsentStore`
+- `ConfigViewModelTest.reRegisterActionWarnsAboutProfileSlotConsumption`
 - `ConfigViewModelTest.baseUrlRejectsNonHttpScheme`
 - `ConfigViewModelTest.baseUrlRejectsUnparseableHost`
 - `ConfigViewModelTest.tokenIsNeverExposedForDisplay`
@@ -1099,10 +1390,19 @@ WP-12's capture tool. Every constant gets a confirmation date appended per ADR-0
 rule 2, or is corrected. **Resolves PRP §8.5 with evidence from live payloads** and
 sets the `AttributionBranch` config accordingly.
 
-Because everything sits behind `ScaleDecoder` (§2.6), the code change here is
-expected to be **a data-only edit to `BeurerProtocol.kt`** plus one strategy flag
-in WP-03's detector. If it is not — if the real protocol needs structural change —
-that is itself a P1 finding and an ADR.
+> **The tripwire has already fired (O-05c).** This package originally claimed
+> "because everything sits behind `ScaleDecoder`, the code change here is expected
+> to be **a data-only edit to `BeurerProtocol.kt`** plus one strategy flag in
+> WP-03's detector. If it is not — if the real protocol needs structural change —
+> that is itself a P1 finding and an ADR." The early capture
+> (`03-hardware-validation.md`) found exactly that: the protocol needs a stateful
+> two-step handshake, a persisted credential, two correlated characteristics, and
+> indication rather than notification subscription. The P1 finding is **ADR-007**
+> and the structural change is **WP-00**. The expected diff at WP-30 is therefore
+> re-costed to what genuinely remains data-only: **confirming the constants
+> WP-00 already set from the capture, on more than one weigh-in and more than one
+> user**, plus whatever HW-25…HW-28 turn up. Restating "data-only" without this
+> note would leave a tripwire that has already sprung looking untouched.
 
 **Tests:** the §5 checklist is the test. Every row records observed / expected /
 verdict / the fake-layer test it validates.
@@ -1149,9 +1449,54 @@ enforces this table mechanically.
 | `missedQuota` | WP-08 | E10 | `ScaleSessionWorkerTest.missedQuotaIncrementsCounter` |
 | `malformedCount` | WP-09 | E11 | `BeurerDecoderFrameTest.fifthMalformedFrameAbortsSession` |
 | `duplicateStableSuppressed` | WP-10 | E9 | `GattSessionMeasureTest.duplicateStableForSameUserIndexIsLatched` |
+| `unpairableFramesDropped` | **WP-00** | E18 | `BeurerDecoderCaptureTest.lateBodyCompositionAfterSupersededWeightIsDroppedNotMisattributed` |
+| `registrationRejected` | WP-07 | E19 | `GattSessionHandshakeTest.refusedRegistrationYieldsHandshakeFailedAndCounts` |
+| `noMeasurement` | WP-10 | E7 | `GattSessionMeasureTest.noNotificationWithinFortyFiveSecondsIncrementsNoMeasurement` |
 | `duplicatesSuppressed` | WP-14 | §3.3 | `DedupPolicyTest.suppressionIncrementsCounterAndDoesNotInsert` |
 | `droppedOtherUser` | WP-15 | §7 | `UserAttributionGateTest.branchAMismatchIncrementsDroppedOtherUser` |
 | `remoteDuplicatesSuppressed` | WP-20 | ADR-003 | `RemoteDuplicateCheckTest.matchWithinToleranceMarksRemoteDuplicate` |
+
+**Two rows above are decoder-local today and are not yet plumbed through
+`DiagnosticsCounters`.** `MeasurementCorrelator` exposes `unpairableFramesDropped`
+and `duplicateFramesSuppressed` as plain properties, and `BeurerDecoder` forwards
+them; nothing increments through the WP-02 interface yet, because the session
+that would do the forwarding is a Phase 2 stub. **WP-10 owns the wiring**, and
+note the name mismatch it must resolve: the registry key for E9 is
+`duplicateStableSuppressed` (session-level, "a `Stable` was suppressed") while the
+correlator's property is `duplicateFramesSuppressed` (decode-level, "a frame was
+suppressed"). They are the same event counted at two layers.
+`PersistentDiagnosticsCountersTest.everyCounterKeyIsOwnedByExactlyOnePackage`
+scans this table, so the key that must exist is the registry one — flagged here
+rather than left for WP-26 to trip over, since a counter in code without a
+registry row and a registry row without a counter are equally latent breaks.
+
+`noMeasurement` is the counter O-11 found missing: E7's recovery was a bare
+teardown with no aggregation, no threshold and no user-facing message, at exactly
+the moment ADR-007 made "connect, subscribe, receive nothing" the signature of
+the most fragile new mechanism in the design. E6's consent gate now keeps a lost
+consent out of E7 (see §1 RISK-1), but a starving connect under Atlas contention
+still lands here, so the counter and the 3-session streak in `00-design.md` §2.3
+are what stop it repeating silently once per weigh-in forever.
+
+### 2.2 Branch B: kept, at a cost that is now stated (O-05g)
+
+ADR-007 confirms Branch A on the live hardware, which makes Branch B — the
+weight-range sanity gate, `HELD_CONFIRM`, `DECLINED`, and the confirm/decline UI —
+**dead code for v1's target device**. It is nonetheless **kept**, deliberately:
+PRP §2's pluggable-decoder goal is explicit, a future non-UDS scale would need
+it, and removing it would burn the argument that produced ADR-006, which is one
+of the better-reasoned decisions in the set.
+
+What was not stated, and is now: §4.1 counts that machinery at full cost.
+**WP-15** keeps eight Branch B tests, **WP-23** keeps the decline affordance,
+**WP-26** keeps held-confirm notifications, and **WP-28** keeps
+`branchBReadingIsHeldAndNotDelivered`. Those tests exercise code no BF720 session
+can reach. That is a real, ongoing maintenance cost paid for portability rather
+than for v1 correctness, and it competes for the same budget as O-01 and O-02,
+which are v1 work. The decision is **keep, cost acknowledged** — not an
+unexamined carry-over. The trigger to revisit is a v1 scope squeeze: Branch B is
+the first thing to defer, because deferring it costs a future decoder's schedule
+and nothing of v1's.
 
 ---
 
@@ -1172,6 +1517,7 @@ interface GattTransport {
     fun discoverServices()
     fun write(char: UUID, bytes: ByteArray)
     fun enableNotifications(char: UUID)
+    fun enableIndications(char: UUID)   // ← added in WP-00; see the note below
     fun requestMtu(mtu: Int)
     fun createBond()
     fun disconnect()
@@ -1183,12 +1529,37 @@ sealed interface TransportEvent {
     data class ServicesDiscovered(val services: DiscoveredServices, val status: Int) : TransportEvent
     data class CharacteristicChanged(val char: UUID, val value: ByteArray) : TransportEvent
     data class WriteComplete(val char: UUID, val status: Int) : TransportEvent
-    data class NotificationsEnabled(val char: UUID, val status: Int) : TransportEvent
+    data class SubscriptionEnabled(
+        val char: UUID,
+        val kind: SubscriptionKind,     // NOTIFY | INDICATE
+        val status: Int,
+    ) : TransportEvent
     data class MtuChanged(val mtu: Int, val status: Int) : TransportEvent
     data class BondStateChanged(val state: Int) : TransportEvent
     data object AdapterOff : TransportEvent
 }
 ```
+
+**Why the vocabulary is neutral now (O-04).** The block above originally read
+`enableNotifications` / `NotificationsEnabled` throughout, matching
+`00-design.md` §2.6's `GattOp.EnableNotifications` and
+`ScaleDecoder.notifyCharacteristics`. `03-hardware-validation.md` §1 reports the
+three characteristics that matter — `2A9D`, `2A9C`, `2A9F` — as **indicate**.
+Notify and indicate are different ATT operations enabled by writing *different
+bits* to the same CCCD, and indications additionally require a Handle Value
+Confirmation per frame, which serialises them. An implementation that faithfully
+executed `EnableNotifications(2A9D)` would write the notify bit to a
+characteristic that does not support notify: the descriptor write succeeds and
+the device sends nothing. **That is the symptom this project already spent one
+hardware session chasing** before the UDS handshake was found — and the fake, with
+a `notifyEnableStatus` knob and no concept of an indication, would have stayed
+green throughout, certifying code the real scale never answers. `FakeGattTransport`
+now records `subscribedCharacteristics: Map<UUID, SubscriptionKind>`, so which
+bit was written is assertable rather than assumed
+(`FakeGattTransportTest.notifyAndIndicateAreDistinguishableSubscriptions`). The
+confirmation model itself — one outstanding indication at a time, 30 s ATT
+transaction timeout — is **not** modelled in the fake and is checklist row
+**HW-29**.
 
 Two implementations:
 
@@ -1265,7 +1636,9 @@ The five scenarios the lead named as the minimum, plus full E-edge coverage.
 | `unstable_then_stable_flagged.scale` | same, final frame carries the stability flag (flag-path variant) | WP-03 |
 | `disconnect_mid_stream.scale` | **E8** — 3 live frames then `DISCONNECTED` | WP-10 |
 | `disconnect_mid_stream_recovers.scale` | E8 with a successful reconnect inside 5 s | WP-10 |
-| `second_user_index.scale` | **E9** — stable for index 1, then stable for index 3 | WP-10, WP-15 |
+| ~~`second_user_index.scale`~~ | **Retired (O-03).** It drove the `EMITTED → MEASURING` edge, which no longer exists: a second weigh-in in one session now closes correlation rather than starting a second emission. Replaced by `superseded_weight_late_bodycomp.scale`, below | — |
+| `superseded_weight_late_bodycomp.scale` | **E18** — weight for index 2, weight for index 5, then a body-composition frame. Asserts one emission, weight-only, and the late frame dropped | WP-10 |
+| `weight_without_bodycomp.scale` | **E17** — weight indication, then silence. Asserts the 4 s correlation timeout flushes a weight-only reading rather than discarding it | WP-10 |
 | `unknown_user_index.scale` | stable for an index the user has not configured (Branch A drop) | WP-15 |
 | `malformed_frame.scale` | **E11** — short buffer, then a valid frame | WP-09 |
 | `unknown_opcode.scale` | E11 forward-compat: unknown opcode, session continues | WP-09 |
@@ -1280,6 +1653,7 @@ The five scenarios the lead named as the minimum, plus full E-edge coverage.
 | `no_init_ack.scale` | **E6** — init write accepted, no ack notification | WP-07 |
 | `late_init_ack.scale` | E6 — ack arrives after the first re-issue | WP-07 |
 | `no_notification.scale` | **E7** — subscribe succeeds, no frame ever | WP-10 |
+| `starving_connect.scale` | **E3-as-E7 (O-09c)** — connect, discover, consent and subscribe all succeed, then nothing arrives. §3.6(b) lists this as a real presentation of Atlas contention and no fixture covered it, so a contention that manifests as silence is counted `NoMeasurement` rather than `Missed(CONTENTION)` and ADR-003's revisit trigger undercounts. The fixture cannot *distinguish* the two — nothing can, from inside Bascule — but it pins the behaviour and the counter | WP-10 |
 | `duplicate_stable.scale` | **E9** — final frame repeated 4× (real scales do this) | WP-10 |
 | `adapter_off_mid_session.scale` | **E12** — `AdapterOff` during `MEASURING` | WP-06 |
 
@@ -1340,34 +1714,62 @@ fallbacks (`00-design.md` §10).
 
 | Bucket | Packages | Notes |
 |---|---|---|
-| **CI** | 25 | WP-01…07, 09, 10, 12…24, 26, 28, 31 |
+| **CI** | 26 | WP-00…07, 09, 10, 12…24, 26, 28, 31 |
 | **CI + PHONE** | 4 | WP-08, 11, 25, 27 — CI half merges now, PHONE half is a checklist row |
 | **PHONE only** | 1 | WP-29 |
 | **SCALE only** | 1 | WP-30 |
-| **Total** | **31** | |
+| **Total** | **32** | 31 as planned, plus WP-00 recorded retroactively |
 
-**Twenty-eight of thirty-one packages reach a green, reviewed, mergeable state
+**Twenty-nine of thirty-two packages reach a green, reviewed, mergeable state
 with no hardware of any kind.** WP-29 needs any Android phone. Only WP-30 needs
-the BF720, and its expected diff is data-only.
+the BF720.
+
+**Re-costed after ADR-007 (O-05).** The "28 of 31" claim was asserted on the old
+package shapes and is restated here on the new ones. The bucket assignments
+survive — nothing moved between CI, PHONE and SCALE — but three package *sizes*
+changed: WP-05 grew (the fixture corpus needs rewriting, not re-valuing), WP-07
+grew (a stateful three-branch handshake, not a fixed list), and WP-30 shrank in
+code while growing in checklist rows (HW-25…HW-29). WP-03 did not shrink; it
+moved. The count is honest at 32 because WP-00 is counted rather than absorbed
+silently into "the skeleton".
 
 ### 4.2 The `PHONE` set, isolated
 
-Five checklist rows and one package. All unblock with any Android device:
+Six checklist rows and one package. All unblock with any Android device:
 
 - HW-01/HW-02 (partial) — scan registration + PendingIntent delivery (WP-08)
 - HW-17 — real GATT status-code behavior (WP-06/WP-11)
 - HW-19 — permission grant/revoke round trip (WP-25)
 - HW-21 — reboot → re-arm (WP-27)
 - HW-22 — adapter-off event ordering (WP-06)
+- **HW-28** — the wake path on the **API 37** device (WP-08), added under O-09b.
+  This one wants the *actual* target phone rather than any Android device, since
+  its whole point is the API level the CI matrix cannot reach.
 
 ### 4.3 Merge order and parallelism
 
-Strictly ordered: WP-01 → WP-02 → **WP-03** → WP-04 → WP-05 → WP-06 → **WP-07**
-→ **WP-08**.
+Strictly ordered: WP-01 → **WP-00** → WP-02 → WP-04 → WP-05 → WP-06 →
+**WP-07** → **WP-08**.
+
+Two changes from the original prefix (`WP-01 → WP-02 → WP-03 → WP-04 → WP-05 →
+WP-06 → WP-07 → WP-08`):
+
+- **WP-00 is inserted ahead of WP-02** (O-05f). WP-02 is "Core domain types" and
+  its file list contains `ScaleDecoder.kt`, `DecodeEvent.kt` and `GattOp.kt` —
+  precisely the three files ADR-007 says must be revised, plus `ScaleReading`,
+  whose field set O-01 says is wrong. Merging them at position 2 and rewriting
+  them at 5, 7, 9 and 10 is the sequencing defect O-05 names. Nothing merges
+  until WP-00 lands. In practice it already has: WP-00 is the Phase 2 skeleton,
+  recorded retroactively, so WP-02 is now the *residue* of the domain types
+  WP-00 did not touch (`ReadingField`, `ContractVersion`, `WeightUnit`,
+  `SessionOutcome`, the diagnostics interface).
+- **WP-03 leaves the prefix** (O-07). It is no longer RISK-1 and no longer
+  behavioural-path work for this device; it merges in the decode lane after
+  WP-10, against a decoder that can actually produce the samples it consumes.
 
 After WP-08 the graph opens up. Independent lanes that can proceed in parallel:
 
-- **Decode lane:** WP-09 → WP-10 → WP-11 → WP-12
+- **Decode lane:** WP-09 → WP-10 → **WP-03** → WP-11 → WP-12
 - **Persistence lane:** WP-13 → WP-14 → WP-15 → WP-16
 - **Network lane:** WP-17 → WP-18 → WP-19 → WP-20
 
@@ -1417,6 +1819,12 @@ this behavior.
 | **HW-22** | PHONE | Adapter-off event ordering vs GATT status 8/22 | Teardown is clean regardless of ordering; re-arm on `STATE_ON` | `GattSessionTeardownTest.adapterOffTearsDownWithoutRetry` (§3.6b) |
 | **HW-23** | SCALE | MTU negotiation — do frames exceed the 23-byte default ATT MTU? | Frames fit, or `RequestMtu` succeeds | `FakeScaleGattTest.faultInjectionOverridesScriptedConnectStatus` (mtuStatus knob) |
 | **HW-24** | SCALE | End-to-end: step on → Room row → VitalForge 2xx → HistoryScreen `SENT` | One weigh-in, one row, one POST, visible in history | `ColdStartScenarioTest.fakeMeasurementPersistsDeliversAndAppearsInHistory` |
+| **HW-25** | SCALE | **Weigh in with socks or shoes on.** Does a valid Weight Measurement arrive with **no** Body Composition Measurement? (O-02's falsifiable prediction) | Record which indications arrive and in what window. If weight-only is common, E17's 4 s window is on the primary path, not an exotic edge | `BeurerDecoderCaptureTest.weightFrameWithNoBodyCompositionIsReleasedOnFlush` — **the decode half is covered; the frequency is not, and the frequency is what decides whether E17 needs a shorter window** |
+| **HW-26** | SCALE | **Register twice from a wiped app.** Is the returned `scaleIndex` reused or incremented? (O-08's falsifiable prediction) | Clear app data, re-register, record the index. If it increments, each reinstall burns one of 8 profile slots and E19 is on a countdown | *Nothing — the fake cannot know what the scale's slot allocator does.* Second blind spot after HW-01 |
+| **HW-27** | SCALE | What does the scale return when the profile pool is exhausted, and does the SIG delete-user operation (or a read of `2A9A`) offer a cheaper recovery than re-registering? | A definitive UCP response byte for "full", so E19 fires on the right signal rather than on a timeout | `GattSessionHandshakeTest.refusedRegistrationYieldsHandshakeFailedAndCounts` (recovery only; the trigger byte is unverified) |
+| **HW-28** | PHONE | **Wake path on the actual API 37 device**, run early (O-09b) | Receiver → expedited worker → `setForeground(connectedDevice)` succeeds on Android 17, not merely on the API 26/31/34 emulator matrix | `ScaleSessionWorkerTest.setForegroundSucceedsOnApi34WithConnectedDeviceType` — **this row exists because that test cannot falsify the platform claim; see §1** |
+| **HW-29** | SCALE | CCCD writes use the **indication** value, and indications are confirmed (O-04) | Descriptor write carries the indicate bit for `2A9D`/`2A9C`/`2A9F`; measurement traffic actually arrives; no ATT transaction timeout under back-to-back frames | `FakeGattTransportTest.notifyAndIndicateAreDistinguishableSubscriptions` (bit choice only — the fake has no confirmation model) |
+| **HW-30** | SCALE | **Enumerate the two proprietary services `0x0000FFFF` and `0x0000FF00`** before the field list is declared closed (O-01.3) | Characteristics listed and read where readable. Specifically: do they carry **bone mass** and **AMR**, the two PRP §2 fields the SIG profile does not define? A definitive yes reopens the schema; a definitive no closes it | *Nothing — unexercised by the probe and unimplemented. The `boneMassKg`/`amr` columns are nullable-and-never-populated until this row runs* |
 
 ### 5.1 Deliverables from the hardware session
 
@@ -1434,6 +1842,7 @@ this behavior.
 |---|---|---|
 | **P1-A** — §8.8 forbids the full-frame capture Phase 3 needs (§0.2) | Design amendment → **ADR-007** | Phase 2 |
 | **A6** — v2 idempotency on `client_id`; replay is unsafe without it | **Escalation to JD** (§4.4) | Before WP-22 is enabled |
+| **A6, second question** — *which* timestamp does VitalForge store, and which one should replay join on? Bascule now holds both `capturedAtMillis` (phone clock at `EMITTED`) and `scaleTimestampMillis` (the frame's own). If Atlas delivered the same weigh-in under the scale's clock, a join on `captured_at` misses and replay duplicates | **Same escalation, one added line** — not a new one; the answer is a shaper change either way (O-10) | With A6, before WP-22 |
 | **A7** — does v1 `/api/weight` ignore unknown fields? | Confirm against Track A contract doc, **not** by probing with a real reading | Before WP-17 merges |
 | **A5** — does `GET /api/weight/recent` exist? | ADR-003 degrades gracefully either way | WP-20 |
 | V2 exact field names | Pinned from Track A contract doc; `V2Shaper` written, key strings blank | WP-17 |
@@ -1446,21 +1855,34 @@ this behavior.
 > "Every work package has named tests. Nothing is planned that cannot be verified
 > either in CI or on the hardware checklist."
 
-- **31 packages, 31 with named tests** in `ClassNameTest.methodName` form. No
-  package says "tests as appropriate".
-- **Every failure edge E1–E16** has at least one named test, and §3.6 states
-  explicitly which four have approximated *trigger fidelity* (E2, E3, E5/E5b,
-  E12) with the checklist row that closes each.
-- **Every checklist row HW-01…HW-24** names the fake-layer test it validates —
-  except **HW-01**, which names *nothing on purpose*, because no fake can test
-  whether a real scale advertises. That is stated as the plan's largest blind
-  spot rather than papered over with a test that would not actually cover it.
-- **28 of 31 packages need no hardware at all**; 1 needs any phone; 1 needs the
-  BF720, with a data-only expected diff.
-- The two risk-first packages (**WP-03** stabilization, **WP-07** init handshake
-  sequencing) are **retirable in CI** and are scheduled at the earliest positions
-  their dependencies permit. WP-07 is retired in full at position 7. WP-03's
-  *decision logic* is retired in full at position 3 and its *input fidelity* at
-  WP-10 / HW-08 / HW-09 — the narrower claim is stated in §1 rather than rounded
-  up. The rejected third contender (**WP-08**, the wake path) and the reasoning
-  for rejecting it are in §1.
+- **32 packages, 32 with named tests** in `ClassNameTest.methodName` form (31 as
+  planned, plus **WP-00** recorded retroactively). No package says "tests as
+  appropriate".
+- **Every failure edge E1–E19** has at least one named test. E17, E18 and E19 are
+  the three added in Phase 2 (`00-design.md` §2.3); E18 is the only one already
+  under test in the skeleton
+  (`BeurerDecoderCaptureTest.lateBodyCompositionAfterSupersededWeightIsDroppedNotMisattributed`),
+  since E17's timer and E19's outcome both live in `GattSession.run()`, which is
+  a documented Phase 3 stub. §3.6 states explicitly which four edges have
+  approximated *trigger fidelity* (E2, E3, E5/E5b, E12) with the checklist row
+  that closes each.
+- **Every checklist row HW-01…HW-30** names the fake-layer test it validates —
+  except **HW-01**, **HW-26** and **HW-30**, which name *nothing on purpose*: no
+  fake can test whether a real scale advertises, none can know what the scale's
+  profile-slot allocator does on re-registration, and none can enumerate two
+  proprietary services nobody has opened. All three are stated as blind spots
+  rather than papered over with a test that would not actually cover them.
+- **29 of 32 packages need no hardware at all**; 1 needs any phone; 1 needs the
+  BF720. WP-30's expected diff is **no longer data-only** — its own tripwire
+  fired and the structural change is WP-00; see the note on WP-30.
+- **The risk ranking below is the Phase 2 one, not the original.** The two
+  risk-first packages are **WP-07** (UDS register/consent handshake, RISK-1) and
+  **WP-03** (stabilization, RISK-2, demoted to a portability/fallback guard and
+  moved out of the strict prefix). Both are retirable in CI; WP-07 is retired in
+  full at position 7, which is now the first behavioural position. The original
+  ranking put WP-03 at RISK-1 and position 3, and §1 preserves that reasoning
+  alongside the evidence that overturned it — this bullet previously certified
+  the stale ranking as "the design's judgment is upheld", which it no longer is.
+  The rejected third contender (**WP-08**, the wake path) keeps its demotion, but
+  §1 now states honestly that position 8 retires its *plumbing* and that the
+  ADR-004 platform claim is retired at HW-01/HW-28 on a real device.
