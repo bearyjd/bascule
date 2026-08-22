@@ -1,8 +1,14 @@
 # Bascule — Phase 0 Design
 
-Status: **complete, pending Phase 2 devil's advocate**
+Status: **complete; amended in Phase 2 against the devil's advocate findings**
 Inputs: `docs/prp/bascule-prp.md` (requirements), `docs/prp/bascule-agent-prompt.md` (process)
-Companion: `docs/prp/decisions.md` (ADR-001 … ADR-006)
+Companion: `docs/prp/decisions.md` (ADR-001 … ADR-007)
+
+Sections amended in Phase 2, each marked in place: §1.2 (data-flow diagram),
+§2.1 (persist rule, retired second-user edge), §2.3 (E6, E7, E9, and new E17–E19),
+§2.4, §2.5, §2.7 and §3.1 (provisional banners), §3.3, §4.4, §7, §8.1, §8.4,
+§8.8, §9 (provisional banner). The per-objection record of what was changed and
+why is `docs/prp/02-phase2-dispositions.md`.
 
 This document is the structural design only. It deliberately contains **no BLE
 protocol constants** (UUIDs, opcodes, scale factors) — those are sourced with
@@ -93,8 +99,13 @@ flowchart TD
     D -->|enqueue expedited| E[ScaleSessionWorker<br/>setForeground: connectedDevice]
     E --> F[GattSession state machine]
     F -->|GattOps| G[GattTransport → BluetoothGatt]
-    G -->|notification bytes| H[BeurerDecoder]
-    H -->|DecodeEvent.Stable| U{User attribution<br/>§7}
+    G --> HS[UDS handshake on 2A9F<br/>Register New User → Consent<br/>ADR-007]
+    CS[(EncryptedConsentStore<br/>scaleIndex + consentCode)] <--> HS
+    HS -->|registration or consent refused| Y[HandshakeFailed<br/>E6 / E19 — never a silent E7]
+    HS -->|consent granted| SUB[Subscribe 2A9D + 2A9C<br/>indications, not notifications]
+    SUB -->|indication bytes| H[BeurerDecoder]
+    H --> CORR[MeasurementCorrelator<br/>Weight 2A9D + BodyComp 2A9C<br/>= one weigh-in, one Stable]
+    CORR -->|DecodeEvent.Stable| U{User attribution<br/>§7}
     U -->|Branch A index match, or<br/>Branch B Δ ≤ 1.5 kg| I[(Room: ReadingEntity<br/>status = PENDING)]
     U -->|Branch B Δ > 1.5 kg| V[(status = HELD_CONFIRM<br/>never drained)]
     U -->|Branch A index mismatch| W[dropped before persistence<br/>droppedOtherUser++]
@@ -157,14 +168,27 @@ stateDiagram-v2
     MEASURING --> RECONNECT_ONCE: E8 disconnect before stability
     RECONNECT_ONCE --> CONNECTING: within 5 s window
     RECONNECT_ONCE --> TEARDOWN: window elapsed / second failure
-    EMITTED --> MEASURING: second distinct userIndex (max 2)
-    EMITTED --> TEARDOWN: E9 duplicate stable frame (latched) /<br/>session complete / idle 10 s
+    EMITTED --> TEARDOWN: E9 duplicate stable frame (latched) /<br/>E18 unpairable frame /<br/>session complete / idle 10 s
     TEARDOWN --> SCAN_ARMED: gatt.close(), release wakelock,<br/>stopForeground
 ```
 
-Persist rule, load-bearing: **the reading is written to Room at `EMITTED`,
-synchronously, before disconnect is requested.** Nothing after `EMITTED` can
-lose the reading.
+> **Retired edge — `EMITTED --> MEASURING: second distinct userIndex (max 2)`.**
+> Removed under O-03: a Body Composition frame identifies neither its user nor
+> its weigh-in, so a second weigh-in inside one session makes every subsequent
+> body-comp frame unpairable rather than merely unattributed. The correlator
+> latches at **one emission per session** and drops what follows (E18). E9's
+> "at most 2 distinct userIndexes" is unreachable for this decoder and is kept
+> only as the portability statement for a future non-UDS decoder, in the same
+> way `02-interface-revision.md` §5 keeps `StabilityDetector`/`DecodeEvent.Live`.
+
+Persist rule, load-bearing: **the emission unit is the correlated pair — a Weight
+Measurement together with the Body Composition Measurement that pairs with it, or
+a Weight Measurement alone once E17 says its pair is not coming. That correlated
+reading is written to Room at `EMITTED`, synchronously, before disconnect is
+requested.** Nothing after `EMITTED` can lose the reading, and nothing partial is
+ever written and later amended: there is no second UPDATE carrying body
+composition, because `EMITTED` is not reached until correlation has closed. The
+cost of that guarantee is E17 — see §2.3.
 
 ### 2.2 Two entry paths into a session
 
@@ -200,10 +224,10 @@ Every edge has a concrete number and a concrete action.
 | **E4** | Service discovery timeout or required service absent | no `onServicesDiscovered` within **5 s**, or service UUID not in result | `TEARDOWN`, outcome `Incompatible`. Counter `incompatibleStreak`; at **3** consecutive, ConfigScreen shows "Scale not recognised — this device does not expose the Beurer service" and scan arming is suspended until the user re-selects a device. Prevents an infinite wake-connect-fail battery loop against a neighbour's device that matched the filter. |
 | **E5** | `GATT_INSUFFICIENT_AUTHENTICATION` / `_ENCRYPTION` on read/write | GATT status 5 / 15 | Call `createBond()`, wait max **30 s** for `BOND_BONDED`, then one full reconnect. |
 | **E5b** | Bond fails or times out | `BOND_NONE` after request, or 30 s elapsed | `TEARDOWN`. Persistent notification: "Pair the BF720 in Android Bluetooth settings, then step on the scale again." Not retried automatically — bonding needs user interaction. |
-| **E6** | Init handshake never acknowledged | no ack notification within **3 s** of the init write | Re-issue the init write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to subscribe: without init the BF720 does not stream measurements, so continuing would burn the connection window. |
-| **E7** | Notifications never arrive | no measurement frame within **45 s** of `SUBSCRIBED` | `TEARDOWN`, outcome `NoMeasurement`. 45 s covers weight stabilization (~5–15 s) plus the BIA impedance pass, with margin for a user who steps on, off, and back on. |
+| **E6** | Handshake step never acknowledged | no User Control Point indication within **3 s** of a Register or Consent write | Re-issue that write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to subscribe: **`SUBSCRIBED` is gated on `DecodeEvent.ConsentResult(success = true)`**, because ADR-007 established that an unconsented subscriber receives nothing at all. Without that gate a lost consent would present as 45 s of silence (E7) rather than as the handshake failure it is. |
+| **E7** | Indications never arrive **after a successful consent** | no measurement frame within **45 s** of `SUBSCRIBED` | `TEARDOWN`, outcome `NoMeasurement`, counter `noMeasurement`. 45 s covers weight stabilization (~5–15 s) plus the BIA impedance pass, with margin for a user who steps on, off, and back on. Because E6 now gates subscription on consent, E7 no longer absorbs consent failures — but it still absorbs a **starving connect** under Atlas contention (§8.3), so **3** consecutive `NoMeasurement` sessions raise an E4-style notification suggesting re-pairing, rather than repeating silently forever. |
 | **E8** | Disconnect mid-measurement, before stability | `onConnectionStateChange(DISCONNECTED)` while in `MEASURING` | Partial data is **discarded, never persisted** (an unstable weight is not a measurement). Exactly **one** reconnect attempt within a **5 s** window — the scale is often still powered. If it fails, `TEARDOWN` with `Missed(DROPPED)`. |
-| **E9** | Duplicate stable frames in one session | decoder emits `Stable` again for a userIndex already emitted | In-session latch: at most **one** emission per `userIndex` per session, and at most **2** distinct userIndexes per session. Further duplicates are counted and dropped without a Room write. Cross-session duplicates are caught separately by the persistence dedup (§3.3). |
+| **E9** | Duplicate stable frames in one session | a frame whose identity `(userIndex, scale timestamp, raw weight)` was already emitted | In-session latch, now owned by `MeasurementCorrelator` rather than `GattSession` (`02-interface-revision.md` §3): **one emission per session, full stop**. Counter `duplicateFramesSuppressed`; nothing is written to Room. The original "at most 2 distinct userIndexes" is retired for this decoder — see the note under §2.1's diagram. Cross-session duplicates are caught separately by the persistence dedup (§3.3). |
 | **E10** | Session worker not runnable in time | `now - enqueuedAt > 20 s` at worker start | Abort before connecting; `Missed(QUOTA)`; see §2.2. |
 | **E11** | Malformed / unknown frame | length below the decoder's minimum, or unknown opcode | Unknown opcode → log-and-skip, session continues (forward compatibility with firmware revisions). Malformed (short buffer / failed field bounds) → skip frame, `malformedCount++`; at **5** malformed frames abort the session with `DecodeFailure` and capture opcode+length for the hardware log. A malformed frame must never throw out of the notification callback — that path is on a binder thread and an exception there kills the process. |
 | **E12** | Bluetooth adapter turned off mid-session | `ACTION_STATE_CHANGED` → `STATE_TURNING_OFF`, or GATT status 8/22 | Immediate `TEARDOWN`, no retry, transition to `DISARMED`. Re-arm automatically on `STATE_ON`. |
@@ -211,6 +235,9 @@ Every edge has a concrete number and a concrete action.
 | **E14** | Location services off (API ≤ 30) | `LocationManager.isLocationEnabled == false` at arm time | Scan will silently return zero results on API 26–30. Arm is refused with an actionable message; this is a **check, not a permission** (§6.4). |
 | **E15** | Session worker killed by the OS mid-session | worker `onStopped()` | `gatt.close()` in `onStopped()` unconditionally. If `EMITTED` was already reached the reading is already in Room and delivery proceeds independently (§8.1). If not, the session is lost — accepted, the user re-steps. |
 | **E16** | Two sessions overlap (double advertisement) | second enqueue while one is running | `WorkManager` unique work name `scale-session` with `ExistingWorkPolicy.KEEP`. A second broadcast within a live session is a no-op — never two `BluetoothGatt` objects for one device. |
+| **E17** | Body-composition pair never arrives | a Weight Measurement is buffered for correlation and no Body Composition Measurement follows within **4 s** | `GattSession` calls `ScaleDecoder.flush()`, which **persists the weight-only reading** and proceeds to `EMITTED`. It is not discarded: PRP §5 is unambiguous that every decoded weight is precious, and a weight without body composition is complete, attributable, and deliverable — VitalForge v1 accepts weight alone anyway. 4 s because the captured pair arrived within milliseconds of each other; tens of seconds would put a normal weigh-in behind a visible delay. This edge exists because the previously-named backstops cannot fire here: E7 is satisfied by the *first* frame, post-emission idle counts from an `EMITTED` that has not happened, and the 90 s ceiling would deliver the reading a minute and a half late. **Predicted common trigger:** a weigh-in with socks or shoes on produces a weight and no bioimpedance result — checklist row HW-25. |
+| **E18** | A frame arrives after correlation closed | any Weight or Body Composition frame after the session's one emission | Counted (`unpairableFramesDropped`) and dropped. **Never speculatively attached to whatever is currently buffered** — that is the O-03 misattribution, and it writes one household member's body fat, muscle and impedance into another's row, under an index the wrong-user gate reads as correct. |
+| **E19** | Register New User refused | User Control Point indicates failure for opcode `0x01`, or the scale's user-profile pool is exhausted | `TEARDOWN`, outcome `HandshakeFailed("scale refused Register New User")`, counter `registrationRejected`. Notification: **"The scale's user profiles are full — delete one in the Beurer app, then step on the scale again."** The scale holds 8 profiles and Bascule cannot see how many remain (the live capture was already assigned index 2, so slot 1 was taken by something else). Without this edge the case presents as E6/E7 — a handshake that never completes, silently, forever. |
 
 ### 2.4 Stabilization detection
 
@@ -223,14 +250,26 @@ device:
    distinguishes live-weight frames from final measurement frames), the decoder
    emits `Stable` on that flag alone.
 2. **Fallback — quiescence heuristic.** If no such flag exists: weight must stay
-   within **±0.1 kg** (one display LSB) across **≥ 4 consecutive frames** spanning
-   **≥ 2.0 s**. Numbers chosen so a genuine step-on ramp (which moves far more
-   than 0.1 kg between frames) cannot satisfy it, while a settled reading
-   satisfies it within roughly two seconds of settling.
+   within **±0.1 kg** across **≥ 4 consecutive frames** spanning **≥ 2.0 s**. The
+   band is **sized by step-on dynamics, not by device resolution** — an earlier
+   draft called it "one display LSB", which the hardware falsifies: the BF720's
+   confirmed resolution is **0.01 kg** with a **×0.005 kg** raw multiplier
+   (`03-hardware-validation.md` §3, §5), making ±0.1 kg 10–20 LSBs. The value
+   stands on its own reasoning: a genuine step-on ramp moves far more than 0.1 kg
+   between frames and cannot satisfy it, while a settled reading satisfies it
+   within roughly two seconds of settling.
 
-The heuristic is implemented and tested regardless, because it is also the guard
-if the flag turns out to be unreliable on the BF720 specifically. Which path is
-live is a single decoder constant, flipped with evidence in Phase 3.
+> **Superseded for this device.** `02-interface-revision.md` §5 records that the
+> SIG Weight Measurement characteristic has neither branch — no stability flag,
+> and no stream of intermediate frames to settle over; the scale decides
+> stability before it transmits. `StabilityDetector` is not on the BF720's live
+> path and is not implemented in the Phase 2 skeleton. It stays *specified* for
+> the pluggable-decoder goal (PRP §2), like `DecodeEvent.Live`, and WP-03 is
+> rescheduled accordingly (`01-plan.md` §1).
+
+The heuristic remains the guard for any decoder that does stream live weight.
+Which path is live is a single decoder constant, flipped with evidence in
+Phase 3.
 
 ### 2.5 Timeout summary
 
@@ -241,8 +280,9 @@ live is a single decoder constant, flipped with evidence in Phase 3.
 | **Connect-phase budget** | **20 s** | first connect attempt — hard cap across all E1/E2/E3 retries combined, whichever ends the phase first |
 | Service discovery | 5 s | `discoverServices()` |
 | Bond wait | 30 s | `createBond()` |
-| Init ack | 3 s | init write |
-| First notification | 45 s | subscribe |
+| Handshake ack (Register or Consent) | 3 s | each User Control Point write |
+| First indication | 45 s | subscribe |
+| **Body-composition correlation (E17)** | **4 s** | **the buffered Weight Measurement** — expiry flushes a weight-only reading, it does not discard |
 | Post-emission idle | 10 s | `EMITTED` |
 | **Hard session ceiling** | **90 s** | worker start — unconditional teardown, guards against every timer above being defeated by a device that keeps the connection alive but sends nothing useful. **The bond wait is excluded** — see below |
 
@@ -269,6 +309,11 @@ worker start, applying only to sessions that entered `BONDING`.
 > must be correlated with the paired Weight frame before either is treated as
 > a complete, attributable reading. Revise this interface in Phase 2 before
 > WP-06/WP-07/WP-09 are implemented against it.
+>
+> **Superseded.** That revision landed in `02-interface-revision.md` — read it
+> instead of the block below for the decoder, handshake and `DecodeEvent` model.
+> It also supersedes §9's constants table (§4 there) and dispositions §2.4's
+> stabilization detection (§5 there). The rest of this document stands.
 
 The PRP §3 signature `fun decode(advertisement): ScaleReading?` is impossible
 here: a single advertisement carries no measurement. The decoder must describe a
@@ -316,6 +361,14 @@ JVM unit test.
 
 ### 2.7 `ScaleReading`
 
+> **Provisional — superseded by `02-interface-revision.md` §3.** The field list
+> below predates the live capture and does not survive it in either direction:
+> the SIG profile reports body water as a **mass** and basal metabolism in
+> **kilojoules**, defines no bone-mass or AMR field at all, and supplies
+> `impedanceOhms`, `softLeanMassKg`, `heightM` and a **scale-side timestamp**
+> that have no slot here. Read `02-interface-revision.md` §3 for the field set
+> that ships; the paragraph below it on canonical units still stands.
+
 ```kotlin
 data class ScaleReading(
     val weightKg: Double,          // canonical: kilograms, always
@@ -345,6 +398,15 @@ an unstable reading is never constructed.
 
 ### 3.1 `ReadingEntity`
 
+> **Provisional — amended by `02-interface-revision.md` §3.** The column list
+> below is correct as far as PRP §5's names go, but the *values* that reach it
+> changed with ADR-007: `bodyWaterPct` is derived from a SIG body-water **mass**,
+> `bmr` from a **kilojoule** figure, `boneMassKg` and `amr` are never populated by
+> `BeurerDecoder`, and `impedanceOhms`, `softLeanMassKg` and
+> `scaleTimestampMillis` are additions the captured frame forced. The conversions
+> live at the persistence boundary (`ReadingMapper`), not in the decoder. Read
+> `02-interface-revision.md` §3 alongside this table.
+
 Per PRP §5, with the naming fix (`ReadingEntity`, not `PendingReadingEntity`) and
 the additions below.
 
@@ -352,10 +414,12 @@ the additions below.
 |---|---|---|
 | `id` | `String` (UUID) | ▲ client-generated; becomes the `client_id` idempotency key under contract v2 only (§4.4) |
 | `capturedAtMillis` | `Long` | device clock at `EMITTED` |
+| `scaleTimestampMillis` | `Long?` | ▲ the scale's own clock from the Weight Measurement frame, null when the frame carried none. Kept **alongside** `capturedAtMillis`, not instead of it: dedup (§3.3) and the history sort key run on the phone clock, but a reading the scale buffered and delivered later would otherwise record its *delivery* time as its capture time. Which of the two a v2 replay joins on is part of the A6 escalation (§4.4) |
 | `userIndex` | `Int?` | nullable — see §7 |
 | `weightKg` | `Double` | ▲ canonical kg (PRP said `weightValue` + `unit`) |
 | `displayUnit` | `String` | ▲ user's configured unit at capture time, for history rendering |
 | `bodyFatPct` … `amr` | `Double?` | all nullable per PRP §5 |
+| `impedanceOhms`, `softLeanMassKg` | `Double?` | ▲ both decoded from the captured frame and both previously homeless. Impedance is the **raw measured signal** every other body-comp number is a formula over; discarding it would make body composition permanently non-recomputable, which is precisely what PRP §2's "nothing is discarded at the point of measurement" exists to prevent |
 | `status` | `String` | `PENDING` / `HELD_CONFIRM` / `SENT` / `BLOCKED_AUTH` / `FAILED_PERMANENT` / `DECLINED` |
 | `attemptCount` | `Int` | transient failures only |
 | `retryEpochMillis` | `Long` | ▲ start of the current retriable period — **the expiry anchor** (§3.4). Set to `capturedAtMillis` on insert and **reset to `now` on every re-entry into `PENDING`** (new token saved, "Retry" tapped, confirmation granted, replay requeue) |
@@ -370,6 +434,21 @@ the additions below.
 ▲ = added beyond PRP §5. Room schema is exported (`room.schemaLocation`) from the
 first commit so migrations are diffable; v1 ships schema version 1 with no
 migration.
+
+**No `registrationEpoch` column — decided, not overlooked (O-08.6).** After a
+re-registration (ADR-007: app data cleared, phone replaced, or the scale's user
+slot deleted) the scale may assign JD a different index, at which point every
+historical row's `userIndex` refers to a registration that no longer exists.
+An epoch column would make that history interpretable. It is **not added in v1**
+for one reason: nothing would read it. Branch A compares an incoming reading's
+index against the *current* configured index at the persistence boundary, and
+historical rows are never re-evaluated — they are already persisted, and their
+attribution was correct when it was made. A column no code consults is a column
+that drifts. The decision is reversible at low cost while v1 is unshipped
+(§8.12: schema version 1, no migration), and the trigger to revisit it is the
+first feature that re-reads `userIndex` on stored rows — a per-user history
+filter, or a Branch A backfill after a re-registration. Recorded here so the
+next reader knows the gap is priced rather than missed.
 
 ### 3.2 Status transitions
 
@@ -435,18 +514,30 @@ HistoryScreen), so a suppression is auditable.
 
 Number justification:
 
-- **±0.20 kg** — the BF720 resolution is 0.1 kg, so this is 2 LSBs. It absorbs
-  the scale re-reporting a final frame that differs by one tick and any rounding
-  introduced by a kg↔lb round trip in a re-broadcast. It is small enough that two
-  genuinely different weigh-ins (post-workout, post-meal) are not collapsed.
-  Expressed in **kg**, the canonical stored unit, so the tolerance does not
-  change meaning when the user switches display units.
+- **±0.20 kg** — sized by **human physiology, not by device resolution**. An
+  earlier draft justified it as "2 LSBs of the BF720's 0.1 kg resolution"; the
+  hardware falsifies that. The confirmed resolution is **0.01 kg** with a
+  **×0.005 kg** raw multiplier (`03-hardware-validation.md` §3, §5), so 200 g is
+  20–40 LSBs and a re-reported final frame differs by a **5 g** tick, not a
+  100 g one. The value is unchanged because nothing about it depended on the
+  false premise: 200 g absorbs a re-broadcast final frame and any rounding from a
+  kg↔lb round trip, while staying small enough that two genuinely different
+  weigh-ins (post-workout, post-meal) are not collapsed. Expressed in **kg**, the
+  canonical stored unit, so the tolerance does not change meaning when the user
+  switches display units.
 - **5 minutes** — covers the whole "step on, scale repeats the final frame,
   powers off, user steps on again to double-check" behaviour. Two intentional
   weigh-ins 5 minutes apart within 0.2 kg carry no additional information. Longer
   windows start eating legitimate before/after-sauna style measurements.
-- Both are `const val` in `DedupPolicy.kt` with this rationale in a comment, and
-  both are unit-tested at the boundary (0.20 vs 0.21 kg; 300 000 vs 300 001 ms).
+- Both are `const val` in `DedupPolicy.kt` with this rationale in a comment.
+  The time window is unit-tested at the exact boundary (300 000 vs 300 001 ms).
+  The weight tolerance is **bracketed** rather than tested at exactly 0.20 vs
+  0.21 kg: against a `<=` comparison of `Double`s the nominal boundary case is
+  not decidable — `90.20 - 90.00` evaluates to `0.2000000000000028`, which is
+  *outside* a 0.20 tolerance. WP-14 owns the resolution (compare scaled integers,
+  the way `MeasurementCorrelator`'s frame identity already does, or restate the
+  rule as a strict inequality); `DedupPolicyTest` documents the gap in the
+  meantime.
 
 ### 3.4 Retry schedule and expiry
 
@@ -609,6 +700,28 @@ weight tolerance rather than `client_id`. That is part of the same escalation �
 it is the harder half of it, and it is why the question goes to JD before replay
 is enabled rather than after.
 
+One line added to that same escalation, not a new one: **there are now two
+clocks**, and the design must ask which one VitalForge holds. `capturedAtMillis`
+is the phone's clock at `EMITTED`; `scaleTimestampMillis` (§3.1) is the scale's
+own. **Decided: Bascule writes the Current Time characteristic (`2A2B`) as the
+first step of every handshake**, before Register or Consent — the probe did
+exactly this and the resulting frame timestamp matched the written value to the
+second (`03-hardware-validation.md` §5), which is the only reason the scale's
+timestamp is trustworthy at all. An unset RTC drifts or resets on a battery
+change, and a timestamp nobody sets is garbage the design would be lucky not to
+read. *Implementation gap:* `BeurerDecoder.beginHandshake` currently opens with
+Register/Consent and does not issue the CTS write; adding it is WP-07's job, and
+it is listed as such in `02-phase2-dispositions.md`. For a live
+wake-on-advertisement session the two clocks differ by
+seconds, well inside the 5-minute dedup window. But if Atlas's `ble-scale-sync`
+delivered the same weigh-in and VitalForge stored the *scale's* timestamp, a
+replay join on `captured_at` misses and produces exactly the duplicates this
+clause exists to prevent. **The question for JD is therefore "which timestamp
+does VitalForge store, and which one should replay join on", asked alongside
+A6.** Both are now available locally, so the answer is a shaper change either
+way — which is why this is one line on an existing escalation rather than a
+reopening of it.
+
 ### 4.5 HTTP response classification
 
 | Condition | `SubmitResult` | Row effect |
@@ -724,11 +837,20 @@ branch is one decoder flag plus one dedup input, and the delivery path is
 identical.
 
 **Branch A — protocol exposes a user index.** `ScaleReading.userIndex` is
-populated. ConfigScreen has "My user index" (1–8), set during onboarding by
-weighing once and picking the index that appeared. Readings whose index differs
-are **dropped at the persistence boundary**, counted as `droppedOtherUser`, and
-shown in HistoryScreen as a count only. Session may emit up to 2 distinct indexes
-(E9); both are evaluated, only the configured one is stored.
+populated. **The index is assigned by the scale, not discovered by the user.**
+ADR-007's Register New User write returns the index the scale allocated
+(`[0x20, 0x01, 0x01, scaleIndex]`), and Bascule persists it with its consent code
+in `EncryptedConsentStore` at that moment or loses it. ConfigScreen therefore
+*displays* "My user index" as a read-only fact of the registration, with a
+"Re-register with the scale" action for the recovery case — it is not a 1–8
+picker the user fills in after weighing once and reading the number off a list.
+That earlier description was written before the mechanism was known and is wrong
+in both direction and timing: the index exists before the first weigh-in, and no
+weigh-in produces data at all until consent has been granted. Readings whose
+index differs from the registered one are **dropped at the persistence
+boundary**, counted as `droppedOtherUser`, and shown in HistoryScreen as a count
+only. A session emits **at most one** reading (E9, as amended under §2.1), so
+"both indexes are evaluated" no longer applies.
 
 **Branch B — no user index.** `userIndex` is null everywhere. Filtering falls back
 to a **weight-range sanity gate** against the most recent `SENT` or user-confirmed
@@ -784,10 +906,19 @@ evidence into `docs/prp/03-hardware-validation.md` per the Phase 3 exit gate.
 
 ### 8.1 Process death mid-measurement
 The write-ahead point is `EMITTED` (§2.1) — Room insert completes before
-`disconnect()` is requested. Death *before* `EMITTED` loses only unstable partial
-data that was never a measurement; the user re-steps. Death *after* loses
-nothing: the row is `PENDING` and the periodic `DeliveryWorker` drains it with no
-in-memory state required. The delivery path never depends on the session process
+`disconnect()` is requested. Death *before* `EMITTED` loses only data that was
+never a complete reading: an unstable partial, or — post-ADR-007 — a Weight
+Measurement still buffered awaiting its body-composition pair. That second case
+is the one this section previously did not cover, and it is why `EMITTED` is
+defined on the **correlated pair** rather than on the first frame: emitting at
+the Weight frame would have honoured the write-ahead rule by writing a row that a
+later UPDATE was supposed to complete, so a death inside the E17 window would
+have left a body-comp-less row that is indistinguishable from a genuine
+weight-only reading — silent partial loss wearing the shape of success. The cost
+is that the E17 window (4 s) is genuinely unprotected; the user re-steps, and the
+window is short by design for exactly this reason. Death *after* `EMITTED` loses
+nothing: the row is `PENDING`, complete, and the periodic `DeliveryWorker` drains
+it with no in-memory state required. The delivery path never depends on the session process
 still being alive — that is the entire reason delivery is `WorkManager` and not a
 coroutine in the session worker.
 
@@ -820,6 +951,18 @@ directly, so the policy uses only signals Bascule can actually see (ADR-003):
 
 ### 8.4 Wrong-user reading
 Branch A drops it before persistence — a wrong index is unambiguous evidence.
+
+**One class of wrong-user reading Branch A cannot see**, closed separately: the
+*weight* frame is correctly attributed and correctly filtered, but a Body
+Composition frame names no user, so a mis-pairing attaches one household member's
+body fat, muscle and impedance to another's weight row — under an index the gate
+reads as correct. The wrong-user gate inspects `ScaleReading.userIndex` and would
+say "2", truthfully, about a row whose body-comp fields came from user 5. This is
+why correlation latches at one emission per session and drops everything after it
+(§2.1's retired-edge note, E18) rather than pairing a body-comp frame with
+whatever weight happens to be pending. The trade is stated where it is made, in
+`MeasurementCorrelator`: if a household member weighs first and JD second inside
+one session, JD's reading is lost. The asymmetry below is what decides it.
 
 Branch B is weaker and the design says so. Anything more than **1.5 kg** from the
 last confirmed reading is parked in `HELD_CONFIRM`, a status the drain query does
@@ -876,6 +1019,33 @@ composition. Backup is disabled (`android:allowBackup="false"`,
 `dataExtractionRules` excluding the DB and prefs) so readings and token cannot be
 extracted through ADB backup or transferred to a new device unencrypted.
 
+**The ADR-007 consent code is the second credential in this app, and it is
+treated as one.** The `scaleIndex → consentCode` pair lives only in
+`EncryptedConsentStore` (EncryptedSharedPreferences, same ground rule as the
+token), never in a log line, never in `lastError`, and never in a diagnostics
+frame dump — a User Control Point write carries the code in bytes 1–2, so §8.8's
+opcode-and-length-only rule covers it by construction. It is a shared secret with
+the scale in the same sense the bearer token is one with VitalForge: whoever
+holds it can consent as JD and read the household's stored body composition off
+the scale.
+
+**Its non-portability is a deliberate consequence, with a named cost.** The
+`allowBackup="false"` rule above was written to protect the token; it also
+guarantees the consent mapping does **not** survive a device migration, a
+reinstall, or "clear app data". The recovery path is to register again — and each
+registration plausibly consumes one of the scale's **8** profile slots (the live
+capture came back as index 2, so slot 1 was already taken by something that is
+not Bascule). Bascule cannot see how many remain. This is accepted rather than
+mitigated: a portable consent code would have to leave the device in a form ADB
+backup can read, which is the exact hole the rule closes, and the failure mode of
+running out of slots is now **visible** rather than silent (E19: a named edge, a
+`registrationRejected` counter, and a message telling the user to delete a
+profile in the Beurer app). Whether re-registration actually burns a slot, and
+whether the SIG delete-user operation or a read of `2A9A` User Index offers a
+cheaper recovery, are checklist rows HW-26 and HW-27 — the prediction is
+falsifiable and untested, and the severity of this whole paragraph drops sharply
+if slots are reused.
+
 ### 8.9 Malformed BLE frame
 E11: bounds-checked parsing, unknown opcodes skipped, 5-malformed abort, and no
 exception is ever allowed to escape the notification callback (it runs on a
@@ -907,6 +1077,22 @@ agent prompt any migration risking stored readings is an escalation to JD.
 ---
 
 ## 9. Constants deferred to Phase 3
+
+> **Provisional — superseded by `02-interface-revision.md` §4.** Every symbol in
+> the table below belongs to a **proprietary opcode protocol the BF720 does not
+> speak**. ADR-007 established that this unit implements the Bluetooth SIG
+> Weight / Body Composition / User Data profile, so `INIT_SEQUENCE`, `OPCODE_*`,
+> `BEURER_SERVICE_UUID`, `BEURER_NOTIFY_CHAR_UUID`, `BEURER_WRITE_CHAR_UUID` and
+> `WEIGHT_SCALE_FACTOR` have **no referent** and are not implemented. Their
+> replacement is `SigWeightProfile.kt`, sourced from the SIG specifications and
+> cross-checked against openScale's `StandardWeightProfileHandler.kt` /
+> `StandardBeurerSanitasHandler.kt` — **not** the Beurer/Sanitas wiki page the
+> "Source to cite" column names, which documents the older family members. The
+> replacement constants are **confirmed** against the 2026-08-22 capture, not
+> `UNCONFIRMED`. Left uncorrected, WP-05 would fill in provenance-commented
+> values for a protocol this scale does not use, which is worse than leaving them
+> blank because they would look sourced. Read `02-interface-revision.md` §4
+> instead of the table below.
 
 No protocol constant is written here. Each of the following is implemented in
 Phase 3 with a comment citing its source (openScale Beurer/Sanitas wiki page and
@@ -952,7 +1138,8 @@ Named explicitly because the design rests on them.
 | 3. Delivery state machine + dedup numbers + replay | §3, §4.4 |
 | 4. Versioned API contract, single Kotlin interface | §4.3 |
 | 5. Threat/failure review (6 named scenarios) | §8.1–§8.6 (plus §8.7–§8.12) |
-| Open questions handled as ADRs | `decisions.md` ADR-001…006 |
+| Open questions handled as ADRs | `decisions.md` ADR-001…007 |
+| Devil's advocate findings dispositioned | `02-phase2-dispositions.md` (O-01…O-11) |
 
 ---
 

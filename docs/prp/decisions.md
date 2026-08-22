@@ -482,6 +482,33 @@ delivers a household member's weight to Garmin silently, with no error and no
 log. A status makes the safe behaviour structural: a query that forgets
 `HELD_CONFIRM` exists simply does not select those rows.
 
+**Qualified in Phase 2 (O-06).** The sentence above is true **for allowlist
+predicates** and false for denylist ones, and this design uses both. An allowlist
+(`WHERE status = 'PENDING'` — the drain query, which is the query this ADR is
+about) is fail-safe: a new status is excluded by default, and the claim holds
+exactly as written. A denylist is fail-**open**: a new status is *included* by
+default. `00-design.md` §3.3's dedup corpus is one — "all rows in the window
+regardless of status, **except `DECLINED`**" — and it is load-bearing, because a
+seventh status that can hold another person's weight would silently suppress one
+of JD's genuine readings within 0.20 kg and 5 minutes. That is the exact loss
+mode self-review item 23 identified and fixed for `DECLINED`, reappearing by
+default for every status added after it. The hazard is live rather than
+theoretical: this design's status set went from **3** to **6** in a single
+self-review pass.
+
+The corrected claim, and the rule that follows from it: **a status makes the safe
+behaviour structural for allowlist predicates; the design must keep its
+status-filtering predicates allowlist-shaped, or test them exhaustively.**
+`DedupPolicyTest.everyStatusHasAnExplicitCorpusMembershipDecision` and
+`...dedupCorpusMembershipIsExplicitPerStatus` enforce this for the one denylist
+that exists today — adding a seventh status now fails a test rather than
+inheriting a decision nobody made. The §3.3 denylist itself is *not* wrong and is
+not being changed: a dedup check that misses rows creates duplicates, so
+defaulting to inclusion is the right shape there. What was wrong was the
+unqualified word "structural", which claims a safety property the design has in
+only one of the two shapes it uses — and an unqualified claim is how the next
+reviewer stops looking.
+
 The cost is one extra value in a string column and one extra HistoryScreen
 branch. Bad Garmin weight history is materially harder to clean up than a missed
 weigh-in is to redo (`00-design.md` §8.4), so the asymmetry favours the stricter
@@ -594,6 +621,21 @@ interface and `GattSession` handshake modeling need a real revision pass in
 Phase 2, informed by this ADR, before Phase 3 work packages WP-06/WP-07/WP-09
 are implemented against it. Treat `00-design.md` §2.6 as provisional until
 that revision lands — a note has been added there.
+
+#### Amendment (Phase 2) — the staleness was wider than §2.6
+
+The revision landed as `02-interface-revision.md`, and the Phase 2 devil's
+advocate pass (`02-devils-advocate-findings.md`, O-05) established that scoping
+this ADR's consequence to **one section** was itself the defect. ADR-007 is not a
+decoder-interface problem; it is a **change of protocol family**, and its
+consequences reach the Room schema (O-01), the emission model and the persist
+rule (O-02), the multi-user machinery (O-03), the transport's notify/indicate
+vocabulary (O-04), the constants table, the fixture corpus, the merge order
+(O-05), the credential inventory (O-08), and the risk ranking (O-07). Provisional
+banners now sit on `00-design.md` §2.7, §3.1 and §9 as well as §2.6, and the
+per-objection record of what was done about each is
+`02-phase2-dispositions.md`. Nothing in the decision above changes; what changes
+is the blast radius this ADR claimed for itself.
 
 ---
 

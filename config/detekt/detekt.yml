@@ -1,0 +1,40 @@
+# Minimal ruleset layered on detekt's defaults (buildUponDefaultConfig = true).
+# Only deviations from the default ruleset are listed.
+build:
+  maxIssues: 0
+
+complexity:
+  LongParameterList:
+    # ScaleReading and ReadingEntity are wide value types by design
+    # (00-design.md §2.7, §3.1) — a builder would add indirection, not clarity.
+    functionThreshold: 12
+    constructorThreshold: 24
+  TooManyFunctions:
+    thresholdInClasses: 20
+    thresholdInFiles: 25
+
+style:
+  MagicNumber:
+    # Protocol byte offsets, masks and scale factors are inherently numeric and
+    # each carries an ADR-002 provenance comment instead.
+    ignorePropertyDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
+    ignoreAnnotation: true
+    ignoreEnums: true
+  MaxLineLength:
+    maxLineLength: 120
+  ReturnCount:
+    max: 6
+  ForbiddenComment:
+    active: false
+
+naming:
+  FunctionNaming:
+    # @Composable functions are PascalCase by convention.
+    ignoreAnnotated: ['Composable']
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: false
+  SwallowedException:
+    active: false
