@@ -26,6 +26,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ContractVersion
+import kotlinx.coroutines.flow.SharedFlow
 
 /**
  * WP-25: §5's config surface plus §6.3's permission-request flow. The token
@@ -74,6 +76,7 @@ fun ConfigScreen(
                 state = state,
                 onBaseUrlTextChanged = viewModel::onBaseUrlTextChanged,
                 onSaveBaseUrl = viewModel::saveBaseUrl,
+                onTestConnection = viewModel::testConnection,
             )
         }
         item {
@@ -83,7 +86,15 @@ fun ConfigScreen(
                 onContractChanged = viewModel::saveContractVersion,
             )
         }
-        item { TokenSection(state, onSaveToken = viewModel::saveToken, onClearToken = viewModel::clearToken) }
+        item {
+            CredentialsSection(
+                state = state,
+                loginSucceeded = viewModel.loginSucceeded,
+                onSaveToken = viewModel::saveToken,
+                onLogin = viewModel::login,
+                onClearCredentials = viewModel::clearCredentials,
+            )
+        }
         item {
             RegisteredScaleSection(
                 pairedDeviceAddress = state.pairedDeviceAddress,
@@ -170,6 +181,7 @@ private fun ConnectionSection(
     state: ConfigUiState,
     onBaseUrlTextChanged: () -> Unit,
     onSaveBaseUrl: (String) -> Unit,
+    onTestConnection: () -> Unit,
 ) {
     var urlText by rememberSaveable(state.baseUrl) { mutableStateOf(state.baseUrl) }
 
@@ -186,12 +198,40 @@ private fun ConnectionSection(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Button(
-            onClick = { onSaveBaseUrl(urlText) },
-            modifier = Modifier.padding(top = 8.dp),
-        ) {
-            Text("Save")
+        Row(modifier = Modifier.padding(top = 8.dp)) {
+            Button(onClick = { onSaveBaseUrl(urlText) }) {
+                Text("Save")
+            }
+            OutlinedButton(
+                onClick = onTestConnection,
+                enabled = state.tokenIsSet &&
+                    state.baseUrl.isNotBlank() &&
+                    state.connectionTest != ConnectionTestUiState.Testing,
+                modifier = Modifier.padding(start = 8.dp),
+            ) {
+                Text(if (state.connectionTest == ConnectionTestUiState.Testing) "Testing…" else "Test connection")
+            }
         }
+        ConnectionTestResultText(state.connectionTest)
+    }
+}
+
+@Composable
+private fun ConnectionTestResultText(result: ConnectionTestUiState) {
+    when (result) {
+        ConnectionTestUiState.Idle, ConnectionTestUiState.Testing -> Unit
+        ConnectionTestUiState.Success -> Text(
+            "✓ Connected — token accepted",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        is ConnectionTestUiState.Failure -> Text(
+            "✗ ${result.message}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }
 
@@ -256,49 +296,155 @@ private fun <T> LabeledDropdown(
     }
 }
 
-@Composable
-private fun TokenSection(state: ConfigUiState, onSaveToken: (String) -> Unit, onClearToken: () -> Unit) {
-    var editing by remember { mutableStateOf(false) }
-    var tokenText by remember { mutableStateOf("") }
+private enum class CredentialEditMode { NONE, TOKEN, LOGIN }
 
-    SectionCard(title = "VitalForge token") {
+@Composable
+private fun CredentialsSection(
+    state: ConfigUiState,
+    loginSucceeded: SharedFlow<Unit>,
+    onSaveToken: (String) -> Unit,
+    onLogin: (String, String) -> Unit,
+    onClearCredentials: () -> Unit,
+) {
+    var mode by remember { mutableStateOf(CredentialEditMode.NONE) }
+    var tokenText by remember { mutableStateOf("") }
+    var usernameText by remember { mutableStateOf("") }
+    var passwordText by remember { mutableStateOf("") }
+
+    // One-shot: a sticky boolean read from state would re-fire every time this
+    // screen is restored via Navigation Compose's saveState/restoreState.
+    LaunchedEffect(loginSucceeded) {
+        loginSucceeded.collect {
+            mode = CredentialEditMode.NONE
+            usernameText = ""
+            passwordText = ""
+        }
+    }
+
+    SectionCard(title = "VitalForge credentials") {
         Text(
-            if (state.tokenIsSet) "Token is set" else "Token is not set",
+            when {
+                state.tokenIsSet -> "Signed in with an API token"
+                state.sessionIsSet -> "Signed in via username/password"
+                else -> "Not signed in"
+            },
             style = MaterialTheme.typography.bodyMedium,
         )
-        if (editing) {
-            OutlinedTextField(
-                value = tokenText,
-                onValueChange = { tokenText = it },
-                label = { Text("New token") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
+        when (mode) {
+            CredentialEditMode.NONE -> CredentialModeButtons(
+                credentialIsSet = state.tokenIsSet || state.sessionIsSet,
+                onUseToken = { mode = CredentialEditMode.TOKEN },
+                onLogIn = { mode = CredentialEditMode.LOGIN },
+                onClear = onClearCredentials,
             )
-            Row(modifier = Modifier.padding(top = 8.dp)) {
-                Button(onClick = {
+            CredentialEditMode.TOKEN -> TokenEditForm(
+                tokenText = tokenText,
+                onTokenTextChanged = { tokenText = it },
+                onSave = {
                     onSaveToken(tokenText)
                     tokenText = ""
-                    editing = false
-                }) { Text("Save token") }
-                TextButton(onClick = { editing = false; tokenText = "" }, modifier = Modifier.padding(start = 8.dp)) {
-                    Text("Cancel")
-                }
-            }
-        } else {
-            Row(modifier = Modifier.padding(top = 8.dp)) {
-                OutlinedButton(onClick = { editing = true }) {
-                    Text(if (state.tokenIsSet) "Replace token" else "Set token")
-                }
-                if (state.tokenIsSet) {
-                    TextButton(onClick = onClearToken, modifier = Modifier.padding(start = 8.dp)) {
-                        Text("Clear")
-                    }
-                }
-            }
+                    mode = CredentialEditMode.NONE
+                },
+                onCancel = { mode = CredentialEditMode.NONE; tokenText = "" },
+            )
+            CredentialEditMode.LOGIN -> LoginEditForm(
+                usernameText = usernameText,
+                passwordText = passwordText,
+                errorMessage = state.loginError,
+                isLoggingIn = state.isLoggingIn,
+                onUsernameChanged = { usernameText = it },
+                onPasswordChanged = { passwordText = it },
+                onSignIn = { onLogin(usernameText, passwordText) },
+                onCancel = { mode = CredentialEditMode.NONE; usernameText = ""; passwordText = "" },
+            )
         }
+    }
+}
+
+@Composable
+private fun CredentialModeButtons(
+    credentialIsSet: Boolean,
+    onUseToken: () -> Unit,
+    onLogIn: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Row(modifier = Modifier.padding(top = 8.dp)) {
+        OutlinedButton(onClick = onUseToken) { Text("Use a token") }
+        OutlinedButton(onClick = onLogIn, modifier = Modifier.padding(start = 8.dp)) { Text("Log in") }
+        if (credentialIsSet) {
+            TextButton(onClick = onClear, modifier = Modifier.padding(start = 8.dp)) { Text("Clear") }
+        }
+    }
+}
+
+@Composable
+private fun TokenEditForm(
+    tokenText: String,
+    onTokenTextChanged: (String) -> Unit,
+    onSave: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    OutlinedTextField(
+        value = tokenText,
+        onValueChange = onTokenTextChanged,
+        label = { Text("API token") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+    )
+    Row(modifier = Modifier.padding(top = 8.dp)) {
+        Button(onClick = onSave) { Text("Save token") }
+        TextButton(onClick = onCancel, modifier = Modifier.padding(start = 8.dp)) { Text("Cancel") }
+    }
+}
+
+@Composable
+private fun LoginEditForm(
+    usernameText: String,
+    passwordText: String,
+    errorMessage: String?,
+    isLoggingIn: Boolean,
+    onUsernameChanged: (String) -> Unit,
+    onPasswordChanged: (String) -> Unit,
+    onSignIn: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    OutlinedTextField(
+        value = usernameText,
+        onValueChange = onUsernameChanged,
+        label = { Text("Username") },
+        singleLine = true,
+        enabled = !isLoggingIn,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+    )
+    OutlinedTextField(
+        value = passwordText,
+        onValueChange = onPasswordChanged,
+        label = { Text("Password") },
+        singleLine = true,
+        enabled = !isLoggingIn,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+    )
+    errorMessage?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+    Row(modifier = Modifier.padding(top = 8.dp)) {
+        Button(onClick = onSignIn, enabled = !isLoggingIn) {
+            Text(if (isLoggingIn) "Signing in…" else "Sign in")
+        }
+        TextButton(onClick = onCancel, modifier = Modifier.padding(start = 8.dp)) { Text("Cancel") }
     }
 }
 

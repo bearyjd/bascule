@@ -11,12 +11,21 @@ import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.network.AuthTokenStore
+import com.ventouxlabs.bascule.network.ConnectionTestResult
 import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.network.LoginResult
+import com.ventouxlabs.bascule.network.SessionCookieStore
+import com.ventouxlabs.bascule.network.V1Shaper
+import com.ventouxlabs.bascule.network.VitalForgeApi
+import com.ventouxlabs.bascule.network.VitalForgeHttpClient
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
@@ -30,10 +39,21 @@ data class ConfigUiState(
     val contractVersion: ContractVersion = ContractVersion.V1_WEIGHT_ONLY,
     val alwaysOnBridging: Boolean = false,
     val tokenIsSet: Boolean = false,
+    val sessionIsSet: Boolean = false,
+    val loginError: String? = null,
+    val isLoggingIn: Boolean = false,
     val pairedDeviceAddress: String? = null,
     val registeredUserIndex: Int? = null,
     val baseUrlError: String? = null,
+    val connectionTest: ConnectionTestUiState = ConnectionTestUiState.Idle,
 )
+
+sealed interface ConnectionTestUiState {
+    data object Idle : ConnectionTestUiState
+    data object Testing : ConnectionTestUiState
+    data object Success : ConnectionTestUiState
+    data class Failure(val message: String) : ConnectionTestUiState
+}
 
 private data class StoredConfig(
     val baseUrl: String?,
@@ -41,6 +61,13 @@ private data class StoredConfig(
     val contractVersion: ContractVersion,
     val alwaysOnBridging: Boolean,
     val pairedDeviceAddress: String?,
+)
+
+private data class TransientUiState(
+    val baseUrlError: String?,
+    val connectionTest: ConnectionTestUiState,
+    val loginError: String?,
+    val isLoggingIn: Boolean,
 )
 
 /**
@@ -59,17 +86,41 @@ class ConfigViewModel(
     private val configStore: ConfigStore,
     private val authTokenStore: AuthTokenStore,
     private val consentStore: ConsentStore,
+    private val sessionCookieStore: SessionCookieStore,
     private val deliveryTrigger: DeliveryTrigger,
     private val dao: ReadingDao,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * Contract/shaper are irrelevant to [VitalForgeApi.testConnection]/[VitalForgeApi.login]
+     * (neither calls `shape()`), so they are hardcoded here rather than threaded through
+     * from the user's saved contract version — nothing reads them for these calls.
+     */
+    private val apiFactory: (baseUrl: String) -> VitalForgeApi = { baseUrl ->
+        VitalForgeHttpClient(
+            baseUrl = baseUrl,
+            tokenProvider = authTokenStore::token,
+            contract = ContractVersion.V1_WEIGHT_ONLY,
+            shaper = V1Shaper,
+            sessionCookieProvider = sessionCookieStore::cookie,
+        )
+    },
 ) : ViewModel() {
 
     private val _baseUrlError = MutableStateFlow<String?>(null)
-    private val _tokenVersion = MutableStateFlow(0)
+
+    /** Bumped by [saveToken], [clearCredentials], and a successful [login] — whichever credential store changed. */
+    private val _credentialVersion = MutableStateFlow(0)
 
     /** Bumped by [reRegister] — [ConsentStore] has no Flow of its own, so this tells [uiState] to re-read it. */
     private val _consentVersion = MutableStateFlow(0)
+    private val _connectionTest = MutableStateFlow<ConnectionTestUiState>(ConnectionTestUiState.Idle)
+    private val _loginError = MutableStateFlow<String?>(null)
+    private val _isLoggingIn = MutableStateFlow(false)
+    private val _loginSucceeded = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** One-shot — a sticky boolean would re-fire on every tab-switch return via saveState/restoreState. */
+    val loginSucceeded: SharedFlow<Unit> = _loginSucceeded.asSharedFlow()
 
     private val storedConfig = combine(
         configStore.baseUrl,
@@ -81,24 +132,38 @@ class ConfigViewModel(
         StoredConfig(baseUrl, displayUnit, contractVersion, alwaysOn, pairedAddress)
     }
 
+    /** combine() tops out at 5 typed flows per call — this nests to fit the login/connection-test additions. */
+    private val transientState = combine(
+        _baseUrlError,
+        _connectionTest,
+        _loginError,
+        _isLoggingIn,
+    ) { urlError, connectionTest, loginError, isLoggingIn ->
+        TransientUiState(urlError, connectionTest, loginError, isLoggingIn)
+    }
+
     val uiState: StateFlow<ConfigUiState> = combine(
         storedConfig,
-        _baseUrlError,
-        _tokenVersion,
+        transientState,
+        _credentialVersion,
         _consentVersion,
-    ) { stored, urlError, _, _ ->
-        // authTokenStore.isSet() and consentStore.credentialFor() are
-        // synchronous EncryptedSharedPreferences reads — flowOn(IO) below
-        // keeps them off the collecting (Main) dispatcher.
+    ) { stored, transient, _, _ ->
+        // authTokenStore.isSet(), sessionCookieStore.isSet(), and
+        // consentStore.credentialFor() are synchronous EncryptedSharedPreferences
+        // reads — flowOn(IO) below keeps them off the collecting (Main) dispatcher.
         ConfigUiState(
             baseUrl = stored.baseUrl.orEmpty(),
             displayUnit = stored.displayUnit,
             contractVersion = stored.contractVersion,
             alwaysOnBridging = stored.alwaysOnBridging,
             tokenIsSet = authTokenStore.isSet(),
+            sessionIsSet = sessionCookieStore.isSet(),
+            loginError = transient.loginError,
+            isLoggingIn = transient.isLoggingIn,
             pairedDeviceAddress = stored.pairedDeviceAddress,
             registeredUserIndex = stored.pairedDeviceAddress?.let { consentStore.credentialFor(it)?.scaleIndex },
-            baseUrlError = urlError,
+            baseUrlError = transient.baseUrlError,
+            connectionTest = transient.connectionTest,
         )
     }.flowOn(ioDispatcher).stateIn(viewModelScope, SharingStarted.Eagerly, ConfigUiState())
 
@@ -143,14 +208,69 @@ class ConfigViewModel(
         val trimmed = token.trim()
         if (trimmed.isEmpty()) return
         authTokenStore.save(trimmed)
-        _tokenVersion.value++
+        // Mutual exclusion: a token and a session cookie are never both active.
+        sessionCookieStore.clear()
+        _credentialVersion.value++
         viewModelScope.launch { dao.unblockAuthRows(nowMillis()) }
         deliveryTrigger.triggerImmediateDrain()
     }
 
-    fun clearToken() {
+    /** Clears whichever credential is active — mutual exclusion means at most one ever is. */
+    fun clearCredentials() {
         authTokenStore.clear()
-        _tokenVersion.value++
+        sessionCookieStore.clear()
+        _credentialVersion.value++
+    }
+
+    /**
+     * Exchanges a username/password for a session cookie (`shared/auth.py`'s
+     * `/auth/login` — VitalForge has no per-user token, so this is a second,
+     * independent credential type, not a way to obtain the bearer token).
+     * Guards against a second tap re-firing the request while the first is
+     * still in flight, mirroring [testConnection]'s guard.
+     */
+    fun login(username: String, password: String) {
+        if (_isLoggingIn.value) return
+        val trimmedUser = username.trim()
+        val trimmedPass = password.trim()
+        if (trimmedUser.isEmpty() || trimmedPass.isEmpty()) {
+            _loginError.value = "Enter a username and password"
+            return
+        }
+        _isLoggingIn.value = true
+        _loginError.value = null
+        viewModelScope.launch {
+            when (val result = apiFactory(uiState.value.baseUrl).login(trimmedUser, trimmedPass)) {
+                is LoginResult.Success -> {
+                    sessionCookieStore.save(result.sessionCookie)
+                    // Mutual exclusion: a token and a session cookie are never both active.
+                    authTokenStore.clear()
+                    _credentialVersion.value++
+                    _loginSucceeded.emit(Unit)
+                }
+                LoginResult.InvalidCredentials -> _loginError.value = "Invalid username or password"
+                is LoginResult.Unreachable -> _loginError.value = result.reason
+            }
+            _isLoggingIn.value = false
+        }
+    }
+
+    /**
+     * Read-only — never submits a reading. Guards against a second tap
+     * re-firing the request while the first is still in flight, mirroring
+     * `ManualEntryViewModel.save()`'s `isSaving` guard.
+     */
+    fun testConnection() {
+        if (_connectionTest.value == ConnectionTestUiState.Testing) return
+        _connectionTest.value = ConnectionTestUiState.Testing
+        viewModelScope.launch {
+            _connectionTest.value = when (val result = apiFactory(uiState.value.baseUrl).testConnection()) {
+                ConnectionTestResult.Authorized -> ConnectionTestUiState.Success
+                is ConnectionTestResult.Unauthorized ->
+                    ConnectionTestUiState.Failure("Server rejected the token (HTTP ${result.httpCode})")
+                is ConnectionTestResult.Unreachable -> ConnectionTestUiState.Failure(result.reason)
+            }
+        }
     }
 
     /**
@@ -186,6 +306,7 @@ class ConfigViewModel(
                     configStore = app.configStore,
                     authTokenStore = app.authTokenStore,
                     consentStore = app.consentStore,
+                    sessionCookieStore = app.sessionCookieStore,
                     deliveryTrigger = app.deliveryTrigger,
                     dao = app.database.readingDao(),
                 )

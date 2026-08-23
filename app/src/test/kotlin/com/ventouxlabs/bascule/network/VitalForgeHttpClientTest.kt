@@ -44,12 +44,14 @@ class VitalForgeHttpClientTest {
         contract: ContractVersion = ContractVersion.V1_WEIGHT_ONLY,
         shaper: ReadingPayloadShaper = V1Shaper,
         token: String? = TOKEN,
+        sessionCookie: String? = null,
         baseUrl: String = server.url("/").toString().trimEnd('/'),
     ) = VitalForgeHttpClient(
         baseUrl = baseUrl,
         tokenProvider = { token },
         contract = contract,
         shaper = shaper,
+        sessionCookieProvider = { sessionCookie },
     )
 
     private fun ok(body: String = "{}") = MockResponse.Builder().code(200).body(body).build()
@@ -273,7 +275,190 @@ class VitalForgeHttpClientTest {
         assertEquals(null, server.takeRequest().headers["Authorization"])
     }
 
+    @Test
+    fun testConnectionIsAuthorizedOn2xx() = runBlocking {
+        server.enqueue(ok())
+
+        val result = client().testConnection()
+
+        assertEquals(ConnectionTestResult.Authorized, result)
+    }
+
+    @Test
+    fun testConnectionIsUnauthorizedOn401() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(401).build())
+
+        val result = client().testConnection()
+
+        assertEquals(ConnectionTestResult.Unauthorized(401), result)
+    }
+
+    @Test
+    fun testConnectionIsUnauthorizedOn403() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(403).build())
+
+        val result = client().testConnection()
+
+        assertEquals(
+            "a bad-token signal must be distinguishable from a generic unreachable failure",
+            ConnectionTestResult.Unauthorized(403),
+            result,
+        )
+    }
+
+    @Test
+    fun testConnectionIsUnreachableOnSocketHangUp() = runBlocking {
+        server.close()
+
+        val result = client().testConnection()
+
+        assertTrue(result is ConnectionTestResult.Unreachable)
+    }
+
+    @Test
+    fun testConnectionIsUnreachableOnServerError() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(500).build())
+
+        val result = client().testConnection()
+
+        assertTrue(
+            "a 500 is neither an auth rejection nor a success — it must not be reported as Authorized",
+            result is ConnectionTestResult.Unreachable,
+        )
+    }
+
+    @Test
+    fun testConnectionUsesGetNotPost() = runBlocking {
+        server.enqueue(ok())
+
+        client().testConnection()
+
+        assertEquals("GET", server.takeRequest().method)
+    }
+
+    @Test
+    fun testConnectionSendsAuthorizationHeader() = runBlocking {
+        server.enqueue(ok())
+
+        client().testConnection()
+
+        assertEquals("Bearer $TOKEN", server.takeRequest().headers["Authorization"])
+    }
+
+    @Test
+    fun testConnectionHitsRecentPathNeverWeightPath() = runBlocking {
+        server.enqueue(ok())
+
+        client().testConnection()
+
+        assertEquals(
+            "must never risk submitting a fake reading just to check connectivity",
+            "/api/weight/recent",
+            server.takeRequest().url.encodedPath,
+        )
+    }
+
+    @Test
+    fun loginPostsUsernameAndPasswordAsJson() = runBlocking {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .body("""{"success":true}""")
+                .addHeader("Set-Cookie", "vf_session=$SESSION_COOKIE_VALUE; HttpOnly; SameSite=Lax")
+                .build(),
+        )
+
+        client().login("alice", "hunter2")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/auth/login", request.url.encodedPath)
+        val body = Json.parseToJsonElement(request.body!!.utf8()) as JsonObject
+        assertEquals("alice", body.getValue("username").jsonPrimitive.content)
+        assertEquals("hunter2", body.getValue("password").jsonPrimitive.content)
+    }
+
+    @Test
+    fun loginExtractsTheSessionCookieValueFromSetCookie() = runBlocking {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .body("""{"success":true}""")
+                .addHeader("Set-Cookie", "vf_session=$SESSION_COOKIE_VALUE; HttpOnly; SameSite=Lax")
+                .build(),
+        )
+
+        val result = client().login("alice", "hunter2")
+
+        assertEquals(LoginResult.Success(SESSION_COOKIE_VALUE), result)
+    }
+
+    @Test
+    fun loginIsInvalidCredentialsOn401() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(401).body("""{"detail":"Invalid credentials"}""").build())
+
+        val result = client().login("alice", "wrong-password")
+
+        assertEquals(LoginResult.InvalidCredentials, result)
+    }
+
+    @Test
+    fun loginIsUnreachableOnSocketHangUp() = runBlocking {
+        server.close()
+
+        val result = client().login("alice", "hunter2")
+
+        assertTrue(result is LoginResult.Unreachable)
+    }
+
+    @Test
+    fun loginErrorStringNeverContainsThePassword() = runBlocking {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(422)
+                .body("""{"detail":"validation failed for password hunter2"}""")
+                .build(),
+        )
+
+        val result = client().login("alice", "hunter2")
+
+        val reason = (result as LoginResult.Unreachable).reason
+        assertFalse("the password must never reach a stored error string", "hunter2" in reason)
+        assertFalse("nor may the response body", "detail" in reason)
+    }
+
+    @Test
+    fun submitReadingPrefersBearerTokenWhenBothCredentialsAreConfigured() = runBlocking {
+        server.enqueue(ok())
+
+        client(token = TOKEN, sessionCookie = SESSION_COOKIE_VALUE)
+            .submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+
+        val request = server.takeRequest()
+        assertEquals("Bearer $TOKEN", request.headers["Authorization"])
+        assertEquals(
+            "the app enforces mutual exclusivity, but the client must still pick a single winner if it's ever violated",
+            null,
+            request.headers["Cookie"],
+        )
+    }
+
+    @Test
+    fun submitReadingFallsBackToSessionCookieWhenNoTokenIsConfigured() = runBlocking {
+        server.enqueue(ok())
+
+        client(token = null, sessionCookie = SESSION_COOKIE_VALUE)
+            .submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+
+        val request = server.takeRequest()
+        assertEquals(null, request.headers["Authorization"])
+        assertEquals("vf_session=$SESSION_COOKIE_VALUE", request.headers["Cookie"])
+    }
+
     private companion object {
         const val TOKEN = "vf_test_token_do_not_leak"
+
+        /** Realistic itsdangerous `URLSafeTimedSerializer` shape (payload.timestamp.signature). */
+        const val SESSION_COOKIE_VALUE = "eyJ1c2VyIjoiYWRtaW4ifQ.aBcD3f.xyz123-abc_DEF456"
     }
 }

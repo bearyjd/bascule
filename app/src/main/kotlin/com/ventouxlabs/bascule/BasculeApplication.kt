@@ -12,6 +12,8 @@ import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
+import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
+import com.ventouxlabs.bascule.network.SessionCookieStore
 
 /**
  * Composition root. No DI framework is in this project's dependency set
@@ -33,6 +35,7 @@ class BasculeApplication : Application() {
 
     val database: BasculeDatabase by lazy { BasculeDatabase.getInstance(this) }
     val authTokenStore: AuthTokenStore by lazy { EncryptedAuthTokenStore(this) }
+    val sessionCookieStore: SessionCookieStore by lazy { EncryptedSessionCookieStore(this) }
     val consentStore: ConsentStore by lazy { EncryptedConsentStore(this) }
     val configStore: ConfigStore by lazy { DataStoreConfigStore(this) }
     val deliveryTrigger: DeliveryTrigger by lazy { WorkManagerDeliveryTrigger(this) }

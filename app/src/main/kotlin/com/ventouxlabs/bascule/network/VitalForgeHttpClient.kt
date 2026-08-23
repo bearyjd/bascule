@@ -7,9 +7,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -35,6 +38,8 @@ class VitalForgeHttpClient(
     override val contract: ContractVersion,
     private val shaper: ReadingPayloadShaper,
     client: OkHttpClient = defaultClient(),
+    /** The `vf_session` cookie value — an alternative, mutually exclusive credential to [tokenProvider]. */
+    private val sessionCookieProvider: () -> String? = { null },
 ) : VitalForgeApi {
 
     private val client = client.newBuilder()
@@ -43,6 +48,21 @@ class VitalForgeHttpClient(
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
+
+    /**
+     * Token first, matching `shared/auth.py`'s own `get_current_user()`
+     * precedence — the app enforces mutual exclusivity so only one credential
+     * is ever actually set, but this order stays correct even if that
+     * invariant is ever violated.
+     */
+    private fun Request.Builder.applyCredential(): Request.Builder = apply {
+        val token = tokenProvider()
+        val cookie = sessionCookieProvider()
+        when {
+            token != null -> header("Authorization", "Bearer $token")
+            cookie != null -> header("Cookie", "$SESSION_COOKIE_NAME=$cookie")
+        }
+    }
 
     override suspend fun submitReading(reading: ReadingEntity, unit: WeightUnit): SubmitResult {
         val payload = shaper.shape(reading, unit)
@@ -53,7 +73,7 @@ class VitalForgeHttpClient(
             .url(url)
             .post(payload.json.toString().toRequestBody(JSON_MEDIA_TYPE))
             .header("Content-Type", JSON_CONTENT_TYPE)
-            .apply { tokenProvider()?.let { header("Authorization", "Bearer $it") } }
+            .applyCredential()
             .build()
 
         return execute(
@@ -86,7 +106,7 @@ class VitalForgeHttpClient(
         val request = Request.Builder()
             .url(url)
             .get()
-            .apply { tokenProvider()?.let { header("Authorization", "Bearer $it") } }
+            .applyCredential()
             .build()
 
         return execute(request, onFailure = { RecentResult.Unavailable(it) }) { response ->
@@ -94,6 +114,57 @@ class VitalForgeHttpClient(
                 return@execute RecentResult.Unavailable("server returned ${response.code}")
             }
             parseRecent(response.body.string())
+        }
+    }
+
+    override suspend fun testConnection(): ConnectionTestResult {
+        val url = resolve(RECENT_PATH)?.newBuilder()
+            ?.addQueryParameter("within_seconds", TEST_CONNECTION_WINDOW_SECONDS)
+            ?.build()
+            ?: return ConnectionTestResult.Unreachable("base URL is not a valid http(s) URL")
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .applyCredential()
+            .build()
+
+        return execute(request, onFailure = { ConnectionTestResult.Unreachable(it) }) { response ->
+            when (val classified = ResponseClassifier.classify(response.code, emptySet())) {
+                is SubmitResult.Accepted -> ConnectionTestResult.Authorized
+                is SubmitResult.AuthRejected -> ConnectionTestResult.Unauthorized(classified.httpCode)
+                is SubmitResult.TransientFailure -> ConnectionTestResult.Unreachable(classified.reason)
+                is SubmitResult.PermanentRejection -> ConnectionTestResult.Unreachable(classified.reason)
+            }
+        }
+    }
+
+    override suspend fun login(username: String, password: String): LoginResult {
+        val url = resolve(LOGIN_PATH) ?: return LoginResult.Unreachable("base URL is not a valid http(s) URL")
+        val body = buildJsonObject {
+            put("username", JsonPrimitive(username))
+            put("password", JsonPrimitive(password))
+        }
+        val request = Request.Builder()
+            .url(url)
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .header("Content-Type", JSON_CONTENT_TYPE)
+            .build()
+
+        return execute(request, onFailure = { LoginResult.Unreachable(it) }) { response ->
+            when {
+                // Checked before isSuccessful: 401 is also unsuccessful, and checking
+                // success first would misclassify invalid credentials as unreachable.
+                response.code == HTTP_UNAUTHORIZED -> LoginResult.InvalidCredentials
+                !response.isSuccessful -> LoginResult.Unreachable("server returned ${response.code}")
+                else -> {
+                    val setCookie = response.headers("Set-Cookie")
+                        .firstOrNull { it.startsWith("$SESSION_COOKIE_NAME=") }
+                    val cookieValue = setCookie?.let { Cookie.parse(url, it) }?.value
+                    cookieValue?.let { LoginResult.Success(it) }
+                        ?: LoginResult.Unreachable("no session cookie in response")
+                }
+            }
         }
     }
 
@@ -149,6 +220,15 @@ class VitalForgeHttpClient(
     companion object {
         const val WEIGHT_PATH = "/api/weight"
         const val RECENT_PATH = "/api/weight/recent"
+        const val LOGIN_PATH = "/auth/login"
+
+        /** Must match `shared/auth.py`'s `_COOKIE_NAME` exactly — a mismatch fails silently, not with an error. */
+        const val SESSION_COOKIE_NAME = "vf_session"
+
+        private const val HTTP_UNAUTHORIZED = 401
+
+        /** Arbitrary and unused by callers — `testConnection()` only reads the status code, never the body. */
+        private const val TEST_CONNECTION_WINDOW_SECONDS = "60"
 
         /** 00-design.md §8.7. */
         const val MAX_BODY_BYTES = 64L * 1024

@@ -3,10 +3,14 @@ package com.ventouxlabs.bascule.ui
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.network.ConnectionTestResult
+import com.ventouxlabs.bascule.network.LoginResult
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
 import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
 import com.ventouxlabs.bascule.ui.fake.FakeDeliveryTrigger
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
+import com.ventouxlabs.bascule.ui.fake.FakeSessionCookieStore
+import com.ventouxlabs.bascule.ui.fake.FakeVitalForgeApi
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,15 +34,19 @@ class ConfigViewModelTest {
         configStore: FakeConfigStore = FakeConfigStore(),
         authTokenStore: FakeAuthTokenStore = FakeAuthTokenStore(),
         consentStore: InMemoryConsentStore = InMemoryConsentStore(),
+        sessionCookieStore: FakeSessionCookieStore = FakeSessionCookieStore(),
         deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
         dao: FakeReadingDao = FakeReadingDao(),
+        vitalForgeApi: FakeVitalForgeApi = FakeVitalForgeApi(),
     ) = ConfigViewModel(
         configStore,
         authTokenStore,
         consentStore,
+        sessionCookieStore,
         deliveryTrigger,
         dao,
         ioDispatcher = mainDispatcherRule.dispatcher,
+        apiFactory = { vitalForgeApi },
     )
 
     @Test
@@ -269,7 +277,7 @@ class ConfigViewModelTest {
         val vm = viewModel(authTokenStore = FakeAuthTokenStore("existing"), deliveryTrigger = deliveryTrigger)
         advanceUntilIdle()
 
-        vm.clearToken()
+        vm.clearCredentials()
         advanceUntilIdle()
 
         assertEquals(
@@ -277,5 +285,178 @@ class ConfigViewModelTest {
             0,
             deliveryTrigger.triggerCount,
         )
+    }
+
+    @Test
+    fun testConnectionSurfacesSuccessOnAuthorized() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi(connectionResult = ConnectionTestResult.Authorized)
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.testConnection()
+        advanceUntilIdle()
+
+        assertEquals(ConnectionTestUiState.Success, vm.uiState.value.connectionTest)
+    }
+
+    @Test
+    fun testConnectionSurfacesUnauthorizedAsAFailureMessage() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi(connectionResult = ConnectionTestResult.Unauthorized(401))
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.testConnection()
+        advanceUntilIdle()
+
+        val result = vm.uiState.value.connectionTest
+        assertTrue(result is ConnectionTestUiState.Failure)
+        assertEquals(
+            "the user needs to know it was the token, not the network, that failed",
+            "Server rejected the token (HTTP 401)",
+            (result as ConnectionTestUiState.Failure).message,
+        )
+    }
+
+    @Test
+    fun testConnectionSurfacesUnreachableReasonVerbatim() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi(connectionResult = ConnectionTestResult.Unreachable("network error"))
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.testConnection()
+        advanceUntilIdle()
+
+        val result = vm.uiState.value.connectionTest
+        assertTrue(result is ConnectionTestUiState.Failure)
+        assertEquals("network error", (result as ConnectionTestUiState.Failure).message)
+    }
+
+    @Test
+    fun secondTapWhileTestingIsIgnored() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi()
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.testConnection()
+        vm.testConnection() // connectionTest is set to Testing synchronously before the first coroutine ever runs
+        advanceUntilIdle()
+
+        assertEquals(
+            "two taps before the first check completes must not fire two requests",
+            1,
+            vitalForgeApi.testConnectionCallCount,
+        )
+    }
+
+    @Test
+    fun loginSavesTheSessionCookieAndClearsAnyStoredToken() = runTest {
+        val sessionCookieStore = FakeSessionCookieStore()
+        val authTokenStore = FakeAuthTokenStore("existing-token")
+        val vitalForgeApi = FakeVitalForgeApi(loginResult = LoginResult.Success("session-cookie-value"))
+        val vm = viewModel(
+            authTokenStore = authTokenStore,
+            sessionCookieStore = sessionCookieStore,
+            vitalForgeApi = vitalForgeApi,
+        )
+        advanceUntilIdle()
+
+        vm.login("alice", "hunter2")
+        advanceUntilIdle()
+
+        assertEquals("session-cookie-value", sessionCookieStore.cookie())
+        assertTrue(vm.uiState.value.sessionIsSet)
+        assertEquals(
+            "mutual exclusion: a successful login must clear any previously stored token",
+            null,
+            authTokenStore.token(),
+        )
+    }
+
+    @Test
+    fun savingATokenClearsAnyStoredSessionCookie() = runTest {
+        val sessionCookieStore = FakeSessionCookieStore("existing-cookie")
+        val vm = viewModel(sessionCookieStore = sessionCookieStore)
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.sessionIsSet)
+
+        vm.saveToken("a-token")
+        advanceUntilIdle()
+
+        assertEquals(
+            "mutual exclusion, the other direction: saving a token must clear any stored session cookie",
+            null,
+            sessionCookieStore.cookie(),
+        )
+        assertTrue(vm.uiState.value.tokenIsSet)
+        assertTrue(
+            "the screen must stop claiming a cookie-based session once a token has taken over",
+            !vm.uiState.value.sessionIsSet,
+        )
+    }
+
+    @Test
+    fun loginSurfacesInvalidCredentialsAsAFailureMessage() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi(loginResult = LoginResult.InvalidCredentials)
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.login("alice", "wrong-password")
+        advanceUntilIdle()
+
+        assertEquals("Invalid username or password", vm.uiState.value.loginError)
+        assertTrue(
+            "an invalid login must not be reported as signed in",
+            !vm.uiState.value.sessionIsSet,
+        )
+    }
+
+    @Test
+    fun loginRejectsBlankUsernameOrPassword() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi()
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.login("", "hunter2")
+        advanceUntilIdle()
+
+        assertNotNull(vm.uiState.value.loginError)
+        assertEquals(
+            "a blank username must not reach the network at all",
+            0,
+            vitalForgeApi.loginCallCount,
+        )
+    }
+
+    @Test
+    fun secondLoginTapWhileInFlightIsIgnored() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi()
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.login("alice", "hunter2")
+        vm.login("alice", "hunter2") // isLoggingIn is set synchronously before the first coroutine ever runs
+        advanceUntilIdle()
+
+        assertEquals(
+            "two taps before the first login completes must not fire two requests",
+            1,
+            vitalForgeApi.loginCallCount,
+        )
+    }
+
+    @Test
+    fun clearCredentialsClearsBothStores() = runTest {
+        val authTokenStore = FakeAuthTokenStore("a-token")
+        val sessionCookieStore = FakeSessionCookieStore("a-cookie")
+        val vm = viewModel(authTokenStore = authTokenStore, sessionCookieStore = sessionCookieStore)
+        advanceUntilIdle()
+
+        vm.clearCredentials()
+        advanceUntilIdle()
+
+        assertEquals(null, authTokenStore.token())
+        assertEquals(null, sessionCookieStore.cookie())
+        assertTrue(!vm.uiState.value.tokenIsSet)
+        assertTrue(!vm.uiState.value.sessionIsSet)
     }
 }
