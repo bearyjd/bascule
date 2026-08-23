@@ -353,19 +353,23 @@ class GattSession(
     /**
      * The wire protocol carries no correlation ID: a Register/Consent response
      * is identified only by its opcode, so a response to a *superseded* write
-     * (the original half of an E6 reissue, or the pre-re-registration half of
-     * a rejected stored credential) is byte-for-byte indistinguishable from a
-     * fresh one once decoded. `BeurerDecoder`'s state machine absorbs this
-     * safely when the next expected event is a *different* `DecodeEvent` type,
-     * but not when state cycles back to the same `HandshakeState` subtype
-     * (`AwaitingConsent(registered=false)` → re-register → `AwaitingConsent
-     * (registered=true)`) — a late response to the first still type-matches
-     * the second wait. Draining before every handshake write (including
-     * reissues) is what actually closes that hole: it discards anything still
-     * sitting in the channel from a step this write supersedes, so the next
-     * wait only ever sees responses to *this* write. `yield()` first because a
-     * response the fake already emitted may not have been relayed into
-     * `events` yet — see `run()`'s own KDoc on the same hazard.
+     * is byte-for-byte indistinguishable from a fresh one once decoded.
+     * Draining before every handshake write (including reissues) discards
+     * anything *already sitting* in the channel from a step this write
+     * supersedes — e.g. a duplicate response the fake (or scale) emitted twice
+     * for the same write. `yield()` first because a response already emitted
+     * may not have been relayed into `events` yet — see `run()`'s own KDoc on
+     * the same hazard.
+     *
+     * This does NOT close the harder case where the stale response hasn't
+     * arrived yet at drain time and only shows up during the *next* write's
+     * wait — draining can't discard what isn't in the channel. When state
+     * cycles back to the same `HandshakeState` subtype (`AwaitingConsent
+     * (registered=false)` → re-register → `AwaitingConsent(registered=true)`),
+     * that case is closed at the decoder level instead: see
+     * `BeurerDecoder.consentPreviouslyRefused`, which stops treating a
+     * same-type refusal as fatal once a re-registration has happened this
+     * session, and lets E6's own ack ladder be the arbiter.
      */
     private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
         yield()

@@ -738,13 +738,34 @@ review applied):
   actually tested: a reissue, not a late ack) and a new
   `lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep` — a
   regression test for a real bug the review found: the UCP wire protocol has
-  no correlation ID, so a late response to a superseded write is
-  byte-identical to a fresh one, and once `HandshakeState` cycles back to the
-  same subtype (`AwaitingConsent(registered=false)` → re-register →
+  no correlation ID, so a response to a superseded write is byte-identical to
+  a fresh one, and once `HandshakeState` cycles back to the same subtype
+  (`AwaitingConsent(registered=false)` → re-register →
   `AwaitingConsent(registered=true)`), the decoder's own type-based `Wait`
-  guard doesn't catch it. Fixed in `GattSession` by draining the channel
-  before every handshake write (`issueHandshakeWrite`), not just before a
-  connect retry as WP-06 did.
+  guard doesn't catch it.
+  **First fix attempt was wrong and is recorded here so it isn't repeated:**
+  draining the channel before every handshake write (`issueHandshakeWrite`)
+  looked like a fix and passed its own test, but a second advisor pass traced
+  it and found the drain can only discard what has *already* arrived by drain
+  time — "late" means "not yet arrived", so a response that shows up during
+  the *next* write's wait sails straight past it. The original regression
+  test didn't catch this because it only ever pushed one manual response,
+  never two genuinely in flight at once. **Actual fix** lives in
+  `BeurerDecoder`: a `consentPreviouslyRefused` flag, set only when a stale
+  stored credential's Consent has driven a re-registration this session; while
+  set, a same-shaped refusal returns `Wait` instead of `Abort`, leaving E6's
+  own ack ladder as the sole arbiter of whether the real response ever shows
+  up. This does not weaken the fast-abort path for a *first-ever* registration
+  refused immediately after registering (`consentRefusedForAFreshlyRegistered
+  UserAborts`) — that path has no prior consent write to be stale, so
+  `consentPreviouslyRefused` never gets set there. The channel drain in
+  `issueHandshakeWrite` was left in place as harmless defense-in-depth against
+  a narrower case (a duplicate response to the *same* write already sitting in
+  the channel), with its KDoc corrected to stop claiming it closes the hole
+  above. See `BeurerHandshakeTest.consentRefusedAfterAStaleCredentialAlready
+  ReregisteredWaitsInsteadOfAborting` for the decoder-level proof and the
+  rewritten `GattSessionHandshakeTest` test for the end-to-end two-refusal
+  race.
 - `handshakeFailureRecordsOpcodeAndLengthOnly` →
   `handshakeFailureDetailNeverLeaksPayloadBytes` — see the residue note above.
 - Added `BeurerDecoderOpeningSequenceTest` (exact-byte coverage for the
@@ -757,6 +778,10 @@ review applied):
   adapter-off during the handshake or opening write was routing into
   `SessionOutcome.HandshakeFailed` instead of `Missed(ADAPTER_OFF)`, the same
   misclassification class WP-06's review caught twice for the connect phase.
+- Added `BeurerHandshakeTest.consentRefusedAfterAStaleCredentialAlready
+  ReregisteredWaitsInsteadOfAborting` — decoder-level proof for the
+  `consentPreviouslyRefused` fix above, added on the second advisor pass after
+  the first fix attempt (channel draining) was found not to close the hole.
 
 **Counter:** `registrationRejected` (E19).
 **Hardware checklist:** HW-04, HW-05, HW-26, HW-27.

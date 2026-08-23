@@ -129,6 +129,33 @@ class BeurerHandshakeTest {
         assertTrue("re-registering in a loop would burn the connection window", directive is HandshakeDirective.Abort)
     }
 
+    /**
+     * Once a *stale stored credential's* Consent has already been refused and
+     * recovered from by re-registering this session, a second same-shaped
+     * refusal must not abort. The UCP protocol carries no correlation ID, so
+     * this refusal is byte-identical to either a genuine new refusal or a
+     * stale leftover from the write it superseded — the decoder cannot tell
+     * which, and `GattSession` (which only drains what's *already* arrived)
+     * cannot help either, since a not-yet-arrived response can't be drained.
+     * Contrast with [consentRefusedForAFreshlyRegisteredUserAborts]: that
+     * case has no prior consent write in the session to be stale, so it can
+     * still abort fast and accurately.
+     */
+    @Test
+    fun consentRefusedAfterAStaleCredentialAlreadyReregisteredWaitsInsteadOfAborting() {
+        val stale = ScaleCredential(scaleIndex = 7, consentCode = 0x0001)
+        decoder.beginHandshake(discovered, context(stale))
+        decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure())) // stale credential refused -> re-register
+        decoder.onHandshakeEvent(ucp(Bf720Capture.registrationSuccess())) // re-registration succeeds -> consent again
+
+        val directive = decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure()))
+        assertEquals(
+            "an unverifiable refusal must not abort a handshake that could still land",
+            HandshakeDirective.Wait,
+            directive,
+        )
+    }
+
     @Test
     fun refusedRegistrationAborts() {
         decoder.beginHandshake(discovered, context())

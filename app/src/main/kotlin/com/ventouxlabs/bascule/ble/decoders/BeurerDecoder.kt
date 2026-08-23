@@ -38,6 +38,23 @@ class BeurerDecoder(
     private var handshake: HandshakeState = HandshakeState.NotStarted
     private var context: HandshakeContext? = null
 
+    /**
+     * True once a stored credential's Consent has been refused and this
+     * session has re-registered as recovery. The UCP wire protocol carries no
+     * correlation ID, so once that has happened, a later `ConsentResult`
+     * cannot be told apart from a stale response to the very consent write it
+     * superseded — draining the event channel before each write cannot help,
+     * because "stale" here means "not yet arrived" at drain time, not
+     * "already sitting in the channel". While this flag is set, a refused
+     * consent for the new registration is treated as [HandshakeDirective.Wait]
+     * rather than an instant abort, leaving E6's own ack ladder as the sole
+     * arbiter of whether the real response ever shows up. This does not apply
+     * to a first-ever registration (no stored credential): there is no prior
+     * consent write in that path to be stale, so a refusal there still aborts
+     * fast with an accurate reason.
+     */
+    private var consentPreviouslyRefused = false
+
     var malformedCount: Int = 0
         private set
 
@@ -120,6 +137,9 @@ class BeurerDecoder(
             return HandshakeDirective.Complete(state.credential.takeIf { state.registered })
         }
         if (state.registered) {
+            if (consentPreviouslyRefused) {
+                return HandshakeDirective.Wait
+            }
             return HandshakeDirective.Abort("scale refused consent for a just-registered user")
         }
         // A stored credential the scale no longer honours — its user slot was
@@ -127,6 +147,7 @@ class BeurerDecoder(
         // is the branch a fixed initSequence could not express (ADR-007).
         val freshCode = context?.freshConsentCode
             ?: return HandshakeDirective.Abort("no consent code available to re-register")
+        consentPreviouslyRefused = true
         handshake = HandshakeState.AwaitingRegistration(freshCode)
         return HandshakeDirective.Send(registerWrite(freshCode), ACK_TIMEOUT)
     }

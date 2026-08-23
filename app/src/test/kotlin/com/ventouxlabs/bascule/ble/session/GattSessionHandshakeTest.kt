@@ -291,22 +291,28 @@ class GattSessionHandshakeTest {
 
     /**
      * Regression test for the hazard found in review: the UCP wire protocol
-     * carries no correlation ID, so a late response to a *superseded* write is
-     * byte-identical to a fresh one. Drives the exact sequence that exposes it
-     * — a stale stored credential's Consent write times out (E6), reissues,
-     * and only then does the *original* write's late refusal arrive, kicking
-     * off re-registration and a brand new Consent write. Without draining the
-     * channel before every handshake write, that late refusal (or the
-     * reissue's own now-orphaned response) would still be sitting there and
-     * get misread as the answer to the new Consent step, which shares
-     * `AwaitingConsent`'s state type with the one it actually answered.
+     * carries no correlation ID, so a response to a *superseded* write is
+     * byte-identical to a fresh one. Draining the event channel before each
+     * write cannot close this — "late" means "not yet arrived", so nothing is
+     * there to drain — so the actual fix lives in `BeurerDecoder`: once a
+     * refused stored credential has driven a re-registration this session,
+     * `consentPreviouslyRefused` stops treating a same-type refusal as fatal,
+     * leaving E6's own ack ladder as the arbiter.
+     *
+     * Drives the exact two-refusal sequence that exposes the hazard: consent
+     * write #1 (stale stored credential) times out and reissues as #2; #1's
+     * late refusal then arrives, kicking off re-registration and consent
+     * write #3; #2's own now-orphaned late refusal arrives *while #3 is
+     * outstanding* — type-matching #3's wait exactly, since both are
+     * `AwaitingConsent(registered=true)`. Only then does #3's real answer
+     * land. If the decoder treated either late refusal as answering #3, the
+     * handshake would fail here.
      */
     @Test
     fun lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep() = runTest {
         val consentStore = InMemoryConsentStore().apply {
             save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = 5, consentCode = 0x9999))
         }
-        var consentAttempts = 0
         val transport = FakeGattTransport(
             discovered = discovered,
             onWrite = { char, bytes ->
@@ -315,14 +321,11 @@ class GattSessionHandshakeTest {
                 } else {
                     when (bytes.firstOrNull()?.toInt()) {
                         SigWeightProfile.UCP_REGISTER_NEW_USER -> listOf(char to Bf720Capture.registrationSuccess())
-                        SigWeightProfile.UCP_CONSENT -> {
-                            consentAttempts++
-                            // Writes #1 (original) and #2 (E6's reissue) get no
-                            // automatic response; #1's refusal is pushed
-                            // manually, late, below. Write #3 (post-re-
-                            // registration) succeeds normally.
-                            if (consentAttempts <= 2) emptyList() else listOf(char to Bf720Capture.consentSuccess())
-                        }
+                        // No consent write ever gets an automatic response —
+                        // every answer, including the real one, is pushed
+                        // manually below so the test controls exactly when
+                        // each lands relative to the session's current wait.
+                        SigWeightProfile.UCP_CONSENT -> emptyList()
                         else -> emptyList()
                     }
                 }
@@ -334,9 +337,21 @@ class GattSessionHandshakeTest {
         advanceTimeBy(3_000)
         runCurrent() // E6 fires: consent write #2 (the reissue) goes out
 
-        // Write #1's answer finally arrives — late, after #2 is already
-        // outstanding. A refusal, since the stored credential really is stale.
+        // Write #1's late refusal arrives now, while #2 is outstanding. Drives
+        // re-registration; register auto-succeeds; consent write #3 goes out
+        // and the session starts waiting on it — all without a time advance,
+        // so the wait for #3 is still open when the next indicate lands.
         transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentFailure())
+        runCurrent()
+
+        // Write #2's late refusal — the reissue's own now-orphaned response —
+        // arrives while #3 is outstanding. Byte-identical to a genuine new
+        // refusal of #3; must not misfire an Abort.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentFailure())
+        runCurrent()
+
+        // #3's real answer finally arrives.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
         advanceUntilIdle()
 
         val outcome = deferred.await()
