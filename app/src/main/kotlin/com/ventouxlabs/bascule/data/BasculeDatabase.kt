@@ -1,6 +1,8 @@
 package com.ventouxlabs.bascule.data
 
+import android.content.Context
 import androidx.room.Database
+import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 
@@ -16,5 +18,18 @@ abstract class BasculeDatabase : RoomDatabase() {
 
     companion object {
         const val NAME = "bascule.db"
+
+        @Volatile
+        private var instance: BasculeDatabase? = null
+
+        /** Process-wide singleton — Room's own guidance, avoids duplicate WAL handles. */
+        fun getInstance(context: Context): BasculeDatabase =
+            instance ?: synchronized(this) {
+                instance ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    BasculeDatabase::class.java,
+                    NAME,
+                ).build().also { instance = it }
+            }
     }
 }
