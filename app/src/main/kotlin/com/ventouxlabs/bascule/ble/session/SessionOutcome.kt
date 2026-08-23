@@ -19,4 +19,10 @@ enum class MissReason {
     NO_MEASUREMENT,
     BOND_FAILED,
     ADAPTER_OFF,
+
+    /** E2 exhausted its retry ladder — distinct from a plain connect timeout for HW-17. */
+    GATT_ERROR,
+
+    /** `onServicesDiscovered` reported a non-zero status — a transport failure, not "wrong device". */
+    DISCOVERY_FAILED,
 }

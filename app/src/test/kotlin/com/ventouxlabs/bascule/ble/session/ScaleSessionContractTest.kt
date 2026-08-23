@@ -5,6 +5,7 @@ import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.ble.fake.Bf720Capture
 import com.ventouxlabs.bascule.ble.fake.FakeGattTransport
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
+import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -71,6 +72,7 @@ class ScaleSessionContractTest {
         decoder = BeurerDecoder(),
         consentStore = consentStore,
         deviceAddress = DEVICE_ADDRESS,
+        diagnostics = InMemoryDiagnosticsCounters(),
     )
 
     @Test

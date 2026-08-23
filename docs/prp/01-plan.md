@@ -567,7 +567,54 @@ against it.
 
 ---
 
-#### WP-06 — `GattSession` connect / discover / teardown · **B: CI**
+#### WP-06 — `GattSession` connect / discover / teardown · **B: CI** · **landed**
+
+> **Landed, with two scope notes for whoever picks up WP-07.**
+>
+> 1. **`DiagnosticsCounters` (WP-02's remaining sliver) landed early, folded into
+>    this package.** `incompatibleStreak` needed somewhere to live before this
+>    package could be tested, and WP-02's other files (`ReadingField`,
+>    `ContractVersion`) already existed under different names in
+>    `network/VitalForgeApi.kt` — only the diagnostics interface and its
+>    in-memory double were genuinely missing. Added: `diagnostics/DiagnosticsCounters.kt`,
+>    `diagnostics/InMemoryDiagnosticsCounters.kt`. `GattSession` now takes a
+>    `diagnostics: DiagnosticsCounters` constructor parameter (no default,
+>    matching the existing `consentStore`/`transport` pattern).
+> 2. **`GattSessionDiscoveryTest.thirdConsecutiveIncompatibleReachesTheSuspendThreshold`**
+>    (originally named `...SuspendsArming`, renamed per the review below)
+>    **tests the counter mechanics, not arming suspension.** *Suspending*
+>    arming is ConfigScreen/`ScaleScanner` consumer behaviour (WP-08+), which
+>    does not exist yet. This package's job — increment on `Incompatible`,
+>    reset on a clean discovery — is what the test actually asserts; WP-08 or
+>    later must be the one to read `INCOMPATIBLE_STREAK` and act on the
+>    threshold.
+> 3. **An independent code-review pass (fresh context, no shared state with the
+>    implementing session) found 3 HIGH and 6 MEDIUM findings, all fixed before
+>    merge** — per the agent prompt's devil's-advocate protocol applied at
+>    package scale. Two are worth recording because they would have mattered to
+>    WP-07:
+>    - E3's second detection shape — `CONNECTED` immediately followed by a
+>      disconnect (status 8/19/22) — was not implemented, so Atlas contention
+>      (§8.3, ADR-003) misreported as `Incompatible` and burned
+>      `incompatibleStreak` against a working scale. Fixed: `receiveConnectOutcome`
+>      now peeks the channel for a drop queued immediately behind `CONNECTED`;
+>      `FakeGattTransport` gained `ConnectOutcome.ConnectThenDrop` to script it
+>      (`GattSessionConnectTest.connectedThenImmediateDropIsTreatedAsContention`).
+>    - The fix for the *first* finding (a stale-event channel hazard on E1/E2
+>      retries) initially broke three tests when hand-traced: `drainStaleEvents()`
+>      was called immediately after `close()`/`disconnect()`, before any real
+>      suspension had let the forwarder coroutine relay those transport-level
+>      events out of the `SharedFlow` — so the drain found nothing, and the
+>      *next* attempt's wait-step consumed the stale event instead of its own.
+>      Moved the drain to after `delay()` and reran the full suite before
+>      trusting it closed. Recorded here per the handoff's own rule: a fix
+>      surviving one review-and-fix cycle is not the same as a fix verified by
+>      hand-tracing the actual code path.
+>    - Also added: `MissReason.GATT_ERROR` (E2 exhaustion no longer reports as
+>      a plain connect timeout — HW-17 needs the distinction) and
+>      `MissReason.DISCOVERY_FAILED` (a non-zero discovery status is a
+>      transport failure, not a "wrong device" signal, and must not increment
+>      `incompatibleStreak`).
 
 **Files:** `ble/session/GattSession.kt`, `ble/session/SessionBudget.kt`
 
@@ -604,6 +651,25 @@ constants so the arithmetic is testable in one place.
 ---
 
 #### WP-07 — UDS register/consent handshake + E6, E19 · **B: CI** · ⚠ **RISK-1** *(was RISK-2; re-scoped from the retired `initSequence()` model — §1)*
+
+> **Open design gap, found while landing WP-06, not resolved here — resolve
+> before writing `writesCurrentTimeBeforeRegisterOrConsent`.** This section
+> says the opening step writes Current Time (`2A2B`) "per the decision recorded
+> in `00-design.md` §4.4," but the shipped `BeurerDecoder`/`ScaleDecoder`
+> contract (`02-interface-revision.md`) has no such step: `beginHandshake()`
+> goes straight to register/consent, `requiredServices` does not include
+> `CURRENT_TIME_SERVICE`, and `ScaleSessionContractTest`'s `discovered` map
+> doesn't carry it either — though `SigWeightProfile.CURRENT_TIME`/
+> `CURRENT_TIME_SERVICE` constants already exist. `GattSession`'s own KDoc
+> forbids putting protocol knowledge in the session, so the write can't just be
+> hardcoded there. The candidate resolution: add a decoder-owned
+> `openingSequence(discovered): List<GattOp>` (parallel to the existing
+> `teardownSequence()`), executed by `GattSession` after discovery and before
+> `beginHandshake`, waiting only for the transport-level `WriteComplete` (not a
+> UCP indication — Current Time has no domain ack). That's a real interface
+> change (`ScaleDecoder`, `BeurerDecoder`, the contract test's `discovered` map),
+> so treat it as a small plan amendment, not a silent implementation detail —
+> record what was decided here once it lands.
 
 **Files:** `ble/session/GattSession.kt` (`HANDSHAKING` → `SUBSCRIBED`, driving
 `beginHandshake`/`onHandshakeEvent` and persisting through `ConsentStore`). The
