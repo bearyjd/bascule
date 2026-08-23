@@ -28,6 +28,12 @@ class FakeGattTransport(
      */
     private val connectOutcomes: List<ConnectOutcome> = listOf(ConnectOutcome.Success),
     private val discoverOutcome: DiscoverOutcome = DiscoverOutcome.Success,
+    /**
+     * Characteristics whose write never gets a `WriteComplete` — for proving a
+     * best-effort write (the Current Time opening write, §4.4) truly doesn't
+     * block or fail the session it's part of.
+     */
+    private val suppressWriteCompleteFor: Set<UUID> = emptySet(),
 ) : GattTransport {
 
     private var connectAttempt = 0
@@ -100,8 +106,11 @@ class FakeGattTransport(
     }
 
     override fun write(char: UUID, bytes: ByteArray) {
+        _callOrder += "write:$char"
         writesPerformed += char to bytes
-        emit(TransportEvent.WriteComplete(char, status = 0))
+        if (char !in suppressWriteCompleteFor) {
+            emit(TransportEvent.WriteComplete(char, status = 0))
+        }
         onWrite(char, bytes).forEach { (responseChar, value) ->
             emit(TransportEvent.CharacteristicChanged(responseChar, value))
         }
@@ -112,6 +121,7 @@ class FakeGattTransport(
     override fun enableIndications(char: UUID) = subscribe(char, SubscriptionKind.INDICATE)
 
     private fun subscribe(char: UUID, kind: SubscriptionKind) {
+        _callOrder += "subscribe:$char"
         subscribedCharacteristics[char] = kind
         emit(TransportEvent.SubscriptionEnabled(char, kind, status = 0))
     }

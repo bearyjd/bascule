@@ -4,6 +4,7 @@ import com.ventouxlabs.bascule.ble.session.DecodeEvent
 import com.ventouxlabs.bascule.ble.session.DiscoveredServices
 import com.ventouxlabs.bascule.ble.session.GattOp
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import java.util.Calendar
 import java.util.UUID
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -51,6 +52,20 @@ class BeurerDecoder(
         SigWeightProfile.WEIGHT_SCALE_SERVICE in serviceUuids &&
             (advertisedName == null || advertisedName.startsWith(ADVERTISED_NAME_PREFIX))
 
+    /**
+     * Confirmed on the physical BF720: the probe's Current Time write produced
+     * a frame timestamp matching to the second (docs/prp/03-hardware-validation.md
+     * §5, 00-design.md §4.4). Skipped, not failed, if the device doesn't expose
+     * `0x1805`/`2A2B` — best-effort per [ScaleDecoder.openingSequence]'s KDoc.
+     */
+    override fun openingSequence(discovered: DiscoveredServices, nowMillis: Long): List<GattOp> {
+        val hasCurrentTime = discovered.hasCharacteristic(
+            SigWeightProfile.CURRENT_TIME_SERVICE,
+            SigWeightProfile.CURRENT_TIME,
+        )
+        return if (hasCurrentTime) listOf(currentTimeWrite(nowMillis)) else emptyList()
+    }
+
     override fun beginHandshake(
         discovered: DiscoveredServices,
         context: HandshakeContext,
@@ -88,7 +103,7 @@ class BeurerDecoder(
         if (event !is DecodeEvent.RegistrationResult) return HandshakeDirective.Wait
         val index = event.scaleIndex
         if (!event.success || index == null) {
-            return HandshakeDirective.Abort("scale refused Register New User")
+            return HandshakeDirective.Abort("scale refused Register New User", registrationRejected = true)
         }
         val credential = ScaleCredential(index, state.consentCode)
         handshake = HandshakeState.AwaitingConsent(credential, registered = true)
@@ -205,6 +220,39 @@ class BeurerDecoder(
         expectAckWithin = ACK_TIMEOUT,
     )
 
+    /**
+     * Bluetooth SIG Current Time characteristic, standard 10-byte payload:
+     * Exact Time 256 (year LE, month, day, hours, minutes, seconds) + day of
+     * week (BLE convention: Monday=1..Sunday=7, 0=unknown) + Fractions256 +
+     * Adjust Reason. Byte layout and field values confirmed against the probe
+     * capture (docs/prp/03-hardware-validation.md §5) — this is a port of that
+     * exact logic, not a fresh implementation.
+     */
+    private fun currentTimeWrite(nowMillis: Long): GattOp.Write {
+        val cal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val year = cal.get(Calendar.YEAR)
+        val bleDayOfWeek = when (val calendarDayOfWeek = cal.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.SUNDAY -> BLE_SUNDAY
+            else -> calendarDayOfWeek - 1
+        }
+        return GattOp.Write(
+            char = SigWeightProfile.CURRENT_TIME,
+            bytes = byteArrayOf(
+                (year and BYTE_MASK).toByte(),
+                ((year shr BYTE_BITS) and BYTE_MASK).toByte(),
+                (cal.get(Calendar.MONTH) + 1).toByte(),
+                cal.get(Calendar.DAY_OF_MONTH).toByte(),
+                cal.get(Calendar.HOUR_OF_DAY).toByte(),
+                cal.get(Calendar.MINUTE).toByte(),
+                cal.get(Calendar.SECOND).toByte(),
+                bleDayOfWeek.toByte(),
+                0, // Fractions256 — sub-second precision not tracked
+                0, // Adjust Reason: manual time update
+            ),
+            expectAckWithin = null, // a plain characteristic write, not a UCP-ack step
+        )
+    }
+
     private sealed interface HandshakeState {
         data object NotStarted : HandshakeState
         data class AwaitingRegistration(val consentCode: Int) : HandshakeState
@@ -229,5 +277,8 @@ class BeurerDecoder(
         private const val BYTE_BITS = 8
         private const val UCP_RESPONSE_MIN_LENGTH = 3
         private const val UCP_INDEX_OFFSET = 3
+
+        /** BLE Day of Week convention: Monday=1..Sunday=7 (`Calendar.DAY_OF_WEEK` is Sunday=1..Saturday=7). */
+        private const val BLE_SUNDAY = 7
     }
 }

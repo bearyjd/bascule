@@ -35,6 +35,18 @@ interface ScaleDecoder {
     fun matches(advertisedName: String?, serviceUuids: Set<UUID>): Boolean
 
     /**
+     * Ops the session executes after discovery, before the handshake
+     * (00-design.md §4.4): the SIG Current Time write, when the device exposes
+     * it, so the scale's own frame timestamps are trustworthy. Best-effort —
+     * the session waits for each write's transport-level completion (real GATT
+     * operations must be serialized) but does not abort the session over it;
+     * an unset RTC produces a garbage `scaleTimestampMillis`, not a failed
+     * weigh-in. [nowMillis] is supplied by the caller because reading the wall
+     * clock is I/O the decoder is otherwise free of.
+     */
+    fun openingSequence(discovered: DiscoveredServices, nowMillis: Long): List<GattOp>
+
+    /**
      * First directive of the handshake, chosen from what is already known about
      * this scale. Called once, after discovery.
      */
@@ -93,5 +105,17 @@ sealed interface HandshakeDirective {
      */
     data class Complete(val credential: ScaleCredential?) : HandshakeDirective
 
-    data class Abort(val reason: String) : HandshakeDirective
+    /**
+     * [registrationRejected] is a structured flag rather than string-matching
+     * [reason], so the session's `registrationRejected` counter (E19,
+     * 01-plan.md §2.1) doesn't depend on parsing decoder prose to tell a
+     * refused registration apart from every other abort. It is `true` for
+     * **every** refused Register — including a refused re-registration after a
+     * stale stored credential was rejected, which is still opcode `0x01`
+     * failing per E19 — and `false` for everything else: E6 exhaustion, a
+     * missing User Control Point, and a refused *consent* for a
+     * just-registered user (the abort most easily confused with a refused
+     * registration, since both follow a successful Register write).
+     */
+    data class Abort(val reason: String, val registrationRejected: Boolean = false) : HandshakeDirective
 }

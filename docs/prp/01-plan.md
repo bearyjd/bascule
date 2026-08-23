@@ -637,7 +637,9 @@ constants so the arithmetic is testable in one place.
 - `GattSessionConnectTest.contentionOutcomeIsMissedContention` (E3)
 - `GattSessionDiscoveryTest.discoveryTimeoutAtFiveSeconds` (E4)
 - `GattSessionDiscoveryTest.missingRequiredServiceYieldsIncompatible` (E4)
-- `GattSessionDiscoveryTest.thirdConsecutiveIncompatibleSuspendsArming` (E4)
+- `GattSessionDiscoveryTest.thirdConsecutiveIncompatibleReachesTheSuspendThreshold`
+  (E4 — renamed from `...SuspendsArming` during review: it tests the counter
+  mechanics, not arming suspension, which is WP-08+ consumer behaviour)
 - `GattSessionTeardownTest.adapterOffTearsDownWithoutRetry` (E12)
 - `GattSessionTeardownTest.cancellationClosesGattExactlyOnce` (E15)
 - `GattSessionTeardownTest.everyTerminalPathClosesGattExactlyOnce`
@@ -652,24 +654,44 @@ constants so the arithmetic is testable in one place.
 
 #### WP-07 — UDS register/consent handshake + E6, E19 · **B: CI** · ⚠ **RISK-1** *(was RISK-2; re-scoped from the retired `initSequence()` model — §1)*
 
-> **Open design gap, found while landing WP-06, not resolved here — resolve
-> before writing `writesCurrentTimeBeforeRegisterOrConsent`.** This section
-> says the opening step writes Current Time (`2A2B`) "per the decision recorded
-> in `00-design.md` §4.4," but the shipped `BeurerDecoder`/`ScaleDecoder`
-> contract (`02-interface-revision.md`) has no such step: `beginHandshake()`
-> goes straight to register/consent, `requiredServices` does not include
-> `CURRENT_TIME_SERVICE`, and `ScaleSessionContractTest`'s `discovered` map
-> doesn't carry it either — though `SigWeightProfile.CURRENT_TIME`/
-> `CURRENT_TIME_SERVICE` constants already exist. `GattSession`'s own KDoc
-> forbids putting protocol knowledge in the session, so the write can't just be
-> hardcoded there. The candidate resolution: add a decoder-owned
-> `openingSequence(discovered): List<GattOp>` (parallel to the existing
-> `teardownSequence()`), executed by `GattSession` after discovery and before
-> `beginHandshake`, waiting only for the transport-level `WriteComplete` (not a
-> UCP indication — Current Time has no domain ack). That's a real interface
-> change (`ScaleDecoder`, `BeurerDecoder`, the contract test's `discovered` map),
-> so treat it as a small plan amendment, not a silent implementation detail —
-> record what was decided here once it lands.
+> **Landed — the Current Time gap flagged while landing WP-06 is resolved as
+> its own candidate proposed.** `ScaleDecoder` gained
+> `openingSequence(discovered: DiscoveredServices, nowMillis: Long): List<GattOp>`
+> (parallel to `teardownSequence()`); `nowMillis` is supplied by the caller
+> since reading the wall clock is I/O the decoder is otherwise free of —
+> `GattSession` gained a `clock: () -> Long = System::currentTimeMillis`
+> constructor parameter for exactly this, and it's what makes
+> `BeurerDecoderOpeningSequenceTest`'s exact-byte assertions deterministic.
+> `BeurerDecoder.openingSequence` writes `2A2B` only when the device exposes
+> `0x1805`/`2A2B` (checked, not required — `requiredServices` deliberately does
+> not gain it, so a device without it is still compatible, just without a
+> trustworthy `scaleTimestampMillis`) and never blocks or fails the session
+> over it (`GattSessionHandshakeTest.currentTimeWriteNeverCompletingDoesNotBlockOrFailTheSession`).
+>
+> **Two residues surfaced by the independent review pass, not fixed here —
+> record them, don't silently drop them:**
+> 1. **Credential-persist timing conflicts with `02-interface-revision.md`.**
+>    `00-design.md`:842 says the scale-assigned index must be persisted "at
+>    that moment or lost," but `02-interface-revision.md`:66-67 deliberately
+>    decided `Complete.credential` — persisted only once consent is granted —
+>    is the session's sole persistence signal. WP-07 inherits that contract as
+>    shipped: a successful Register followed by a Consent that then fails (E6
+>    exhaustion, adapter-off, or a genuinely refused consent) loses the
+>    scale-assigned index, and the next session burns another of 8 profile
+>    slots (O-08). Fixing it needs a `HandshakeDirective` change (e.g. a
+>    `Registered(credential)` case the session persists on sight, ahead of
+>    `Complete`) — a design decision for whoever picks up WP-08, not a change
+>    to make silently inside a review-fix pass.
+> 2. **E6's failure detail doesn't carry opcode/length.** §2.3 E6 asks for the
+>    raw bytes actually received to be recorded as "opcode + length only, never
+>    full payload" on ack exhaustion. `GattSession.HandshakeStep`'s timeout path
+>    has no received bytes to report from (nothing arrived, that's the failure)
+>    — the gap is for a case E6's own prose doesn't fully distinguish: a
+>    *malformed* handshake response, which `BeurerDecoder.onHandshakeEvent`
+>    currently treats as `Wait` (falls through to the same ack-timeout path)
+>    rather than reporting what it saw. `handshakeFailureDetailNeverLeaksPayloadBytes`
+>    (renamed from `...RecordsOpcodeAndLengthOnly`) covers the property that
+>    does hold — no raw bytes leak — not the one that doesn't yet.
 
 **Files:** `ble/session/GattSession.kt` (`HANDSHAKING` → `SUBSCRIBED`, driving
 `beginHandshake`/`onHandshakeEvent` and persisting through `ConsentStore`). The
@@ -690,7 +712,7 @@ the connection window for 45 s before reporting the wrong edge. **E19**: a
 refused Register is `HandshakeFailed` with the `registrationRejected` counter and
 the profiles-full message, never a silent stall.
 
-**Tests:**
+**Tests, as planned:**
 - `GattSessionHandshakeTest.writesCurrentTimeBeforeRegisterOrConsent`
 - `GattSessionHandshakeTest.registersWhenNoCredentialIsStored`
 - `GattSessionHandshakeTest.sendsConsentDirectlyWhenACredentialIsStored`
@@ -702,11 +724,39 @@ the profiles-full message, never a silent stall.
 - `GattSessionHandshakeTest.refusedRegistrationYieldsHandshakeFailedAndCounts` (E19)
 - `GattSessionHandshakeTest.missingAckReissuesWriteAfterThreeSeconds`
 - `GattSessionHandshakeTest.reissuesAtMostTwiceThenTearsDown`
-- `GattSessionHandshakeTest.lateAckAfterReissueDoesNotDoubleSubscribe`
 - `GattSessionHandshakeTest.duplicateAckIsIdempotent`
 - `GattSessionHandshakeTest.unrelatedIndicationMidHandshakeIsAWaitNotAFailure`
-- `GattSessionHandshakeTest.handshakeFailureRecordsOpcodeAndLengthOnly` (§8.8)
 - `SessionBudgetTest.handshakeLadderFitsWithinHardCeilingAfterConnectPhase`
+  (rewritten during review to model the real worst case — three chained UCP
+  steps, not one — see §5's note on this row below)
+
+**Renamed or added during the independent review pass**, because the original
+name asserted more than the test actually checked (same discipline WP-06's
+review applied):
+- `lateAckAfterReissueDoesNotDoubleSubscribe` → split into
+  `reissuedRegisterThatLandsCompletesTheHandshake` (what the original script
+  actually tested: a reissue, not a late ack) and a new
+  `lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep` — a
+  regression test for a real bug the review found: the UCP wire protocol has
+  no correlation ID, so a late response to a superseded write is
+  byte-identical to a fresh one, and once `HandshakeState` cycles back to the
+  same subtype (`AwaitingConsent(registered=false)` → re-register →
+  `AwaitingConsent(registered=true)`), the decoder's own type-based `Wait`
+  guard doesn't catch it. Fixed in `GattSession` by draining the channel
+  before every handshake write (`issueHandshakeWrite`), not just before a
+  connect retry as WP-06 did.
+- `handshakeFailureRecordsOpcodeAndLengthOnly` →
+  `handshakeFailureDetailNeverLeaksPayloadBytes` — see the residue note above.
+- Added `BeurerDecoderOpeningSequenceTest` (exact-byte coverage for the
+  Current Time write, including a Sunday case for the `Calendar.SUNDAY → 7`
+  remap) and `GattSessionHandshakeTest.currentTimeWriteNeverCompletingDoesNotBlockOrFailTheSession` —
+  the CTS byte encoding is a faithful port of `tools/hw-probe`'s hardware-
+  validated logic, but had zero regression coverage before this pass.
+- Added `adapterOffMidHandshakeIsMissedNotHandshakeFailed` and
+  `adapterOffDuringTheOpeningWriteIsMissedNotIncompatibleOrHandshakeFailed` —
+  adapter-off during the handshake or opening write was routing into
+  `SessionOutcome.HandshakeFailed` instead of `Missed(ADAPTER_OFF)`, the same
+  misclassification class WP-06's review caught twice for the connect phase.
 
 **Counter:** `registrationRejected` (E19).
 **Hardware checklist:** HW-04, HW-05, HW-26, HW-27.
