@@ -20,7 +20,17 @@ class FakeGattTransport(
     /** Called when the session writes; return the bytes the scale indicates back. */
     private val onWrite: (UUID, ByteArray) -> List<Pair<UUID, ByteArray>> = { _, _ -> emptyList() },
     private val discovered: DiscoveredServices = DiscoveredServices(emptyMap()),
+    /**
+     * Scripted outcome per `connect()` call, consumed in order; the last entry
+     * repeats once exhausted (01-plan.md §3.5's `connectStatus`/`connectDelay`
+     * knobs, folded into one script since a GATT status of 0 already implies "no
+     * delay worth modelling" and the timeout case has no status at all).
+     */
+    private val connectOutcomes: List<ConnectOutcome> = listOf(ConnectOutcome.Success),
+    private val discoverOutcome: DiscoverOutcome = DiscoverOutcome.Success,
 ) : GattTransport {
+
+    private var connectAttempt = 0
 
     /**
      * Replays, deliberately. A scripted fake emits synchronously from inside
@@ -49,13 +59,44 @@ class FakeGattTransport(
     var closeCallCount = 0
         private set
 
+    /**
+     * Records `connect`/`close`/`discoverServices` in call order, so a test can
+     * assert *when* a leak-prevention close happened relative to the next
+     * connect attempt (E2), not merely that it happened (§8.10).
+     */
+    private val _callOrder = mutableListOf<String>()
+    val callOrder: List<String> get() = _callOrder.toList()
+
     override fun connect() {
+        _callOrder += "connect"
         connectCallCount++
-        emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
+        val outcome = connectOutcomes.getOrElse(connectAttempt) { connectOutcomes.last() }
+        connectAttempt++
+        when (outcome) {
+            ConnectOutcome.Success ->
+                emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
+            is ConnectOutcome.Failure ->
+                emit(TransportEvent.ConnectionStateChanged(connected = false, status = outcome.status))
+            is ConnectOutcome.ConnectThenDrop -> {
+                emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
+                emit(TransportEvent.ConnectionStateChanged(connected = false, status = outcome.status))
+            }
+            ConnectOutcome.Timeout -> Unit // deliberately silent — the session's own timer must fire
+        }
     }
 
     override fun discoverServices() {
-        emit(TransportEvent.ServicesDiscovered(discovered, status = 0))
+        _callOrder += "discoverServices"
+        when (val outcome = discoverOutcome) {
+            DiscoverOutcome.Success -> emit(TransportEvent.ServicesDiscovered(discovered, status = 0))
+            is DiscoverOutcome.Failure -> emit(TransportEvent.ServicesDiscovered(discovered, outcome.status))
+            DiscoverOutcome.Timeout -> Unit
+        }
+    }
+
+    /** Pushes an unsolicited adapter-off event, as `ACTION_STATE_CHANGED` does (E12). */
+    fun emitAdapterOff() {
+        emit(TransportEvent.AdapterOff)
     }
 
     override fun write(char: UUID, bytes: ByteArray) {
@@ -84,10 +125,12 @@ class FakeGattTransport(
     }
 
     override fun disconnect() {
+        _callOrder += "disconnect"
         emit(TransportEvent.ConnectionStateChanged(connected = false, status = 0))
     }
 
     override fun close() {
+        _callOrder += "close"
         closeCallCount++
     }
 
@@ -104,4 +147,29 @@ class FakeGattTransport(
         const val BOND_BONDED = 12
         const val REPLAY_CAPACITY = 128
     }
+}
+
+/** Scripted outcome of one `connect()` call. */
+sealed interface ConnectOutcome {
+    data object Success : ConnectOutcome
+    data class Failure(val status: Int) : ConnectOutcome
+
+    /** No `ConnectionStateChanged` at all — the session's own E1 timer must fire. */
+    data object Timeout : ConnectOutcome
+
+    /**
+     * `CONNECTED` immediately followed by a disconnect — E3's second shape
+     * (`00-design.md` §2.3: "`CONNECTED` then immediate disconnect with status
+     * 8/19/22"), and `01-plan.md` §3.6b's `device_busy.scale` fixture.
+     */
+    data class ConnectThenDrop(val status: Int) : ConnectOutcome
+}
+
+/** Scripted outcome of `discoverServices()`. */
+sealed interface DiscoverOutcome {
+    data object Success : DiscoverOutcome
+    data class Failure(val status: Int) : DiscoverOutcome
+
+    /** No `ServicesDiscovered` at all — the session's own E4 timer must fire. */
+    data object Timeout : DiscoverOutcome
 }

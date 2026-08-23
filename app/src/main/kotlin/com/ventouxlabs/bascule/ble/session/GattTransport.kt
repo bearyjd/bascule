@@ -9,6 +9,16 @@ import java.util.UUID
  * calls — so substituting a fake in tests leaves no untested surface.
  */
 interface GattTransport {
+    /**
+     * `GattSession` subscribes once, after this transport already exists, and
+     * calls [connect] on the same turn with no suspension in between — so an
+     * implementation backed by a `replay = 0` `MutableSharedFlow` would drop
+     * its own `CONNECTED` callback if `connect()`'s internal emission races
+     * the subscriber's registration. `FakeGattTransport` uses `replay = 128`
+     * for exactly this reason (see its own KDoc). A real implementation must
+     * do the same — `replay >= 1` is a load-bearing part of this contract, not
+     * an implementation detail of the fake.
+     */
     val events: SharedFlow<TransportEvent>
 
     fun connect()
