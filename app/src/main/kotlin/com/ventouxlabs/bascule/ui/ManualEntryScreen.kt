@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -16,8 +18,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -38,13 +40,19 @@ fun ManualEntryScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
 
-    LaunchedEffect(state.saved) {
-        if (state.saved) onSaved()
+    // A one-shot event, not a state field derived from uiState — the
+    // ViewModel is retained across bottom-nav tab switches (saveState /
+    // restoreState), so keying LaunchedEffect off a sticky "saved" boolean
+    // would re-fire onSaved() on every return to this tab, not just the save
+    // that actually set it.
+    LaunchedEffect(viewModel) {
+        viewModel.savedEvents.collect { onSaved() }
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -69,16 +77,18 @@ fun ManualEntryScreen(
             isError = state.errorMessage != null,
             supportingText = state.errorMessage?.let { { Text(it) } },
             singleLine = true,
+            enabled = !state.isSaving,
             modifier = Modifier.fillMaxWidth(),
         )
 
         Button(
             onClick = viewModel::save,
+            enabled = !state.isSaving,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 24.dp),
         ) {
-            Text("Save")
+            Text(if (state.isSaving) "Saving…" else "Save")
         }
     }
 }

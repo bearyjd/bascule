@@ -15,7 +15,7 @@ import org.junit.runner.Description
  * this swapped in first or `viewModelScope.launch` throws immediately.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class MainDispatcherRule(private val dispatcher: TestDispatcher = StandardTestDispatcher()) : TestWatcher() {
+class MainDispatcherRule(val dispatcher: TestDispatcher = StandardTestDispatcher()) : TestWatcher() {
     override fun starting(description: Description) {
         Dispatchers.setMain(dispatcher)
     }

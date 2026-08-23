@@ -2,10 +2,13 @@ package com.ventouxlabs.bascule.ui
 
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
 import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
 import com.ventouxlabs.bascule.ui.fake.FakeDeliveryTrigger
+import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
+import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -28,7 +31,15 @@ class ConfigViewModelTest {
         authTokenStore: FakeAuthTokenStore = FakeAuthTokenStore(),
         consentStore: InMemoryConsentStore = InMemoryConsentStore(),
         deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
-    ) = ConfigViewModel(configStore, authTokenStore, consentStore, deliveryTrigger)
+        dao: FakeReadingDao = FakeReadingDao(),
+    ) = ConfigViewModel(
+        configStore,
+        authTokenStore,
+        consentStore,
+        deliveryTrigger,
+        dao,
+        ioDispatcher = mainDispatcherRule.dispatcher,
+    )
 
     @Test
     fun registeredUserIndexIsReadOnlyAndSourcedFromConsentStore() = runTest {
@@ -69,12 +80,52 @@ class ConfigViewModelTest {
         )
     }
 
+    /**
+     * Regression test: the ViewModel's own state must reflect a re-register,
+     * not merely the underlying store. `reRegister` used to clear the
+     * consent store without invalidating anything `uiState`'s `combine`
+     * depends on, so the screen kept showing the stale index and kept
+     * offering the re-register button after it had already fired.
+     */
+    @Test
+    fun reRegisterUpdatesUiStateRegisteredUserIndexToNull() = runTest {
+        val consentStore = InMemoryConsentStore().apply {
+            save("AA:BB:CC:DD:EE:FF", ScaleCredential(scaleIndex = 4, consentCode = 0x1234))
+        }
+        val configStore = FakeConfigStore(initialPairedDeviceAddress = "AA:BB:CC:DD:EE:FF")
+        val vm = viewModel(configStore = configStore, consentStore = consentStore)
+        advanceUntilIdle()
+        assertEquals(4, vm.uiState.value.registeredUserIndex)
+
+        vm.reRegister("AA:BB:CC:DD:EE:FF")
+        advanceUntilIdle()
+
+        assertNull(
+            "the screen must stop claiming registration and stop offering the button after firing it",
+            vm.uiState.value.registeredUserIndex,
+        )
+    }
+
     @Test
     fun baseUrlRejectsNonHttpScheme() = runTest {
         val vm = viewModel()
         advanceUntilIdle()
 
         vm.saveBaseUrl("ftp://example.com")
+        advanceUntilIdle()
+
+        assertNotNull(vm.uiState.value.baseUrlError)
+    }
+
+    @Test
+    fun baseUrlRejectsPlainHttp() = runTest {
+        val vm = viewModel()
+        advanceUntilIdle()
+
+        // The manifest declares no cleartext-traffic policy, so a saved
+        // http:// URL would validate here and then fail at request time
+        // with no way for the user to tell why — https is required outright.
+        vm.saveBaseUrl("http://example.com")
         advanceUntilIdle()
 
         assertNotNull(vm.uiState.value.baseUrlError)
@@ -121,8 +172,17 @@ class ConfigViewModelTest {
         assertEquals("https://vitalforge.example.com", configStore.baseUrl.value)
     }
 
+    /**
+     * What "never exposed for display" actually rests on is
+     * [ConfigUiState]'s own field set — it declares no property that could
+     * hold the raw value, so there is nothing for a Composable to
+     * accidentally read regardless of what this test asserts. What this test
+     * *can* verify at runtime: `saveToken` actually persists the value it
+     * was given and flips `tokenIsSet`, which the type-level guarantee alone
+     * doesn't prove.
+     */
     @Test
-    fun tokenIsNeverExposedForDisplay() = runTest {
+    fun saveTokenPersistsTheValueAndSetsTokenIsSetTrue() = runTest {
         val authTokenStore = FakeAuthTokenStore()
         val vm = viewModel(authTokenStore = authTokenStore)
         advanceUntilIdle()
@@ -130,14 +190,37 @@ class ConfigViewModelTest {
         vm.saveToken("super-secret-token")
         advanceUntilIdle()
 
-        // ConfigUiState carries no field that could ever hold the raw token —
-        // only tokenIsSet. This is enforced by the type, not by a runtime
-        // check: there is nowhere in ConfigUiState to accidentally read it
-        // from. Also assert the underlying store: this test proves the
-        // ViewModel's own contract, not just the store's.
         assertTrue(vm.uiState.value.tokenIsSet)
-        // The store itself may hold the raw value; the UI state never does.
         assertEquals("super-secret-token", authTokenStore.token())
+    }
+
+    @Test
+    fun saveTokenTrimsSurroundingWhitespace() = runTest {
+        val authTokenStore = FakeAuthTokenStore()
+        val vm = viewModel(authTokenStore = authTokenStore)
+        advanceUntilIdle()
+
+        // A pasted token with a trailing newline would otherwise be stored
+        // verbatim, fail auth with a confusing 401, and pause the whole
+        // delivery drain over an invisible whitespace character.
+        vm.saveToken("  a-token\n")
+        advanceUntilIdle()
+
+        assertEquals("a-token", authTokenStore.token())
+    }
+
+    @Test
+    fun saveTokenRejectsBlankAfterTrimming() = runTest {
+        val authTokenStore = FakeAuthTokenStore()
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(authTokenStore = authTokenStore, deliveryTrigger = deliveryTrigger)
+        advanceUntilIdle()
+
+        vm.saveToken("   ")
+        advanceUntilIdle()
+
+        assertNull(authTokenStore.token())
+        assertEquals("a blank token must not trigger a drain either", 0, deliveryTrigger.triggerCount)
     }
 
     @Test
@@ -150,6 +233,34 @@ class ConfigViewModelTest {
         advanceUntilIdle()
 
         assertEquals(1, deliveryTrigger.triggerCount)
+    }
+
+    /**
+     * §8.6: saving a token must flip every `BLOCKED_AUTH` row back to
+     * `PENDING`, not only trigger a drain — the drain query only ever
+     * selects `PENDING` rows, so triggering it alone would find nothing and
+     * the blocked rows would stay blocked forever.
+     */
+    @Test
+    fun savingTokenUnblocksBlockedAuthRows() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "blocked1", status = ReadingStatus.BLOCKED_AUTH, attemptCount = 3))
+        dao.insert(readingFixture(id = "blocked2", status = ReadingStatus.BLOCKED_AUTH))
+        dao.insert(readingFixture(id = "sent", status = ReadingStatus.SENT))
+        val vm = viewModel(dao = dao)
+        advanceUntilIdle()
+
+        vm.saveToken("a-token")
+        advanceUntilIdle()
+
+        assertEquals(ReadingStatus.PENDING, dao.rows.value.single { it.id == "blocked1" }.status)
+        assertEquals(0, dao.rows.value.single { it.id == "blocked1" }.attemptCount)
+        assertEquals(ReadingStatus.PENDING, dao.rows.value.single { it.id == "blocked2" }.status)
+        assertEquals(
+            "an already-SENT row must not be touched by the unblock",
+            ReadingStatus.SENT,
+            dao.rows.value.single { it.id == "sent" }.status,
+        )
     }
 
     @Test

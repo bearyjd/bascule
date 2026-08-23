@@ -42,4 +42,21 @@ interface ReadingDao {
 
     @Query("SELECT COUNT(*) FROM readings WHERE status = 'BLOCKED_AUTH'")
     suspend fun blockedAuthCount(): Int
+
+    /**
+     * §8.6: saving a new token flips every `BLOCKED_AUTH` row back to
+     * `PENDING`, on a fresh retry window — the same reset `HistoryViewModel`
+     * applies to a manual retry, since a row that's been sitting blocked has
+     * no more claim to its old `attemptCount`/backoff than one that's been
+     * failing outright.
+     */
+    @Query(
+        """
+        UPDATE readings
+        SET status = 'PENDING', attemptCount = 0, retryEpochMillis = :nowMillis,
+            lastError = NULL, lastErrorClass = NULL
+        WHERE status = 'BLOCKED_AUTH'
+        """,
+    )
+    suspend fun unblockAuthRows(nowMillis: Long)
 }

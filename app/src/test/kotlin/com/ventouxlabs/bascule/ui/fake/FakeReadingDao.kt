@@ -35,4 +35,20 @@ class FakeReadingDao : ReadingDao {
 
     override suspend fun blockedAuthCount(): Int =
         _rows.value.count { it.status == ReadingStatus.BLOCKED_AUTH }
+
+    override suspend fun unblockAuthRows(nowMillis: Long) {
+        _rows.value = _rows.value.map { reading ->
+            if (reading.status != ReadingStatus.BLOCKED_AUTH) {
+                reading
+            } else {
+                reading.copy(
+                    status = ReadingStatus.PENDING,
+                    attemptCount = 0,
+                    retryEpochMillis = nowMillis,
+                    lastError = null,
+                    lastErrorClass = null,
+                )
+            }
+        }
+    }
 }

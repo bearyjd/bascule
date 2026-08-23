@@ -1,7 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -50,11 +49,11 @@ fun HistoryScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
 
-    if (state.rows.isEmpty()) {
-        EmptyHistory()
-        return
-    }
-
+    // Banners and diagnostics must render even with zero rows — O-11.4's
+    // whole point is that a session producing no reading (E7) inserts no row
+    // at all, so an early return on an empty list would hide exactly the
+    // signal ("weigh-ins are silently failing") this screen exists to show,
+    // making that failure indistinguishable from "you didn't weigh yourself".
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -72,13 +71,17 @@ fun HistoryScreen(
             }
         }
 
-        items(state.rows, key = { it.id }) { reading ->
-            ReadingRow(
-                reading = reading,
-                onConfirm = { viewModel.confirm(reading) },
-                onDecline = { viewModel.decline(reading) },
-                onRetry = { viewModel.retry(reading) },
-            )
+        if (state.rows.isEmpty()) {
+            item { EmptyHistory() }
+        } else {
+            items(state.rows, key = { it.id }) { reading ->
+                ReadingRow(
+                    reading = reading,
+                    onConfirm = { viewModel.confirm(reading) },
+                    onDecline = { viewModel.decline(reading) },
+                    onRetry = { viewModel.retry(reading) },
+                )
+            }
         }
 
         item { DiagnosticsSection(state.counters) }
@@ -87,16 +90,17 @@ fun HistoryScreen(
 
 @Composable
 private fun EmptyHistory() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("No weigh-ins yet", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Step on the scale, or add one manually.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("No weigh-ins yet", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Step on the scale, or add one manually.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
     }
 }
 
@@ -171,11 +175,16 @@ private fun ReadingRow(
                     modifier = Modifier.padding(top = 12.dp),
                 ) { Text("Retry") }
 
-                // PENDING, SENT, BLOCKED_AUTH, DECLINED: no row-level action.
-                // BLOCKED_AUTH resolves app-wide via re-login, not per row;
+                // BLOCKED_AUTH resolves app-wide via re-login, not per row.
                 // DECLINED is terminal by design (ADR-006) — offering a retry
                 // here is exactly the one-tap path that would defeat the hold.
-                else -> Unit
+                // Spelled out rather than `else` so adding a new status forces
+                // a compile error here instead of silently falling through.
+                ReadingStatus.PENDING,
+                ReadingStatus.SENT,
+                ReadingStatus.BLOCKED_AUTH,
+                ReadingStatus.DECLINED,
+                -> Unit
             }
         }
     }

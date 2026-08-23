@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui.fake
 
+import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingSource
 import com.ventouxlabs.bascule.data.ReadingStatus
@@ -14,6 +15,9 @@ fun readingFixture(
     status: ReadingStatus = ReadingStatus.PENDING,
     source: ReadingSource = ReadingSource.SCALE,
     retryEpochMillis: Long = capturedAtMillis,
+    attemptCount: Int = 0,
+    lastError: String? = null,
+    lastErrorClass: ErrorClass? = null,
 ): ReadingEntity = ReadingEntity(
     id = id,
     capturedAtMillis = capturedAtMillis,
@@ -31,11 +35,11 @@ fun readingFixture(
     impedanceOhms = null,
     softLeanMassKg = null,
     status = status,
-    attemptCount = 0,
+    attemptCount = attemptCount,
     retryEpochMillis = retryEpochMillis,
     lastAttemptMillis = null,
-    lastError = null,
-    lastErrorClass = null,
+    lastError = lastError,
+    lastErrorClass = lastErrorClass,
     deliveredFields = emptySet(),
     contractVersionAtDelivery = null,
     remoteDuplicate = false,

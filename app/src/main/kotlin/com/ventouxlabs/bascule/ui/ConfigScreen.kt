@@ -69,7 +69,13 @@ fun ConfigScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item { PermissionSection(requester) }
-        item { ConnectionSection(state, onSaveBaseUrl = viewModel::saveBaseUrl) }
+        item {
+            ConnectionSection(
+                state = state,
+                onBaseUrlTextChanged = viewModel::onBaseUrlTextChanged,
+                onSaveBaseUrl = viewModel::saveBaseUrl,
+            )
+        }
         item {
             UnitAndContractSection(
                 state = state,
@@ -107,7 +113,12 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
 @Composable
 private fun PermissionSection(requester: PermissionRequester) {
     var pending by remember { mutableStateOf(requester.firstDialogPermissions()) }
-    var awaitingBackgroundLocation by remember { mutableStateOf(false) }
+    // Must reflect requester's actual state on first composition, not just
+    // after the first-dialog callback fires — a returning user on API 29/30
+    // who already granted fine location in a prior session composes straight
+    // into this state, and initializing to false would hide the second
+    // dialog forever (there's no other path that ever sets it true).
+    var awaitingBackgroundLocation by remember { mutableStateOf(requester.secondDialogPermission() != null) }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         pending = requester.firstDialogPermissions()
@@ -115,7 +126,13 @@ private fun PermissionSection(requester: PermissionRequester) {
     }
     val backgroundLocationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { awaitingBackgroundLocation = false }
+    ) {
+        // Re-derive from the requester rather than hardcoding false: a denial
+        // must not permanently hide this prompt, since the user can still
+        // grant it later from system settings and the app should offer it
+        // again on the next composition.
+        awaitingBackgroundLocation = requester.secondDialogPermission() != null
+    }
 
     if (pending.isEmpty() && !awaitingBackgroundLocation) return
 
@@ -149,13 +166,20 @@ private fun PermissionSection(requester: PermissionRequester) {
 }
 
 @Composable
-private fun ConnectionSection(state: ConfigUiState, onSaveBaseUrl: (String) -> Unit) {
+private fun ConnectionSection(
+    state: ConfigUiState,
+    onBaseUrlTextChanged: () -> Unit,
+    onSaveBaseUrl: (String) -> Unit,
+) {
     var urlText by rememberSaveable(state.baseUrl) { mutableStateOf(state.baseUrl) }
 
     SectionCard(title = "VitalForge server") {
         OutlinedTextField(
             value = urlText,
-            onValueChange = { urlText = it },
+            onValueChange = {
+                urlText = it
+                onBaseUrlTextChanged()
+            },
             label = { Text("Base URL") },
             isError = state.baseUrlError != null,
             supportingText = state.baseUrlError?.let { { Text(it) } },
