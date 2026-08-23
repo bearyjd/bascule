@@ -212,11 +212,25 @@ class GattSession(
      * say) can still be sitting in the channel when the next `connect()` is
      * about to run. Discard it — the next wait-step must only ever see events
      * from the attempt it is actually waiting on.
+     *
+     * [TransportEvent.AdapterOff] is the one thing never discarded here: it is
+     * global session state, not an artifact of any particular attempt or
+     * write, so draining it away would let a real adapter-off go unnoticed and
+     * have the session misclassify the resulting failure as a plain timeout
+     * instead of `Missed(ADAPTER_OFF)`. Put back rather than dropped, and the
+     * drain stops there — anything behind it in the channel is necessarily
+     * older than the adapter-off and moot regardless.
      */
     private fun drainStaleEvents(events: Channel<TransportEvent>) {
-        while (events.tryReceive().isSuccess) {
-            // discarded — see KDoc above
-        }
+        val adapterOff = generateSequence { events.tryReceive().getOrNull() }
+            .firstOrNull { it is TransportEvent.AdapterOff }
+            ?: return
+        // events is Channel.UNLIMITED (see run()), so trySend here cannot fail
+        // on capacity — it exists to put back what tryReceive just took, not
+        // to enqueue new work. Everything drained before it is discarded as
+        // intended; anything still behind it in the channel is necessarily
+        // older than the adapter-off and moot regardless, so this stops here.
+        check(events.trySend(adapterOff).isSuccess) { "unreachable: UNLIMITED channel send failed" }
     }
 
     private suspend fun discover(events: Channel<TransportEvent>): SessionOutcome {
