@@ -5,6 +5,7 @@ import com.ventouxlabs.bascule.ble.session.DecodeEvent
 import com.ventouxlabs.bascule.ble.session.DiscoveredServices
 import com.ventouxlabs.bascule.ble.session.GattOp
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import com.ventouxlabs.bascule.ble.session.SessionBudget
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -127,6 +128,84 @@ class BeurerHandshakeTest {
 
         val directive = decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure()))
         assertTrue("re-registering in a loop would burn the connection window", directive is HandshakeDirective.Abort)
+        assertEquals(
+            "the fast-abort path must give an accurate reason, not just the right type",
+            "scale refused consent for a just-registered user",
+            (directive as HandshakeDirective.Abort).reason,
+        )
+    }
+
+    /**
+     * Once a *stale stored credential's* Consent has already been refused and
+     * recovered from by re-registering this session, a same-shaped refusal
+     * must not abort *immediately*. The UCP protocol carries no correlation
+     * ID, so this refusal is byte-identical to either a genuine new refusal
+     * or a stale leftover from one of the writes it superseded — the decoder
+     * cannot tell which. Contrast with [consentRefusedForAFreshlyRegisteredUserAborts]:
+     * that case has no prior consent write in the session to be stale, so it
+     * can still abort fast and accurately.
+     *
+     * This does not mean *never* aborting: the number of writes that could
+     * possibly have been superseded is exactly bounded
+     * (`SessionBudget.HANDSHAKE_ACK_MAX_RETRIES`), so the decoder absorbs
+     * exactly that many refusals and then aborts on the next one, trusting it
+     * as genuine — proven by [aThirdRefusalAfterTheStaleResponseBudgetIsExhaustedAborts]
+     * below. A refusal within budget also does not corrupt what a *later*
+     * success persists — proven by [consentSucceedingAfterAnAbsorbedRefusalStillCompletesWithTheNewCredential].
+     */
+    @Test
+    fun consentRefusedAfterAStaleCredentialAlreadyReregisteredWaitsInsteadOfAborting() {
+        val stale = ScaleCredential(scaleIndex = 7, consentCode = 0x0001)
+        decoder.beginHandshake(discovered, context(stale))
+        decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure())) // stale credential refused -> re-register
+        decoder.onHandshakeEvent(ucp(Bf720Capture.registrationSuccess())) // re-registration succeeds -> consent again
+
+        val directive = decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure()))
+        assertEquals(
+            "the first refusal after re-registration is still within budget and must not abort",
+            HandshakeDirective.Wait,
+            directive,
+        )
+    }
+
+    @Test
+    fun aThirdRefusalAfterTheStaleResponseBudgetIsExhaustedAborts() {
+        val stale = ScaleCredential(scaleIndex = 7, consentCode = 0x0001)
+        decoder.beginHandshake(discovered, context(stale))
+        decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure())) // stale credential refused -> re-register
+        decoder.onHandshakeEvent(ucp(Bf720Capture.registrationSuccess())) // re-registration succeeds -> consent again
+        repeat(SessionBudget.HANDSHAKE_ACK_MAX_RETRIES) {
+            val absorbed = decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure()))
+            assertEquals("refusal $it of the budget must still be absorbed", HandshakeDirective.Wait, absorbed)
+        }
+
+        val directive = decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure()))
+        assertTrue(
+            "once every physically-possible stale response is accounted for, the next refusal " +
+                "is guaranteed genuine and must abort rather than wait forever",
+            directive is HandshakeDirective.Abort,
+        )
+        assertEquals(
+            "scale refused consent for a just-registered user",
+            (directive as HandshakeDirective.Abort).reason,
+        )
+    }
+
+    @Test
+    fun consentSucceedingAfterAnAbsorbedRefusalStillCompletesWithTheNewCredential() {
+        val stale = ScaleCredential(scaleIndex = 7, consentCode = 0x0001)
+        decoder.beginHandshake(discovered, context(stale))
+        decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure())) // stale credential refused -> re-register
+        decoder.onHandshakeEvent(ucp(Bf720Capture.registrationSuccess(scaleIndex = 9))) // fresh index 9
+        decoder.onHandshakeEvent(ucp(Bf720Capture.consentFailure())) // absorbed by the budget, not fatal
+
+        val directive = decoder.onHandshakeEvent(ucp(Bf720Capture.consentSuccess()))
+        assertTrue("a real success must still complete the handshake", directive is HandshakeDirective.Complete)
+        assertEquals(
+            "the persisted credential must be the new registration's, not the stale one that started this",
+            ScaleCredential(scaleIndex = 9, consentCode = CONSENT_CODE),
+            (directive as HandshakeDirective.Complete).credential,
+        )
     }
 
     @Test

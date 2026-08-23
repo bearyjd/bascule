@@ -291,18 +291,153 @@ class GattSessionHandshakeTest {
 
     /**
      * Regression test for the hazard found in review: the UCP wire protocol
-     * carries no correlation ID, so a late response to a *superseded* write is
-     * byte-identical to a fresh one. Drives the exact sequence that exposes it
-     * — a stale stored credential's Consent write times out (E6), reissues,
-     * and only then does the *original* write's late refusal arrive, kicking
-     * off re-registration and a brand new Consent write. Without draining the
-     * channel before every handshake write, that late refusal (or the
-     * reissue's own now-orphaned response) would still be sitting there and
-     * get misread as the answer to the new Consent step, which shares
-     * `AwaitingConsent`'s state type with the one it actually answered.
+     * carries no correlation ID, so a response to a *superseded* write is
+     * byte-identical to a fresh one. Draining the event channel before each
+     * write cannot close this — "late" means "not yet arrived", so nothing is
+     * there to drain — so the actual fix lives in `BeurerDecoder`: once a
+     * refused stored credential has driven a re-registration this session, a
+     * bounded budget (`staleResponseBudget`, at most as many writes as could
+     * possibly have been superseded) absorbs same-type refusals instead of
+     * treating every one as fatal, with the next one past the budget treated
+     * as genuine.
+     *
+     * Drives the exact two-refusal sequence that exposes the hazard: consent
+     * write #1 (stale stored credential) times out and reissues as #2; #1's
+     * late refusal then arrives, kicking off re-registration and consent
+     * write #3; #2's own now-orphaned late refusal arrives *while #3 is
+     * outstanding* — type-matching #3's wait exactly, since both are
+     * `AwaitingConsent(registered=true)`. Only then does #3's real answer
+     * land. If the decoder treated either late refusal as answering #3, the
+     * handshake would fail here.
      */
     @Test
     fun lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep() = runTest {
+        val consentStore = InMemoryConsentStore().apply {
+            save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = 5, consentCode = 0x9999))
+        }
+        val transport = FakeGattTransport(
+            discovered = discovered,
+            onWrite = { char, bytes ->
+                if (char != SigWeightProfile.USER_CONTROL_POINT) {
+                    emptyList()
+                } else {
+                    when (bytes.firstOrNull()?.toInt()) {
+                        SigWeightProfile.UCP_REGISTER_NEW_USER -> listOf(char to Bf720Capture.registrationSuccess())
+                        // No consent write ever gets an automatic response —
+                        // every answer, including the real one, is pushed
+                        // manually below so the test controls exactly when
+                        // each lands relative to the session's current wait.
+                        SigWeightProfile.UCP_CONSENT -> emptyList()
+                        else -> emptyList()
+                    }
+                }
+            },
+        )
+        val deferred = async { session(transport, consentStore).run() }
+
+        runCurrent() // consent write #1, for the stale stored credential
+        advanceTimeBy(3_000)
+        runCurrent() // E6 fires: consent write #2 (the reissue) goes out
+
+        // Pin the precondition this test exists to construct: two consent
+        // writes genuinely in flight, not one. Without this, a retuned
+        // ack-timeout or a shifted advanceTimeBy boundary could silently stop
+        // the reissue from firing and this test would keep passing for the
+        // wrong reason — testing only a single-write race, not the two-write
+        // one the KDoc above describes.
+        assertEquals("the E6 reissue must have gone out before the late refusals below", 2, ucpWriteCount(transport))
+
+        // Write #1's late refusal arrives now, while #2 is outstanding. Drives
+        // re-registration; register auto-succeeds; consent write #3 goes out
+        // and the session starts waiting on it — all without a time advance,
+        // so the wait for #3 is still open when the next indicate lands.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentFailure())
+        runCurrent()
+
+        // Write #2's late refusal — the reissue's own now-orphaned response —
+        // arrives while #3 is outstanding. Byte-identical to a genuine new
+        // refusal of #3; must not misfire an Abort.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentFailure())
+        runCurrent()
+
+        // #3's real answer finally arrives.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+
+        assertTrue("expected a completed handshake, got $outcome", outcome !is SessionOutcome.HandshakeFailed)
+        assertEquals(Bf720Capture.EXPECTED_USER_INDEX, consentStore.credentialFor(DEVICE_ADDRESS)?.scaleIndex)
+        assertEquals(
+            "exactly one subscribe, no matter how many stale UCP responses arrived",
+            1,
+            transport.callOrder.count { it == "subscribe:${SigWeightProfile.WEIGHT_MEASUREMENT}" },
+        )
+    }
+
+    /**
+     * Companion to [lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep]:
+     * proves the other half of the stale-response budget's trade-off — when
+     * consent is *genuinely* still refused after re-registration, not stale,
+     * the budget (`HANDSHAKE_ACK_MAX_RETRIES`, exactly the number of writes
+     * that could possibly have been superseded) absorbs only that many
+     * refusals before aborting on the very next one, with the accurate
+     * decoder-native reason. It must NOT take E6's own multi-retry ladder to
+     * get there — that would mean the budget silently became unbounded again.
+     */
+    @Test
+    fun consentGenuinelyStillRefusedAbortsAssoonAsTheStaleResponseBudgetIsExhausted() = runTest {
+        val consentStore = InMemoryConsentStore().apply {
+            save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = 5, consentCode = 0x9999))
+        }
+        val transport = FakeGattTransport(
+            discovered = discovered,
+            onWrite = { char, bytes ->
+                if (char != SigWeightProfile.USER_CONTROL_POINT) {
+                    emptyList()
+                } else {
+                    when (bytes.firstOrNull()?.toInt()) {
+                        SigWeightProfile.UCP_REGISTER_NEW_USER -> listOf(char to Bf720Capture.registrationSuccess())
+                        // Every consent write is refused, forever — including
+                        // after re-registration. No stale-response ambiguity
+                        // here; this is the "genuinely still refused" case the
+                        // budget must not absorb indefinitely.
+                        SigWeightProfile.UCP_CONSENT -> listOf(char to Bf720Capture.consentFailure())
+                        else -> emptyList()
+                    }
+                }
+            },
+        )
+
+        val outcome = session(transport, consentStore).run()
+
+        assertTrue("must terminate via HandshakeFailed, not hang", outcome is SessionOutcome.HandshakeFailed)
+        val detail = (outcome as SessionOutcome.HandshakeFailed).detail
+        assertEquals(
+            "budget-exhaustion must abort with the decoder's own accurate reason, not a generic E6 message",
+            "scale refused consent for a just-registered user",
+            detail,
+        )
+        assertEquals(
+            "exactly budget(2)+1 post-registration consent writes: 2 absorbed, the 3rd aborts on arrival — " +
+                "any more means the budget didn't bound anything",
+            1 + 1 + (SessionBudget.HANDSHAKE_ACK_MAX_RETRIES + 1),
+            ucpWriteCount(transport),
+        )
+    }
+
+    /**
+     * The other side of [consentGenuinelyStillRefusedAbortsAssoonAsTheStaleResponseBudgetIsExhausted]:
+     * one stale-looking refusal is absorbed post-registration, and then the
+     * scale genuinely stops responding altogether — no more refusals, no
+     * acks, nothing. There is no way to distinguish this from more stale
+     * responses that simply never arrive, so this case is E6's own ack ladder
+     * to resolve, not the budget's. Pins [handshakeSawUnverifiableResponse]'s
+     * purpose: the eventual abort must say a response *did* arrive and
+     * couldn't be trusted, not falsely claim total silence.
+     */
+    @Test
+    fun oneAbsorbedRefusalThenTotalSilenceAbortsViaE6WithTheUnverifiableAckMessage() = runTest {
         val consentStore = InMemoryConsentStore().apply {
             save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = 5, consentCode = 0x9999))
         }
@@ -317,36 +452,31 @@ class GattSessionHandshakeTest {
                         SigWeightProfile.UCP_REGISTER_NEW_USER -> listOf(char to Bf720Capture.registrationSuccess())
                         SigWeightProfile.UCP_CONSENT -> {
                             consentAttempts++
-                            // Writes #1 (original) and #2 (E6's reissue) get no
-                            // automatic response; #1's refusal is pushed
-                            // manually, late, below. Write #3 (post-re-
-                            // registration) succeeds normally.
-                            if (consentAttempts <= 2) emptyList() else listOf(char to Bf720Capture.consentSuccess())
+                            // Attempt #1 (pre-registration, stale credential):
+                            // always refused, driving re-registration. Attempt
+                            // #2 (the 1st post-registration write) gets one
+                            // more refusal — still plausibly stale, so the
+                            // budget absorbs it. Every attempt after that goes
+                            // completely silent: no ack, no refusal, nothing.
+                            if (consentAttempts <= 2) {
+                                listOf(char to Bf720Capture.consentFailure())
+                            } else {
+                                emptyList()
+                            }
                         }
                         else -> emptyList()
                     }
                 }
             },
         )
-        val deferred = async { session(transport, consentStore).run() }
 
-        runCurrent() // consent write #1, for the stale stored credential
-        advanceTimeBy(3_000)
-        runCurrent() // E6 fires: consent write #2 (the reissue) goes out
+        val outcome = session(transport, consentStore).run()
 
-        // Write #1's answer finally arrives — late, after #2 is already
-        // outstanding. A refusal, since the stored credential really is stale.
-        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentFailure())
-        advanceUntilIdle()
-
-        val outcome = deferred.await()
-
-        assertTrue("expected a completed handshake, got $outcome", outcome !is SessionOutcome.HandshakeFailed)
-        assertEquals(Bf720Capture.EXPECTED_USER_INDEX, consentStore.credentialFor(DEVICE_ADDRESS)?.scaleIndex)
-        assertEquals(
-            "exactly one subscribe, no matter how many stale UCP responses arrived",
-            1,
-            transport.callOrder.count { it == "subscribe:${SigWeightProfile.WEIGHT_MEASUREMENT}" },
+        assertTrue("must terminate via HandshakeFailed, not hang", outcome is SessionOutcome.HandshakeFailed)
+        val detail = (outcome as SessionOutcome.HandshakeFailed).detail
+        assertTrue(
+            "reason must not claim no ack arrived when a refusal actually did: $detail",
+            detail.contains("could not be attributed"),
         )
     }
 

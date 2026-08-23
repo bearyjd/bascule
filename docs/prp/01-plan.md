@@ -738,13 +738,110 @@ review applied):
   actually tested: a reissue, not a late ack) and a new
   `lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep` — a
   regression test for a real bug the review found: the UCP wire protocol has
-  no correlation ID, so a late response to a superseded write is
-  byte-identical to a fresh one, and once `HandshakeState` cycles back to the
-  same subtype (`AwaitingConsent(registered=false)` → re-register →
+  no correlation ID, so a response to a superseded write is byte-identical to
+  a fresh one, and once `HandshakeState` cycles back to the same subtype
+  (`AwaitingConsent(registered=false)` → re-register →
   `AwaitingConsent(registered=true)`), the decoder's own type-based `Wait`
-  guard doesn't catch it. Fixed in `GattSession` by draining the channel
-  before every handshake write (`issueHandshakeWrite`), not just before a
-  connect retry as WP-06 did.
+  guard doesn't catch it.
+  **This took four passes to get right, and every wrong turn is recorded here
+  so none of them get repeated.**
+  **Pass 1** (first fix attempt) drained the channel before every handshake
+  write (`issueHandshakeWrite`). It looked like a fix and passed its own test,
+  but a second advisor pass traced it and found the drain can only discard
+  what has *already* arrived by drain time — "late" means "not yet arrived",
+  so a response that shows up during the *next* write's wait sails straight
+  past it. The original regression test didn't catch this because it only
+  ever pushed one manual response, never two genuinely in flight at once.
+  **Pass 2** moved the fix into `BeurerDecoder`: a `consentPreviouslyRefused`
+  boolean, set once a stale stored credential's Consent has driven a
+  re-registration this session, after which *every* same-shaped refusal
+  forever returned `Wait` instead of `Abort`, leaving E6's own ack ladder as
+  the sole arbiter. A devil's-advocate pass on this fix then found the "no ack
+  after 2 retries" message E6 eventually produced was actively false whenever
+  a refusal had, in fact, arrived and been suppressed — fixed at the time by
+  adding `handshakeSawUnverifiableResponse` so the message could say so.
+  **Pass 3** was an independent from-scratch code review (fresh context, no
+  shared state with passes 1-2, per this project's devil's-advocate protocol)
+  and found the *unbounded* suppression itself was the remaining defect, not
+  just its message: the number of consent writes that could possibly be
+  superseded when re-registration begins is exactly countable — at most
+  `SessionBudget.HANDSHAKE_ACK_MAX_RETRIES`, since that is E6's own reissue
+  cap — so treating *every* refusal forever as unverifiable converts an
+  accurate, fast abort into a slow, generic-sounding one even when the scale
+  is genuinely still refusing. **Pass 4 (actual fix, current state):**
+  `consentPreviouslyRefused` is gone. The budget rides on the state it
+  qualifies, not a parallel decoder-level flag (per that same review's
+  finding that a second mutable field duplicating `HandshakeState` is itself
+  a latent bug — the two are now unrepresentable-as-disagreeing):
+  `HandshakeState.AwaitingRegistration.staleResponseBudgetOnSuccess` is set to
+  `HANDSHAKE_ACK_MAX_RETRIES` only on the re-registration-after-refusal path
+  (zero for a first-ever registration) and carried into the
+  `AwaitingConsent.staleResponseBudget` it produces on success; each refusal
+  while that budget is positive is absorbed as `Wait` and decrements it. The
+  budget bounds a *count*, not an *attribution* — the decoder still cannot
+  tell which absorbed refusal, if any, was actually stale, so a genuinely new
+  refusal to the current write can itself be absorbed early if it happens to
+  arrive first (proven, not just accepted, by
+  `consentGenuinelyStillRefusedAbortsAssoonAsTheStaleResponseBudgetIsExhausted`,
+  where every refusal is genuine and the first two are still absorbed). What
+  the count *does* guarantee, regardless of arrival order: at most
+  `HANDSHAKE_ACK_MAX_RETRIES` writes were ever outstanding before
+  re-registration began, so at most that many refusals can *ever* be stale —
+  meaning the refusal that lands after the budget is exhausted cannot be one
+  of them, and is safe to treat as genuine and abort on immediately with the
+  decoder's own accurate reason, not a generic E6 message. This is strictly
+  better than pass 2 in both directions: a first-ever registration still
+  aborts fast and accurately (`consentRefusedForAFreshlyRegisteredUserAborts`,
+  now also pinning the reason string, since the pass-3 review found the type
+  check alone let the accuracy claim go unverified); a *genuinely* still-refused
+  post-re-registration consent now also aborts as soon as the budget is
+  exhausted rather than only after E6's full ladder
+  (`consentGenuinelyStillRefusedAbortsAssoonAsTheStaleResponseBudgetIsExhausted`,
+  `aThirdRefusalAfterTheStaleResponseBudgetIsExhaustedAborts`); and a real
+  success after an absorbed refusal still persists the *new* credential, not
+  the stale one that started the recovery
+  (`consentSucceedingAfterAnAbsorbedRefusalStillCompletesWithTheNewCredential`).
+  `handshakeSawUnverifiableResponse` stays, now covering the one case the
+  budget itself cannot resolve on its own — genuine silence (no ack at all,
+  not even a refusal) after one or more absorbed refusals — where E6's own
+  timeout is still the only arbiter and the message must say a response *did*
+  arrive earlier even though the final write got nothing
+  (`oneAbsorbedRefusalThenTotalSilenceAbortsViaE6WithTheUnverifiableAckMessage`).
+  See `BeurerHandshakeTest.consentRefusedAfterAStaleCredentialAlready
+  ReregisteredWaitsInsteadOfAborting` for the decoder-level proof and the
+  rewritten `GattSessionHandshakeTest.lateResponseToASupersededConsentWrite
+  DoesNotMisfireTheNextStep` (now also asserting the E6 reissue structurally
+  happened, per the pass-3 review, rather than only asserting the outcome) for
+  the end-to-end two-refusal race.
+  **The pass-3 review also found `drainStaleEvents`' "harmless" framing was
+  itself an overclaim** (pre-existing on `main`, not introduced by this fix,
+  but asserted as harmless by this fix's own commit): it discarded
+  `TransportEvent.AdapterOff` indiscriminately along with everything else, so
+  an adapter-off arriving just before a reissue's drain could be silently lost
+  and the session would misclassify the resulting failure as `HandshakeFailed`
+  instead of `Missed(ADAPTER_OFF)` — precisely the misclassification class the
+  WP-07 review caught twice elsewhere. Fixed: `drainStaleEvents` now puts
+  `AdapterOff` back rather than discarding it, and stops draining past it
+  (anything behind it is necessarily older and moot). This is narrow, not
+  harmless — corrected in its own KDoc rather than re-asserted here.
+  **Deliberately still a residue, not implemented:** a diagnostics counter for
+  the suppressed-refusal path. Unlike `registrationRejected` (E19), this
+  outcome doesn't correspond to any named edge in `00-design.md` §2.3 — it's
+  new behaviour this fix introduces, not an existing one — so adding a counter
+  would mean inventing a new edge in the design doc's taxonomy, not just a row
+  in §2.1's table. Left for whoever next touches that taxonomy rather than
+  done as a side effect of a bug fix.
+  **Two open questions surfaced by the pass-3 review, neither acted on here:**
+  (1) the same budget guard only covers refusals — a stale `ConsentResult
+  (success=true)` arriving while `AwaitingConsent(registered=true)` is
+  outstanding would still misfire `Complete`, though reaching it requires the
+  scale to answer two byte-identical writes differently, which the reviewer
+  itself rated low-confidence and speculative; (2) a register-write reissue
+  (E6, not this fix) can leak an orphaned scale user slot if both the original
+  and the reissue eventually succeed with different indices — confirmed
+  pre-existing on `main`, unrelated to this fix, and relevant to O-08. Both
+  are recorded here rather than fixed so they aren't lost, and are candidates
+  for whoever picks up WP-08 or a dedicated hardening pass.
 - `handshakeFailureRecordsOpcodeAndLengthOnly` →
   `handshakeFailureDetailNeverLeaksPayloadBytes` — see the residue note above.
 - Added `BeurerDecoderOpeningSequenceTest` (exact-byte coverage for the
@@ -757,6 +854,10 @@ review applied):
   adapter-off during the handshake or opening write was routing into
   `SessionOutcome.HandshakeFailed` instead of `Missed(ADAPTER_OFF)`, the same
   misclassification class WP-06's review caught twice for the connect phase.
+- Added `BeurerHandshakeTest.consentRefusedAfterAStaleCredentialAlready
+  ReregisteredWaitsInsteadOfAborting` — decoder-level proof for the
+  `consentPreviouslyRefused` fix above, added on the second advisor pass after
+  the first fix attempt (channel draining) was found not to close the hole.
 
 **Counter:** `registrationRejected` (E19).
 **Hardware checklist:** HW-04, HW-05, HW-26, HW-27.

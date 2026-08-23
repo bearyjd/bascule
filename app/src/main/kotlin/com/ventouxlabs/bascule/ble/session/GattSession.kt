@@ -212,11 +212,25 @@ class GattSession(
      * say) can still be sitting in the channel when the next `connect()` is
      * about to run. Discard it — the next wait-step must only ever see events
      * from the attempt it is actually waiting on.
+     *
+     * [TransportEvent.AdapterOff] is the one thing never discarded here: it is
+     * global session state, not an artifact of any particular attempt or
+     * write, so draining it away would let a real adapter-off go unnoticed and
+     * have the session misclassify the resulting failure as a plain timeout
+     * instead of `Missed(ADAPTER_OFF)`. Put back rather than dropped, and the
+     * drain stops there — anything behind it in the channel is necessarily
+     * older than the adapter-off and moot regardless.
      */
     private fun drainStaleEvents(events: Channel<TransportEvent>) {
-        while (events.tryReceive().isSuccess) {
-            // discarded — see KDoc above
-        }
+        val adapterOff = generateSequence { events.tryReceive().getOrNull() }
+            .firstOrNull { it is TransportEvent.AdapterOff }
+            ?: return
+        // events is Channel.UNLIMITED (see run()), so trySend here cannot fail
+        // on capacity — it exists to put back what tryReceive just took, not
+        // to enqueue new work. Everything drained before it is discarded as
+        // intended; anything still behind it in the channel is necessarily
+        // older than the adapter-off and moot regardless, so this stops here.
+        check(events.trySend(adapterOff).isSuccess) { "unreachable: UNLIMITED channel send failed" }
     }
 
     private suspend fun discover(events: Channel<TransportEvent>): SessionOutcome {
@@ -353,19 +367,24 @@ class GattSession(
     /**
      * The wire protocol carries no correlation ID: a Register/Consent response
      * is identified only by its opcode, so a response to a *superseded* write
-     * (the original half of an E6 reissue, or the pre-re-registration half of
-     * a rejected stored credential) is byte-for-byte indistinguishable from a
-     * fresh one once decoded. `BeurerDecoder`'s state machine absorbs this
-     * safely when the next expected event is a *different* `DecodeEvent` type,
-     * but not when state cycles back to the same `HandshakeState` subtype
-     * (`AwaitingConsent(registered=false)` → re-register → `AwaitingConsent
-     * (registered=true)`) — a late response to the first still type-matches
-     * the second wait. Draining before every handshake write (including
-     * reissues) is what actually closes that hole: it discards anything still
-     * sitting in the channel from a step this write supersedes, so the next
-     * wait only ever sees responses to *this* write. `yield()` first because a
-     * response the fake already emitted may not have been relayed into
-     * `events` yet — see `run()`'s own KDoc on the same hazard.
+     * is byte-for-byte indistinguishable from a fresh one once decoded.
+     * Draining before every handshake write (including reissues) discards
+     * anything *already sitting* in the channel from a step this write
+     * supersedes — e.g. a duplicate response the fake (or scale) emitted twice
+     * for the same write. `yield()` first because a response already emitted
+     * may not have been relayed into `events` yet — see `run()`'s own KDoc on
+     * the same hazard.
+     *
+     * This does NOT close the harder case where the stale response hasn't
+     * arrived yet at drain time and only shows up during the *next* write's
+     * wait — draining can't discard what isn't in the channel. When state
+     * cycles back to the same `HandshakeState` subtype (`AwaitingConsent
+     * (registered=false)` → re-register → `AwaitingConsent(registered=true)`),
+     * that case is closed at the decoder level instead: see
+     * `BeurerDecoder.HandshakeState.AwaitingConsent.staleResponseBudget`,
+     * which absorbs only as many same-type refusals as could possibly be
+     * stale (bounded by `SessionBudget.HANDSHAKE_ACK_MAX_RETRIES`) before
+     * treating the next one as genuine.
      */
     private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
         yield()
@@ -392,11 +411,7 @@ class GattSession(
                 step == null -> {
                     // E6: no ack within timeout — re-issue the same write, max 2 retries.
                     if (retries >= SessionBudget.HANDSHAKE_ACK_MAX_RETRIES) {
-                        return HandshakeStep.Directive(
-                            HandshakeDirective.Abort(
-                                "no ack after ${SessionBudget.HANDSHAKE_ACK_MAX_RETRIES} retries",
-                            ),
-                        )
+                        return HandshakeStep.Directive(HandshakeDirective.Abort(ackExhaustedReason()))
                     }
                     retries++
                     issueHandshakeWrite(events, write)
@@ -404,6 +419,23 @@ class GattSession(
 
                 else -> return step
             }
+        }
+    }
+
+    /**
+     * [decoder.handshakeSawUnverifiableResponse] distinguishes two E6-exhaustion
+     * causes that would otherwise share one misleading message: genuinely no
+     * ack ever arriving, versus a response arriving that could not be trusted
+     * (see `BeurerDecoder.HandshakeState.AwaitingConsent.staleResponseBudget`).
+     * Only the former is accurately "no ack".
+     */
+    private fun ackExhaustedReason(): String {
+        val maxRetries = SessionBudget.HANDSHAKE_ACK_MAX_RETRIES
+        return if (decoder.handshakeSawUnverifiableResponse) {
+            "no verifiable ack after $maxRetries retries " +
+                "(a response arrived but could not be attributed to this write)"
+        } else {
+            "no ack after $maxRetries retries"
         }
     }
 

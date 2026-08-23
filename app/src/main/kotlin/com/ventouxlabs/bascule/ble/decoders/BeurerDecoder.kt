@@ -4,10 +4,10 @@ import com.ventouxlabs.bascule.ble.session.DecodeEvent
 import com.ventouxlabs.bascule.ble.session.DiscoveredServices
 import com.ventouxlabs.bascule.ble.session.GattOp
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import com.ventouxlabs.bascule.ble.session.SessionBudget
 import java.util.Calendar
 import java.util.UUID
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
 
 /**
  * Beurer/Sanitas family decoder for the BF720, which speaks the standard
@@ -37,6 +37,13 @@ class BeurerDecoder(
 
     private var handshake: HandshakeState = HandshakeState.NotStarted
     private var context: HandshakeContext? = null
+
+    // Never reset once true, same as [malformedCount] below — relies on the
+    // class-level contract that a decoder is per-session stateful (a fresh
+    // instance per `GattSession`, never reused across sessions), not on any
+    // reset logic of its own.
+    override var handshakeSawUnverifiableResponse: Boolean = false
+        private set
 
     var malformedCount: Int = 0
         private set
@@ -106,7 +113,11 @@ class BeurerDecoder(
             return HandshakeDirective.Abort("scale refused Register New User", registrationRejected = true)
         }
         val credential = ScaleCredential(index, state.consentCode)
-        handshake = HandshakeState.AwaitingConsent(credential, registered = true)
+        handshake = HandshakeState.AwaitingConsent(
+            credential,
+            registered = true,
+            staleResponseBudget = state.staleResponseBudgetOnSuccess,
+        )
         return HandshakeDirective.Send(consentWrite(credential), ACK_TIMEOUT)
     }
 
@@ -120,6 +131,11 @@ class BeurerDecoder(
             return HandshakeDirective.Complete(state.credential.takeIf { state.registered })
         }
         if (state.registered) {
+            if (state.staleResponseBudget > 0) {
+                handshakeSawUnverifiableResponse = true
+                handshake = state.copy(staleResponseBudget = state.staleResponseBudget - 1)
+                return HandshakeDirective.Wait
+            }
             return HandshakeDirective.Abort("scale refused consent for a just-registered user")
         }
         // A stored credential the scale no longer honours — its user slot was
@@ -127,7 +143,20 @@ class BeurerDecoder(
         // is the branch a fixed initSequence could not express (ADR-007).
         val freshCode = context?.freshConsentCode
             ?: return HandshakeDirective.Abort("no consent code available to re-register")
-        handshake = HandshakeState.AwaitingRegistration(freshCode)
+        // Up to HANDSHAKE_ACK_MAX_RETRIES consent writes for the *stale*
+        // credential may already be outstanding (the original plus E6's own
+        // reissues) when this refusal is processed — the wire protocol has no
+        // correlation ID, so any of their responses could still arrive after
+        // this point and would otherwise misread as an answer to the new
+        // registration's consent step. That count is exactly bounded (it can
+        // never exceed E6's own retry cap), so the budget below absorbs every
+        // physically-possible stale response and nothing more: the next
+        // refusal past it is guaranteed to be a genuine answer to the current
+        // write, not a leftover, and aborts immediately and accurately.
+        handshake = HandshakeState.AwaitingRegistration(
+            freshCode,
+            staleResponseBudgetOnSuccess = SessionBudget.HANDSHAKE_ACK_MAX_RETRIES,
+        )
         return HandshakeDirective.Send(registerWrite(freshCode), ACK_TIMEOUT)
     }
 
@@ -255,10 +284,37 @@ class BeurerDecoder(
 
     private sealed interface HandshakeState {
         data object NotStarted : HandshakeState
-        data class AwaitingRegistration(val consentCode: Int) : HandshakeState
+
+        /**
+         * [staleResponseBudgetOnSuccess] carries forward into the
+         * [AwaitingConsent] this registration leads to, once it succeeds — see
+         * that class's own KDoc. Zero for every path except re-registration
+         * after a stale stored credential's Consent was refused.
+         */
+        data class AwaitingRegistration(
+            val consentCode: Int,
+            val staleResponseBudgetOnSuccess: Int = 0,
+        ) : HandshakeState
+
+        /**
+         * [staleResponseBudget] is nonzero only after a stale stored
+         * credential's Consent was refused and this session re-registered as
+         * recovery. The UCP wire protocol carries no correlation ID, so a
+         * refusal received here cannot be told apart from a stale response to
+         * one of the (at most [SessionBudget.HANDSHAKE_ACK_MAX_RETRIES])
+         * consent writes this new one supersedes. The budget is exact, not a
+         * guess: that many refusals are absorbed as [HandshakeDirective.Wait]
+         * and decremented; the next one is guaranteed to answer *this* write,
+         * so it aborts immediately with an accurate reason rather than
+         * deferring to E6's own ack timeout. A first-ever registration (no
+         * stored credential) never sets this — there is no prior consent
+         * write in that path to be stale, so a refusal there always aborts
+         * fast.
+         */
         data class AwaitingConsent(
             val credential: ScaleCredential,
             val registered: Boolean,
+            val staleResponseBudget: Int = 0,
         ) : HandshakeState
 
         data object Consented : HandshakeState
@@ -270,8 +326,8 @@ class BeurerDecoder(
         /** Advertised name observed on the BF720 (docs/prp/03-hardware-validation.md). */
         const val ADVERTISED_NAME_PREFIX = "BF"
 
-        /** 00-design.md §2.5: init ack timeout. */
-        val ACK_TIMEOUT: Duration = 3.seconds
+        /** 00-design.md §2.5: init ack timeout, shared with `GattSession`'s own E6 ladder. */
+        val ACK_TIMEOUT: Duration = SessionBudget.HANDSHAKE_ACK_TIMEOUT
 
         private const val BYTE_MASK = 0xFF
         private const val BYTE_BITS = 8
