@@ -31,6 +31,18 @@ interface ScaleDecoder {
     /** Characteristics the session subscribes to once the handshake completes. */
     val measurementCharacteristics: Set<UUID>
 
+    /**
+     * True once this decoder has, at any point this handshake, returned
+     * [HandshakeDirective.Wait] specifically because a response could not be
+     * ruled out as a stale answer to a write it superseded — never because an
+     * event was simply irrelevant. Read-only observation with no effect on
+     * control flow: [GattSession] reads it only when its own E6 ack ladder is
+     * about to exhaust, so the resulting abort can say "a response arrived
+     * but couldn't be attributed" rather than the misleading "no ack at all"
+     * when responses did, in fact, arrive.
+     */
+    val handshakeSawUnverifiableResponse: Boolean
+
     /** Advertisement-level dispatch only — matching, never decoding. */
     fun matches(advertisedName: String?, serviceUuids: Set<UUID>): Boolean
 

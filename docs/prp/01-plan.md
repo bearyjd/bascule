@@ -766,6 +766,30 @@ review applied):
   ReregisteredWaitsInsteadOfAborting` for the decoder-level proof and the
   rewritten `GattSessionHandshakeTest` test for the end-to-end two-refusal
   race.
+  **Third pass (devil's-advocate review of the fix above) found two more real
+  gaps, both now closed:** (1) when consent is *genuinely* still refused after
+  re-registration — not stale, the scale really means it — the decoder can't
+  tell that apart from the stale case either, so it now waits through E6's
+  full retry ladder before aborting, same as the stale case; the eventual
+  abort previously said `"no ack after 2 retries"`, which is false — responses
+  *did* arrive, they were just unattributable. Fixed by adding
+  `ScaleDecoder.handshakeSawUnverifiableResponse` (read-only, implemented by
+  `BeurerDecoder`, flips only at the point a refusal is actually suppressed —
+  distinct from `consentPreviouslyRefused`, which flips as soon as
+  re-registration happens whether or not anything is ever suppressed) so
+  `GattSession.ackExhaustedReason()` can tell "nothing arrived" apart from "a
+  response arrived but couldn't be trusted" and phrase the abort accordingly.
+  (2) that genuinely-still-refused path — new behaviour, since it previously
+  aborted instantly — had no test proving it actually terminates rather than
+  hanging; added
+  `GattSessionHandshakeTest.consentRepeatedlyRefusedAfterReregistrationEventuallyAbortsInsteadOfHangingForever`,
+  which also pins the corrected message. **Deliberately still a residue, not
+  implemented:** a diagnostics counter for the suppressed-refusal path. Unlike
+  `registrationRejected` (E19), this outcome doesn't correspond to any named
+  edge in `00-design.md` §2.3 — it's new behaviour this fix introduces, not an
+  existing one — so adding a counter would mean inventing a new edge in the
+  design doc's taxonomy, not just a row in §2.1's table. Left for whoever
+  next touches that taxonomy rather than done as a side effect of a bug fix.
 - `handshakeFailureRecordsOpcodeAndLengthOnly` →
   `handshakeFailureDetailNeverLeaksPayloadBytes` — see the residue note above.
 - Added `BeurerDecoderOpeningSequenceTest` (exact-byte coverage for the

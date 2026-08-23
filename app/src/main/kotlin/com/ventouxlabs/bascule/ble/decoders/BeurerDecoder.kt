@@ -52,8 +52,17 @@ class BeurerDecoder(
      * to a first-ever registration (no stored credential): there is no prior
      * consent write in that path to be stale, so a refusal there still aborts
      * fast with an accurate reason.
+     *
+     * Distinct from [handshakeSawUnverifiableResponse]: this flag flips as
+     * soon as re-registration happens, whether or not another refusal ever
+     * actually arrives; that one flips only at the point a refusal is
+     * actually suppressed, so [GattSession] can tell "nothing arrived at all"
+     * apart from "something arrived but couldn't be trusted" when E6 exhausts.
      */
     private var consentPreviouslyRefused = false
+
+    override var handshakeSawUnverifiableResponse: Boolean = false
+        private set
 
     var malformedCount: Int = 0
         private set
@@ -138,6 +147,7 @@ class BeurerDecoder(
         }
         if (state.registered) {
             if (consentPreviouslyRefused) {
+                handshakeSawUnverifiableResponse = true
                 return HandshakeDirective.Wait
             }
             return HandshakeDirective.Abort("scale refused consent for a just-registered user")

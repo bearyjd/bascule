@@ -396,11 +396,7 @@ class GattSession(
                 step == null -> {
                     // E6: no ack within timeout — re-issue the same write, max 2 retries.
                     if (retries >= SessionBudget.HANDSHAKE_ACK_MAX_RETRIES) {
-                        return HandshakeStep.Directive(
-                            HandshakeDirective.Abort(
-                                "no ack after ${SessionBudget.HANDSHAKE_ACK_MAX_RETRIES} retries",
-                            ),
-                        )
+                        return HandshakeStep.Directive(HandshakeDirective.Abort(ackExhaustedReason()))
                     }
                     retries++
                     issueHandshakeWrite(events, write)
@@ -408,6 +404,23 @@ class GattSession(
 
                 else -> return step
             }
+        }
+    }
+
+    /**
+     * [decoder.handshakeSawUnverifiableResponse] distinguishes two E6-exhaustion
+     * causes that would otherwise share one misleading message: genuinely no
+     * ack ever arriving, versus a response arriving that could not be trusted
+     * (see `BeurerDecoder.consentPreviouslyRefused`). Only the former is
+     * accurately "no ack".
+     */
+    private fun ackExhaustedReason(): String {
+        val maxRetries = SessionBudget.HANDSHAKE_ACK_MAX_RETRIES
+        return if (decoder.handshakeSawUnverifiableResponse) {
+            "no verifiable ack after $maxRetries retries " +
+                "(a response arrived but could not be attributed to this write)"
+        } else {
+            "no ack after $maxRetries retries"
         }
     }
 

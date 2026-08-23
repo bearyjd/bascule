@@ -366,6 +366,51 @@ class GattSessionHandshakeTest {
     }
 
     /**
+     * Companion to [lateResponseToASupersededConsentWriteDoesNotMisfireTheNextStep]:
+     * proves the other half of `consentPreviouslyRefused`'s trade-off actually
+     * terminates rather than hanging. When consent is genuinely still refused
+     * after re-registration — no stale response in play, just a real refusal
+     * every time — the decoder can't tell that apart from the stale case
+     * either, so it keeps returning `Wait` and E6's own ack ladder is what
+     * finally ends the session. Also pins the corrected abort message: since
+     * responses *did* arrive (they just couldn't be trusted), the reason must
+     * say so rather than falsely claim no ack arrived at all.
+     */
+    @Test
+    fun consentRepeatedlyRefusedAfterReregistrationEventuallyAbortsInsteadOfHangingForever() = runTest {
+        val consentStore = InMemoryConsentStore().apply {
+            save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = 5, consentCode = 0x9999))
+        }
+        val transport = FakeGattTransport(
+            discovered = discovered,
+            onWrite = { char, bytes ->
+                if (char != SigWeightProfile.USER_CONTROL_POINT) {
+                    emptyList()
+                } else {
+                    when (bytes.firstOrNull()?.toInt()) {
+                        SigWeightProfile.UCP_REGISTER_NEW_USER -> listOf(char to Bf720Capture.registrationSuccess())
+                        // Every consent write is refused, forever — including
+                        // after re-registration. No stale-response ambiguity
+                        // here; this is the "genuinely still refused" case
+                        // only E6 can resolve.
+                        SigWeightProfile.UCP_CONSENT -> listOf(char to Bf720Capture.consentFailure())
+                        else -> emptyList()
+                    }
+                }
+            },
+        )
+
+        val outcome = session(transport, consentStore).run()
+
+        assertTrue("must terminate via HandshakeFailed, not hang", outcome is SessionOutcome.HandshakeFailed)
+        val detail = (outcome as SessionOutcome.HandshakeFailed).detail
+        assertTrue(
+            "reason must not claim no ack arrived when refusals actually did: $detail",
+            detail.contains("could not be attributed"),
+        )
+    }
+
+    /**
      * A duplicate response to the same write must not be processed twice. The
      * decoder's own state machine is what makes this safe — once it has moved
      * past `AwaitingRegistration`, a second `RegistrationResult` routes to
