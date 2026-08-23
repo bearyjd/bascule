@@ -36,6 +36,7 @@ class ScaleSessionContractTest {
             SigWeightProfile.WEIGHT_SCALE_SERVICE to setOf(SigWeightProfile.WEIGHT_MEASUREMENT),
             SigWeightProfile.BODY_COMPOSITION_SERVICE to
                 setOf(SigWeightProfile.BODY_COMPOSITION_MEASUREMENT),
+            SigWeightProfile.CURRENT_TIME_SERVICE to setOf(SigWeightProfile.CURRENT_TIME),
         ),
     )
 
@@ -114,6 +115,20 @@ class ScaleSessionContractTest {
         assertTrue(
             "measurement indications must be enabled, and only after consent",
             SigWeightProfile.WEIGHT_MEASUREMENT in transport.subscribedCharacteristics,
+        )
+
+        // Membership alone doesn't prove *order* — the Consent write is always
+        // the last UCP write in a granted handshake, so its call-order position
+        // must precede the subscribe call, not merely both have happened.
+        val lastUcpWriteOrderIndex = transport.callOrder.indexOfLast {
+            it == "write:${SigWeightProfile.USER_CONTROL_POINT}"
+        }
+        val subscribeOrderIndex = transport.callOrder.indexOfFirst {
+            it == "subscribe:${SigWeightProfile.WEIGHT_MEASUREMENT}"
+        }
+        assertTrue(
+            "subscribe must come after the granting Consent write, got ${transport.callOrder}",
+            lastUcpWriteOrderIndex in 0 until subscribeOrderIndex,
         )
     }
 

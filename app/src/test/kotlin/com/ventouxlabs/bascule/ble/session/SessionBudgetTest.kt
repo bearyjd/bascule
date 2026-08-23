@@ -74,6 +74,41 @@ class SessionBudgetTest {
         )
     }
 
+    /**
+     * Named explicitly in 01-plan.md's WP-07 section. Models the *real* worst
+     * case, not just one ack ladder: `BeurerDecoder`'s handshake can chain up
+     * to three independently-ack'd UCP writes — a stale stored credential's
+     * Consent (refused) → Register → Consent again — each with its own E6
+     * ladder, plus the Current Time opening write. `HARD_SESSION_CEILING` is
+     * not enforced anywhere in `GattSession` yet (that lands with WP-08's
+     * worker), so exceeding it here is not a regression to silently fix — it
+     * is the number WP-08 needs before adding that enforcement.
+     */
+    @Test
+    fun handshakeLadderFitsWithinHardCeilingAfterConnectPhase() {
+        val maxChainedHandshakeSteps = 3 // stale-credential Consent -> Register -> Consent again
+        val handshakeLadder = SessionBudget.HANDSHAKE_ACK_TIMEOUT *
+            (SessionBudget.HANDSHAKE_ACK_MAX_RETRIES + 1) *
+            maxChainedHandshakeSteps
+
+        val beforeFirstIndication = SessionBudget.CONNECT_PHASE_BUDGET +
+            SessionBudget.DISCOVERY_TIMEOUT +
+            SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT +
+            handshakeLadder
+        val withFirstIndication = beforeFirstIndication + SessionBudget.FIRST_INDICATION_TIMEOUT
+
+        assertTrue(
+            "connect + discovery + opening write + the full chained handshake ladder " +
+                "($beforeFirstIndication) should still leave room for at least a fast first indication",
+            beforeFirstIndication < SessionBudget.HARD_SESSION_CEILING,
+        )
+        assertTrue(
+            "the full worst case ($withFirstIndication) exceeds the 90s hard ceiling — expected " +
+                "today since nothing enforces it yet; WP-08 needs this number when it does",
+            withFirstIndication >= SessionBudget.HARD_SESSION_CEILING,
+        )
+    }
+
     @Test
     fun bondWaitIsExcludedFromTheHardCeilingByHavingItsOwnBudget() {
         assertTrue(

@@ -51,6 +51,14 @@ object SessionBudget {
     /** E6: "max 2 retries" of an unacknowledged handshake write. */
     const val HANDSHAKE_ACK_MAX_RETRIES: Int = 2
 
+    /**
+     * A plain characteristic write's GATT-level completion (the Current Time
+     * opening write, §4.4) — deliberately its own constant rather than reusing
+     * [HANDSHAKE_ACK_TIMEOUT], because it waits on `WriteComplete`, not a UCP
+     * indication, and tuning one must not silently move the other.
+     */
+    val OPENING_WRITE_COMPLETE_TIMEOUT: Duration = 2.seconds
+
     /** E7: first measurement indication, counted from `SUBSCRIBED`. */
     val FIRST_INDICATION_TIMEOUT: Duration = 45.seconds
 

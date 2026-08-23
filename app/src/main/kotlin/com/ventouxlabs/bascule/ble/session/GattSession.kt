@@ -1,14 +1,18 @@
 package com.ventouxlabs.bascule.ble.session
 
 import com.ventouxlabs.bascule.ble.decoders.HandshakeContext
+import com.ventouxlabs.bascule.ble.decoders.HandshakeDirective
 import com.ventouxlabs.bascule.ble.decoders.ScaleDecoder
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
+import java.util.UUID
+import kotlin.time.Duration
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 
 /**
  * The BLE state machine of 00-design.md §2.1: connect, discover, run the
@@ -20,13 +24,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * back in, which is what makes every failure edge reproducible in a JVM test
  * against a fake transport.
  *
- * WP-06 (this package): `DISARMED` through `DISCOVERING`, plus teardown
- * discipline (E1, E2, E3, E4, E12, E15). WP-07 adds the `HANDSHAKING` →
- * `SUBSCRIBED` transition; WP-10 adds `MEASURING` → `EMITTED`. Until those land,
- * a session that reaches `DISCOVERING` successfully still reports
- * [SessionOutcome.Missed] with [MissReason.NO_MEASUREMENT] — the same outcome
- * the Phase 2 stub reported, so nothing downstream has to change shape as later
- * work packages land. See docs/prp/02-ci-notes.md.
+ * WP-06: `DISARMED` through `DISCOVERING`, plus teardown discipline (E1, E2,
+ * E3, E4, E12, E15). WP-07 (this package) adds `DISCOVERING` → `SUBSCRIBED`:
+ * the Current Time opening write (00-design.md §4.4), the UDS register/consent
+ * handshake (E6, E19), and subscribing to the decoder's measurement
+ * characteristics once consent is granted. WP-10 adds `MEASURING` → `EMITTED`.
+ * Until that lands, a session that reaches `SUBSCRIBED` successfully still
+ * reports [SessionOutcome.Missed] with [MissReason.NO_MEASUREMENT] — the same
+ * outcome the earlier stub reported, so nothing downstream has to change shape
+ * as later work packages land. See docs/prp/02-ci-notes.md.
  */
 class GattSession(
     private val transport: GattTransport,
@@ -34,6 +40,8 @@ class GattSession(
     private val consentStore: ConsentStore,
     private val deviceAddress: String,
     private val diagnostics: DiagnosticsCounters,
+    /** Injected so the Current Time write is deterministic in a JVM test. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     /**
@@ -237,8 +245,9 @@ class GattSession(
 
             else -> {
                 diagnostics.reset(DiagnosticsCounterKey.INCOMPATIBLE_STREAK)
-                // WP-06 stops at DISCOVERING; HANDSHAKING is WP-07.
-                SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
+                val discoveredServices = (outcome as DiscoveryAttempt.Discovered).services
+                runOpeningSequence(events, discoveredServices)?.let { return it }
+                handshake(events, discoveredServices)
             }
         }
     }
@@ -249,12 +258,177 @@ class GattSession(
                 is TransportEvent.AdapterOff -> return DiscoveryAttempt.AdapterOff
                 is TransportEvent.ServicesDiscovered -> return when {
                     event.status != 0 -> DiscoveryAttempt.Failed(event.status)
-                    event.services.containsAll(decoder.requiredServices) -> DiscoveryAttempt.Discovered
+                    event.services.containsAll(decoder.requiredServices) -> DiscoveryAttempt.Discovered(event.services)
                     else -> DiscoveryAttempt.Missing
                 }
                 else -> continue // not relevant to the discovery wait step
             }
         }
+    }
+
+    /**
+     * 00-design.md §4.4: writes Current Time before Register/Consent, when the
+     * decoder has something to send. Best-effort — waits for each write's
+     * transport-level completion (real GATT operations must be serialized) but
+     * never fails the session over a rejected/timed-out write; see
+     * [ScaleDecoder.openingSequence]'s KDoc. Returns non-null only to short
+     * circuit the whole session on adapter-off, which is not specific to this
+     * write and must not be swallowed just because this step is best-effort.
+     */
+    private suspend fun runOpeningSequence(
+        events: Channel<TransportEvent>,
+        discovered: DiscoveredServices,
+    ): SessionOutcome? {
+        for (op in decoder.openingSequence(discovered, clock())) {
+            if (op !is GattOp.Write) continue
+            issueHandshakeWrite(events, op)
+            val adapterOff = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+                awaitWriteComplete(events, op.char)
+            } == WriteOutcome.AdapterOff
+            if (adapterOff) return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+        }
+        return null
+    }
+
+    private suspend fun awaitWriteComplete(events: Channel<TransportEvent>, char: UUID): WriteOutcome {
+        while (true) {
+            when (val event = events.receive()) {
+                is TransportEvent.AdapterOff -> return WriteOutcome.AdapterOff
+                is TransportEvent.WriteComplete -> if (event.char == char) return WriteOutcome.Completed
+                else -> continue
+            }
+        }
+    }
+
+    private enum class WriteOutcome { Completed, AdapterOff }
+
+    /**
+     * Drives `beginHandshake`/`onHandshakeEvent` (ADR-007, RISK-1) — one step
+     * per acknowledging indication, gated on `DecodeEvent.ConsentResult(success
+     * = true)` rather than an undifferentiated ack (E6). Subscribes to the
+     * decoder's measurement characteristics only once `Complete` is reached.
+     *
+     * A mid-handshake disconnect that is *not* adapter-off (no dedicated edge
+     * names this — E8 is MEASURING-only) is deliberately left to E6's own ack
+     * ladder to catch: `awaitNonWaitDirective` ignores it and keeps waiting,
+     * so the outstanding write's timeout eventually fires and the session ends
+     * cleanly as `HandshakeFailed` rather than hanging. This is an explicit
+     * scope decision for WP-07, not an oversight — flag if it needs its own
+     * edge before WP-08.
+     */
+    private suspend fun handshake(events: Channel<TransportEvent>, discovered: DiscoveredServices): SessionOutcome {
+        var directive = decoder.beginHandshake(discovered, handshakeContext())
+        while (true) {
+            when (val current = directive) {
+                is HandshakeDirective.Send -> {
+                    val write = current.op as? GattOp.Write
+                        ?: return SessionOutcome.HandshakeFailed("handshake directive was not a Write")
+                    issueHandshakeWrite(events, write)
+                    when (val step = awaitHandshakeStep(events, write, current.expectAckWithin)) {
+                        HandshakeStep.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                        is HandshakeStep.Directive -> directive = step.directive
+                    }
+                }
+
+                HandshakeDirective.Wait ->
+                    return SessionOutcome.HandshakeFailed("beginHandshake returned Wait with nothing sent")
+
+                is HandshakeDirective.Complete -> {
+                    current.credential?.let(::rememberCredential)
+                    decoder.measurementCharacteristics.forEach(transport::enableIndications)
+                    // WP-10 owns MEASURING onward; SUBSCRIBED is as far as this package goes.
+                    return SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
+                }
+
+                is HandshakeDirective.Abort -> {
+                    if (current.registrationRejected) {
+                        diagnostics.increment(DiagnosticsCounterKey.REGISTRATION_REJECTED)
+                    }
+                    return SessionOutcome.HandshakeFailed(current.reason)
+                }
+            }
+        }
+    }
+
+    /**
+     * The wire protocol carries no correlation ID: a Register/Consent response
+     * is identified only by its opcode, so a response to a *superseded* write
+     * (the original half of an E6 reissue, or the pre-re-registration half of
+     * a rejected stored credential) is byte-for-byte indistinguishable from a
+     * fresh one once decoded. `BeurerDecoder`'s state machine absorbs this
+     * safely when the next expected event is a *different* `DecodeEvent` type,
+     * but not when state cycles back to the same `HandshakeState` subtype
+     * (`AwaitingConsent(registered=false)` → re-register → `AwaitingConsent
+     * (registered=true)`) — a late response to the first still type-matches
+     * the second wait. Draining before every handshake write (including
+     * reissues) is what actually closes that hole: it discards anything still
+     * sitting in the channel from a step this write supersedes, so the next
+     * wait only ever sees responses to *this* write. `yield()` first because a
+     * response the fake already emitted may not have been relayed into
+     * `events` yet — see `run()`'s own KDoc on the same hazard.
+     */
+    private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
+        yield()
+        drainStaleEvents(events)
+        transport.write(op.char, op.bytes)
+    }
+
+    /**
+     * Waits for the outstanding write's ack, re-issuing on timeout up to E6's
+     * retry cap. Every decoded event is fed through the decoder until it
+     * returns something other than [HandshakeDirective.Wait] — an unrelated
+     * indication comes back as `Wait` from the decoder itself, so this loop
+     * naturally keeps waiting rather than misreading it as the step's answer.
+     */
+    private suspend fun awaitHandshakeStep(
+        events: Channel<TransportEvent>,
+        write: GattOp.Write,
+        ackTimeout: Duration,
+    ): HandshakeStep {
+        var retries = 0
+        while (true) {
+            val step = withTimeoutOrNull(ackTimeout) { awaitNonWaitDirective(events) }
+            when {
+                step == null -> {
+                    // E6: no ack within timeout — re-issue the same write, max 2 retries.
+                    if (retries >= SessionBudget.HANDSHAKE_ACK_MAX_RETRIES) {
+                        return HandshakeStep.Directive(
+                            HandshakeDirective.Abort(
+                                "no ack after ${SessionBudget.HANDSHAKE_ACK_MAX_RETRIES} retries",
+                            ),
+                        )
+                    }
+                    retries++
+                    issueHandshakeWrite(events, write)
+                }
+
+                else -> return step
+            }
+        }
+    }
+
+    private suspend fun awaitNonWaitDirective(events: Channel<TransportEvent>): HandshakeStep {
+        while (true) {
+            when (val event = events.receive()) {
+                is TransportEvent.AdapterOff -> return HandshakeStep.AdapterOff
+                is TransportEvent.CharacteristicChanged -> {
+                    // TODO(WP-10): a measurement indication cannot reach here on
+                    //  real hardware (indications aren't enabled until consent
+                    //  is granted), but if that ever changes, decoding it here
+                    //  primes the correlator with a frame this session-phase
+                    //  will never pair or flush.
+                    val decoded = decoder.onNotification(event.char, event.value)
+                    val next = decoder.onHandshakeEvent(decoded)
+                    if (next !is HandshakeDirective.Wait) return HandshakeStep.Directive(next)
+                }
+                else -> continue // WriteComplete and other transport plumbing, not relevant here
+            }
+        }
+    }
+
+    private sealed interface HandshakeStep {
+        data object AdapterOff : HandshakeStep
+        data class Directive(val directive: HandshakeDirective) : HandshakeStep
     }
 
     private sealed interface ConnectAttempt {
@@ -264,7 +438,7 @@ class GattSession(
     }
 
     private sealed interface DiscoveryAttempt {
-        data object Discovered : DiscoveryAttempt
+        data class Discovered(val services: DiscoveredServices) : DiscoveryAttempt
         data object Missing : DiscoveryAttempt
         data class Failed(val status: Int) : DiscoveryAttempt
         data object AdapterOff : DiscoveryAttempt
