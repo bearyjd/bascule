@@ -777,8 +777,18 @@ review applied):
   `HANDSHAKE_ACK_MAX_RETRIES` only on the re-registration-after-refusal path
   (zero for a first-ever registration) and carried into the
   `AwaitingConsent.staleResponseBudget` it produces on success; each refusal
-  while that budget is positive is absorbed as `Wait` and decrements it; the
-  next refusal past zero is guaranteed genuine and aborts immediately with the
+  while that budget is positive is absorbed as `Wait` and decrements it. The
+  budget bounds a *count*, not an *attribution* — the decoder still cannot
+  tell which absorbed refusal, if any, was actually stale, so a genuinely new
+  refusal to the current write can itself be absorbed early if it happens to
+  arrive first (proven, not just accepted, by
+  `consentGenuinelyStillRefusedAbortsAssoonAsTheStaleResponseBudgetIsExhausted`,
+  where every refusal is genuine and the first two are still absorbed). What
+  the count *does* guarantee, regardless of arrival order: at most
+  `HANDSHAKE_ACK_MAX_RETRIES` writes were ever outstanding before
+  re-registration began, so at most that many refusals can *ever* be stale —
+  meaning the refusal that lands after the budget is exhausted cannot be one
+  of them, and is safe to treat as genuine and abort on immediately with the
   decoder's own accurate reason, not a generic E6 message. This is strictly
   better than pass 2 in both directions: a first-ever registration still
   aborts fast and accurately (`consentRefusedForAFreshlyRegisteredUserAborts`,

@@ -202,6 +202,40 @@ class GattSessionConnectTest {
         assertEquals(2, transport.connectCallCount)
     }
 
+    /**
+     * `drainStaleEvents` runs after every E2 (status-133) retry delay, and
+     * discards everything it finds except [TransportEvent.AdapterOff] —
+     * queued during the retry wait itself here, not before the first failure,
+     * so it is genuinely present at drain time rather than needing the drain
+     * to somehow catch something not yet arrived (that's `issueHandshakeWrite`'s
+     * unrelated, harder hazard). Without preserving it, this would silently
+     * discard the adapter-off and let the retry misclassify the eventual
+     * outcome as `GATT_ERROR` or `CONNECT_TIMEOUT` instead of `ADAPTER_OFF`.
+     */
+    @Test
+    fun adapterOffQueuedDuringAConnectRetryDelaySurvivesTheDrain() = runTest {
+        val transport = FakeGattTransport(
+            connectOutcomes = listOf(ConnectOutcome.Failure(GATT_ERROR), ConnectOutcome.Success),
+        )
+        val deferred = async { session(transport).run() }
+
+        runCurrent() // first connect attempt fails with 133; E2's teardown-then-delay begins
+        assertEquals(1, transport.connectCallCount)
+
+        // Arrives while still inside the 500ms E2 backoff, so it is sitting in
+        // the channel — not merely promised later — when drainStaleEvents runs.
+        transport.emitAdapterOff()
+        advanceTimeBy(500)
+        runCurrent()
+
+        val outcome = deferred.await()
+        assertEquals(
+            "an adapter-off already queued when a connect retry's drain runs must survive it",
+            SessionOutcome.Missed(MissReason.ADAPTER_OFF),
+            outcome,
+        )
+    }
+
     private companion object {
         const val DEVICE_ADDRESS = "E7:DB:51:F1:36:91"
         const val GATT_ERROR = 133

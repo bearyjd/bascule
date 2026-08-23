@@ -295,9 +295,11 @@ class GattSessionHandshakeTest {
      * byte-identical to a fresh one. Draining the event channel before each
      * write cannot close this — "late" means "not yet arrived", so nothing is
      * there to drain — so the actual fix lives in `BeurerDecoder`: once a
-     * refused stored credential has driven a re-registration this session,
-     * `consentPreviouslyRefused` stops treating a same-type refusal as fatal,
-     * leaving E6's own ack ladder as the arbiter.
+     * refused stored credential has driven a re-registration this session, a
+     * bounded budget (`staleResponseBudget`, at most as many writes as could
+     * possibly have been superseded) absorbs same-type refusals instead of
+     * treating every one as fatal, with the next one past the budget treated
+     * as genuine.
      *
      * Drives the exact two-refusal sequence that exposes the hazard: consent
      * write #1 (stale stored credential) times out and reissues as #2; #1's

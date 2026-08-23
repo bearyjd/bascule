@@ -38,6 +38,10 @@ class BeurerDecoder(
     private var handshake: HandshakeState = HandshakeState.NotStarted
     private var context: HandshakeContext? = null
 
+    // Never reset once true, same as [malformedCount] below — relies on the
+    // class-level contract that a decoder is per-session stateful (a fresh
+    // instance per `GattSession`, never reused across sessions), not on any
+    // reset logic of its own.
     override var handshakeSawUnverifiableResponse: Boolean = false
         private set
 

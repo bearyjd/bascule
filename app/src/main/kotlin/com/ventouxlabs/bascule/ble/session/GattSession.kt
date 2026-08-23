@@ -381,9 +381,10 @@ class GattSession(
      * cycles back to the same `HandshakeState` subtype (`AwaitingConsent
      * (registered=false)` → re-register → `AwaitingConsent(registered=true)`),
      * that case is closed at the decoder level instead: see
-     * `BeurerDecoder.consentPreviouslyRefused`, which stops treating a
-     * same-type refusal as fatal once a re-registration has happened this
-     * session, and lets E6's own ack ladder be the arbiter.
+     * `BeurerDecoder.HandshakeState.AwaitingConsent.staleResponseBudget`,
+     * which absorbs only as many same-type refusals as could possibly be
+     * stale (bounded by `SessionBudget.HANDSHAKE_ACK_MAX_RETRIES`) before
+     * treating the next one as genuine.
      */
     private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
         yield()
@@ -425,8 +426,8 @@ class GattSession(
      * [decoder.handshakeSawUnverifiableResponse] distinguishes two E6-exhaustion
      * causes that would otherwise share one misleading message: genuinely no
      * ack ever arriving, versus a response arriving that could not be trusted
-     * (see `BeurerDecoder.consentPreviouslyRefused`). Only the former is
-     * accurately "no ack".
+     * (see `BeurerDecoder.HandshakeState.AwaitingConsent.staleResponseBudget`).
+     * Only the former is accurately "no ack".
      */
     private fun ackExhaustedReason(): String {
         val maxRetries = SessionBudget.HANDSHAKE_ACK_MAX_RETRIES
