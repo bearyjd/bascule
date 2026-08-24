@@ -1,6 +1,11 @@
 package com.ventouxlabs.bascule.ui
 
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -26,11 +31,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -40,10 +47,17 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.WeightUnit
+import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.network.ContractVersion
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * WP-25: §5's config surface plus §6.3's permission-request flow. The token
@@ -52,6 +66,7 @@ import kotlinx.coroutines.flow.SharedFlow
  * than typed in here (O-08.5).
  */
 @Composable
+@Suppress("LongMethod") // Declarative list of independent settings cards.
 fun ConfigScreen(
     viewModel: ConfigViewModel = viewModel(
         factory = ConfigViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
@@ -99,7 +114,16 @@ fun ConfigScreen(
             RegisteredScaleSection(
                 pairedDeviceAddress = state.pairedDeviceAddress,
                 registeredUserIndex = state.registeredUserIndex,
+                registration = state.scaleRegistration,
+                onRegister = viewModel::startScaleRegistration,
+                onLinkExisting = viewModel::linkExistingScale,
                 onReRegister = viewModel::reRegister,
+            )
+        }
+        item {
+            SettingsTransferSection(
+                onExport = viewModel::exportSettings,
+                onImport = viewModel::importSettings,
             )
         }
         item {
@@ -122,6 +146,7 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
+@Suppress("LongMethod") // Permission launchers and their SDK-specific UI are intentionally colocated.
 private fun PermissionSection(requester: PermissionRequester) {
     var pending by remember { mutableStateOf(requester.firstDialogPermissions()) }
     // Must reflect requester's actual state on first composition, not just
@@ -130,6 +155,18 @@ private fun PermissionSection(requester: PermissionRequester) {
     // into this state, and initializing to false would hide the second
     // dialog forever (there's no other path that ever sets it true).
     var awaitingBackgroundLocation by remember { mutableStateOf(requester.secondDialogPermission() != null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, requester) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                pending = requester.firstDialogPermissions()
+                awaitingBackgroundLocation = requester.secondDialogPermission() != null
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         pending = requester.firstDialogPermissions()
@@ -167,10 +204,26 @@ private fun PermissionSection(requester: PermissionRequester) {
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
-            Button(onClick = {
-                requester.secondDialogPermission()?.let { backgroundLocationLauncher.launch(it) }
-            }) {
-                Text("Grant background location")
+            if (requester.backgroundLocationRequiresSettings()) {
+                // On API 30 the runtime dialog can no longer grant "Allow all
+                // the time" at all — only the app's own Settings screen can.
+                val context = LocalContext.current
+                Button(onClick = {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null),
+                        ),
+                    )
+                }) {
+                    Text("Open settings")
+                }
+            } else {
+                Button(onClick = {
+                    requester.secondDialogPermission()?.let { backgroundLocationLauncher.launch(it) }
+                }) {
+                    Text("Grant background location")
+                }
             }
         }
     }
@@ -204,7 +257,7 @@ private fun ConnectionSection(
             }
             OutlinedButton(
                 onClick = onTestConnection,
-                enabled = state.tokenIsSet &&
+                enabled = (state.tokenIsSet || state.sessionIsSet) &&
                     state.baseUrl.isNotBlank() &&
                     state.connectionTest != ConnectionTestUiState.Testing,
                 modifier = Modifier.padding(start = 8.dp),
@@ -221,7 +274,7 @@ private fun ConnectionTestResultText(result: ConnectionTestUiState) {
     when (result) {
         ConnectionTestUiState.Idle, ConnectionTestUiState.Testing -> Unit
         ConnectionTestUiState.Success -> Text(
-            "✓ Connected — token accepted",
+            "✓ Connected — credential accepted",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.padding(top = 8.dp),
@@ -444,26 +497,64 @@ private fun LoginEditForm(
         Button(onClick = onSignIn, enabled = !isLoggingIn) {
             Text(if (isLoggingIn) "Signing in…" else "Sign in")
         }
-        TextButton(onClick = onCancel, modifier = Modifier.padding(start = 8.dp)) { Text("Cancel") }
+        TextButton(
+            onClick = onCancel,
+            enabled = !isLoggingIn,
+            modifier = Modifier.padding(start = 8.dp),
+        ) { Text("Cancel") }
     }
 }
 
 @Composable
+@Suppress("LongMethod", "CyclomaticComplexMethod") // UI states mirror the registration state machine directly.
 private fun RegisteredScaleSection(
     pairedDeviceAddress: String?,
     registeredUserIndex: Int?,
+    registration: ScaleRegistrationUiState,
+    onRegister: (Boolean) -> Unit,
+    onLinkExisting: (String, String, String) -> Unit,
     onReRegister: (String) -> Unit,
 ) {
     var showWarning by remember { mutableStateOf(false) }
+    var showExisting by remember { mutableStateOf(false) }
+    val busy = registration == ScaleRegistrationUiState.Scanning ||
+        registration == ScaleRegistrationUiState.Connecting
 
     SectionCard(title = "Scale registration") {
         Text(
             registeredUserIndex?.let { "Registered as user slot $it" } ?: "Not registered with a scale yet",
             style = MaterialTheme.typography.bodyMedium,
         )
-        if (registeredUserIndex != null && pairedDeviceAddress != null) {
+        when (registration) {
+            ScaleRegistrationUiState.Idle -> Unit
+            ScaleRegistrationUiState.Scanning -> Text("Scanning… wake or step on the scale.")
+            ScaleRegistrationUiState.Connecting -> Text("Scale found — registering…")
+            is ScaleRegistrationUiState.Success -> Text(
+                "Connected to ${registration.address}; user slot ${registration.scaleIndex} is saved.",
+                color = MaterialTheme.colorScheme.primary,
+            )
+            is ScaleRegistrationUiState.Failure -> Text(
+                registration.message,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (registeredUserIndex == null) {
+            Row(modifier = Modifier.padding(top = 8.dp)) {
+                Button(onClick = { showWarning = true }, enabled = !busy) {
+                    Text("Register scale")
+                }
+                OutlinedButton(
+                    onClick = { showExisting = true },
+                    enabled = !busy,
+                    modifier = Modifier.padding(start = 8.dp),
+                ) {
+                    Text("Use existing")
+                }
+            }
+        } else if (pairedDeviceAddress != null) {
             OutlinedButton(
                 onClick = { showWarning = true },
+                enabled = !busy,
                 modifier = Modifier.padding(top = 8.dp),
             ) {
                 Text("Re-register with the scale")
@@ -471,27 +562,244 @@ private fun RegisteredScaleSection(
         }
     }
 
-    if (showWarning && pairedDeviceAddress != null) {
+    if (showWarning) {
+        val replacing = registeredUserIndex != null && pairedDeviceAddress != null
         AlertDialog(
             onDismissRequest = { showWarning = false },
-            title = { Text("Re-register with the scale?") },
+            title = { Text(if (replacing) "Re-register with the scale?" else "Register a scale?") },
             text = {
                 Text(
-                    "The BF720 only has 8 user slots. Re-registering uses one of them, and the old " +
-                        "slot is left behind on the scale until it's overwritten or reset.",
+                    if (replacing) {
+                        "The BF720 only has 8 user slots. Re-registering uses one of them, and the old " +
+                            "slot is left behind on the scale until it's overwritten or reset."
+                    } else {
+                        "Wake or step on the BF720 after continuing. Registration uses one of the scale's " +
+                            "8 user slots and securely saves the assigned slot on this device."
+                    },
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    onReRegister(pairedDeviceAddress)
+                    if (replacing) onReRegister(requireNotNull(pairedDeviceAddress)) else onRegister(false)
                     showWarning = false
-                }) { Text("Re-register") }
+                }) { Text(if (replacing) "Re-register" else "Start scanning") }
             },
             dismissButton = {
                 TextButton(onClick = { showWarning = false }) { Text("Cancel") }
             },
         )
     }
+
+    if (showExisting) {
+        ExistingScaleDialog(
+            onDismiss = { showExisting = false },
+            onConfirm = { address, index, code ->
+                onLinkExisting(address, index, code)
+                showExisting = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun ExistingScaleDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, String) -> Unit,
+) {
+    var address by remember { mutableStateOf("") }
+    var index by remember { mutableStateOf("") }
+    var consentCode by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Use existing registration") },
+        text = {
+            Column {
+                Text("Enter a previously exported or recorded scale mapping. This does not use a new scale slot.")
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("Bluetooth address") },
+                    singleLine = true,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                OutlinedTextField(
+                    value = index,
+                    onValueChange = { index = it },
+                    label = { Text("User slot") },
+                    singleLine = true,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                OutlinedTextField(
+                    value = consentCode,
+                    onValueChange = { consentCode = it },
+                    label = { Text("Consent code") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(address, index, consentCode) },
+                enabled = address.isNotBlank() && index.isNotBlank() && consentCode.isNotBlank(),
+            ) { Text("Save mapping") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+@Suppress("LongMethod") // Document launchers must retain the same remembered transfer state.
+private fun SettingsTransferSection(
+    onExport: suspend (String) -> Result<ByteArray>,
+    onImport: suspend (ByteArray, String) -> Result<Unit>,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var pendingExport by remember { mutableStateOf<ByteArray?>(null) }
+    var pendingImport by remember { mutableStateOf<ByteArray?>(null) }
+    var dialogMode by remember { mutableStateOf<SettingsDialogMode?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    val createDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val bytes = pendingExport
+        pendingExport = null
+        if (uri != null && bytes != null) {
+            scope.launch {
+                val written = runCatching {
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri, "w")!!.use { it.write(bytes) }
+                    }
+                }
+                message = if (written.isSuccess) "Settings backup exported." else "Could not write the backup file."
+            }
+        }
+    }
+    val openDocument = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                pendingImport = runCatching {
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)!!.use(InputStream::readSettingsBackup)
+                    }
+                }.getOrElse {
+                    message = "Could not read the selected file."
+                    null
+                }
+                if (pendingImport != null) dialogMode = SettingsDialogMode.IMPORT
+            }
+        }
+    }
+
+    SectionCard(title = "Settings backup") {
+        Text(
+            "Export or restore server, credentials, preferences, and scale registration. " +
+                "The file is encrypted with a passphrase you choose.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(modifier = Modifier.padding(top = 8.dp)) {
+            OutlinedButton(onClick = { dialogMode = SettingsDialogMode.EXPORT }) { Text("Export") }
+            OutlinedButton(
+                onClick = { openDocument.launch(arrayOf("application/octet-stream", "application/json", "*/*")) },
+                modifier = Modifier.padding(start = 8.dp),
+            ) { Text("Import") }
+        }
+        message?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+    }
+
+    dialogMode?.let { mode ->
+        PassphraseDialog(
+            confirmPassphrase = mode == SettingsDialogMode.EXPORT,
+            onDismiss = { dialogMode = null },
+            onConfirm = { passphrase ->
+                dialogMode = null
+                scope.launch {
+                    if (mode == SettingsDialogMode.EXPORT) {
+                        onExport(passphrase).fold(
+                            onSuccess = {
+                                pendingExport = it
+                                createDocument.launch("bascule-settings.bascule")
+                            },
+                            onFailure = { message = it.message ?: "Could not create settings backup." },
+                        )
+                    } else {
+                        val bytes = pendingImport
+                        pendingImport = null
+                        if (bytes != null) {
+                            onImport(bytes, passphrase).fold(
+                                onSuccess = { message = "Settings restored." },
+                                onFailure = { message = "Import failed. Check the file and passphrase." },
+                            )
+                        }
+                    }
+                }
+            },
+        )
+    }
+}
+
+private enum class SettingsDialogMode { EXPORT, IMPORT }
+
+private fun InputStream.readSettingsBackup(): ByteArray {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0
+    while (true) {
+        val count = read(buffer)
+        if (count < 0) break
+        total += count
+        require(total <= SettingsBackupCodec.MAX_BACKUP_BYTES) { "Settings backup is too large" }
+        output.write(buffer, 0, count)
+    }
+    return output.toByteArray()
+}
+
+@Composable
+private fun PassphraseDialog(
+    confirmPassphrase: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var passphrase by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    val valid = passphrase.length >= SettingsBackupCodec.MIN_PASSPHRASE_LENGTH &&
+        (!confirmPassphrase || passphrase == confirmation)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },
+        text = {
+            Column {
+                Text("Use at least 8 characters. This passphrase cannot be recovered.")
+                OutlinedTextField(
+                    value = passphrase,
+                    onValueChange = { passphrase = it },
+                    label = { Text("Passphrase") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                if (confirmPassphrase) {
+                    OutlinedTextField(
+                        value = confirmation,
+                        onValueChange = { confirmation = it },
+                        label = { Text("Confirm passphrase") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(passphrase) }, enabled = valid) {
+                Text(if (confirmPassphrase) "Export" else "Import")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

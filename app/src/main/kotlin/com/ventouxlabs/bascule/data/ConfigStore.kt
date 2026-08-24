@@ -41,7 +41,7 @@ interface ConfigStore {
     suspend fun saveDisplayUnit(unit: WeightUnit)
     suspend fun saveContractVersion(version: ContractVersion)
     suspend fun saveAlwaysOnBridging(enabled: Boolean)
-    suspend fun savePairedDeviceAddress(address: String)
+    suspend fun savePairedDeviceAddress(address: String?)
 }
 
 class DataStoreConfigStore(context: Context) : ConfigStore {
@@ -79,8 +79,10 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
         store.edit { it[ALWAYS_ON_BRIDGING] = enabled }
     }
 
-    override suspend fun savePairedDeviceAddress(address: String) {
-        store.edit { it[PAIRED_DEVICE_ADDRESS] = address }
+    override suspend fun savePairedDeviceAddress(address: String?) {
+        store.edit { prefs ->
+            if (address == null) prefs.remove(PAIRED_DEVICE_ADDRESS) else prefs[PAIRED_DEVICE_ADDRESS] = address
+        }
     }
 
     private companion object {

@@ -1,6 +1,8 @@
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
+import com.ventouxlabs.bascule.ble.ScaleRegistrar
 import com.ventouxlabs.bascule.ble.session.ConsentStore
 import com.ventouxlabs.bascule.ble.session.EncryptedConsentStore
 import com.ventouxlabs.bascule.data.BasculeDatabase
@@ -39,6 +41,9 @@ class BasculeApplication : Application() {
     val consentStore: ConsentStore by lazy { EncryptedConsentStore(this) }
     val configStore: ConfigStore by lazy { DataStoreConfigStore(this) }
     val deliveryTrigger: DeliveryTrigger by lazy { WorkManagerDeliveryTrigger(this) }
+    val scaleRegistrar: ScaleRegistrar by lazy {
+        AndroidScaleRegistrar(this, consentStore, configStore, diagnosticsCounters)
+    }
 
     /**
      * Process-lifetime only until WP-26 provides a persistent implementation

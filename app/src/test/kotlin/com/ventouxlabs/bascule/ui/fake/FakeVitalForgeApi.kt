@@ -24,6 +24,9 @@ class FakeVitalForgeApi(
     var loginCallCount: Int = 0
         private set
 
+    var lastLoginPassword: String? = null
+        private set
+
     override suspend fun submitReading(reading: ReadingEntity, unit: WeightUnit): SubmitResult =
         error("not used by ConfigViewModel tests")
 
@@ -37,6 +40,7 @@ class FakeVitalForgeApi(
 
     override suspend fun login(username: String, password: String): LoginResult {
         loginCallCount++
+        lastLoginPassword = password
         return loginResult
     }
 

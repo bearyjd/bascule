@@ -47,7 +47,7 @@ class FakeConfigStore(
         _alwaysOnBridging.value = enabled
     }
 
-    override suspend fun savePairedDeviceAddress(address: String) {
+    override suspend fun savePairedDeviceAddress(address: String?) {
         _pairedDeviceAddress.value = address
     }
 }

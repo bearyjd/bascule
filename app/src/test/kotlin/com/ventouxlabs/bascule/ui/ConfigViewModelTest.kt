@@ -1,8 +1,15 @@
 package com.ventouxlabs.bascule.ui
 
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
+import com.ventouxlabs.bascule.ble.RegistrationPhase
+import com.ventouxlabs.bascule.ble.ScaleRegistrar
+import com.ventouxlabs.bascule.ble.ScaleRegistrationResult
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import com.ventouxlabs.bascule.data.BackupCredentialType
+import com.ventouxlabs.bascule.data.PortableSettings
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.SettingsBackupCodec
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ConnectionTestResult
 import com.ventouxlabs.bascule.network.LoginResult
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
@@ -38,6 +45,7 @@ class ConfigViewModelTest {
         deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
         dao: FakeReadingDao = FakeReadingDao(),
         vitalForgeApi: FakeVitalForgeApi = FakeVitalForgeApi(),
+        scaleRegistrar: ScaleRegistrar? = null,
     ) = ConfigViewModel(
         configStore,
         authTokenStore,
@@ -46,6 +54,7 @@ class ConfigViewModelTest {
         deliveryTrigger,
         dao,
         ioDispatcher = mainDispatcherRule.dispatcher,
+        scaleRegistrar = scaleRegistrar,
         apiFactory = { vitalForgeApi },
     )
 
@@ -73,7 +82,7 @@ class ConfigViewModelTest {
     }
 
     @Test
-    fun reRegisterClearsTheStoredCredentialForThatDevice() = runTest {
+    fun unavailableReRegistrationPreservesTheStoredCredential() = runTest {
         val consentStore = InMemoryConsentStore().apply {
             save("AA:BB:CC:DD:EE:FF", ScaleCredential(scaleIndex = 4, consentCode = 0x1234))
         }
@@ -82,8 +91,8 @@ class ConfigViewModelTest {
 
         vm.reRegister("AA:BB:CC:DD:EE:FF")
 
-        assertNull(
-            "clearing the credential is what makes the next handshake register fresh",
+        assertNotNull(
+            "do not burn the working mapping until a scale has actually been found",
             consentStore.credentialFor("AA:BB:CC:DD:EE:FF"),
         )
     }
@@ -96,7 +105,7 @@ class ConfigViewModelTest {
      * offering the re-register button after it had already fired.
      */
     @Test
-    fun reRegisterUpdatesUiStateRegisteredUserIndexToNull() = runTest {
+    fun unavailableReRegistrationKeepsTheRegisteredUserIndex() = runTest {
         val consentStore = InMemoryConsentStore().apply {
             save("AA:BB:CC:DD:EE:FF", ScaleCredential(scaleIndex = 4, consentCode = 0x1234))
         }
@@ -108,10 +117,8 @@ class ConfigViewModelTest {
         vm.reRegister("AA:BB:CC:DD:EE:FF")
         advanceUntilIdle()
 
-        assertNull(
-            "the screen must stop claiming registration and stop offering the button after firing it",
-            vm.uiState.value.registeredUserIndex,
-        )
+        assertEquals(4, vm.uiState.value.registeredUserIndex)
+        assertTrue(vm.uiState.value.scaleRegistration is ScaleRegistrationUiState.Failure)
     }
 
     @Test
@@ -311,8 +318,8 @@ class ConfigViewModelTest {
         val result = vm.uiState.value.connectionTest
         assertTrue(result is ConnectionTestUiState.Failure)
         assertEquals(
-            "the user needs to know it was the token, not the network, that failed",
-            "Server rejected the token (HTTP 401)",
+            "the user needs to know it was the credential, not the network, that failed",
+            "Server rejected the credential (HTTP 401)",
             (result as ConnectionTestUiState.Failure).message,
         )
     }
@@ -369,6 +376,47 @@ class ConfigViewModelTest {
             "mutual exclusion: a successful login must clear any previously stored token",
             null,
             authTokenStore.token(),
+        )
+    }
+
+    @Test
+    fun loginPreservesPasswordWhitespace() = runTest {
+        val vitalForgeApi = FakeVitalForgeApi(loginResult = LoginResult.Success("session-cookie-value"))
+        val vm = viewModel(vitalForgeApi = vitalForgeApi)
+        advanceUntilIdle()
+
+        vm.login("  alice  ", "  meaningful password  ")
+        advanceUntilIdle()
+
+        assertEquals(
+            "passwords are opaque credentials and must be submitted exactly as entered",
+            "  meaningful password  ",
+            vitalForgeApi.lastLoginPassword,
+        )
+    }
+
+    @Test
+    fun successfulLoginUnblocksAuthRowsAndTriggersImmediateDrain() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "blocked", status = ReadingStatus.BLOCKED_AUTH, attemptCount = 3))
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vitalForgeApi = FakeVitalForgeApi(loginResult = LoginResult.Success("session-cookie-value"))
+        val vm = viewModel(
+            dao = dao,
+            deliveryTrigger = deliveryTrigger,
+            vitalForgeApi = vitalForgeApi,
+        )
+        advanceUntilIdle()
+
+        vm.login("alice", "hunter2")
+        advanceUntilIdle()
+
+        assertEquals(ReadingStatus.PENDING, dao.rows.value.single().status)
+        assertEquals(0, dao.rows.value.single().attemptCount)
+        assertEquals(
+            "a newly usable session must retry rows rejected under the old credential immediately",
+            1,
+            deliveryTrigger.triggerCount,
         )
     }
 
@@ -458,5 +506,106 @@ class ConfigViewModelTest {
         assertEquals(null, sessionCookieStore.cookie())
         assertTrue(!vm.uiState.value.tokenIsSet)
         assertTrue(!vm.uiState.value.sessionIsSet)
+    }
+
+    @Test
+    fun scaleRegistrationSurfacesSuccess() = runTest {
+        val registrar = object : ScaleRegistrar {
+            override suspend fun register(
+                forceNew: Boolean,
+                onPhase: (RegistrationPhase) -> Unit,
+            ): ScaleRegistrationResult {
+                onPhase(RegistrationPhase.SCANNING)
+                onPhase(RegistrationPhase.CONNECTING)
+                return ScaleRegistrationResult.Success("E7:DB:51:F1:36:91", 2)
+            }
+        }
+        val vm = viewModel(scaleRegistrar = registrar)
+        advanceUntilIdle()
+
+        vm.startScaleRegistration()
+        advanceUntilIdle()
+
+        assertEquals(
+            ScaleRegistrationUiState.Success("E7:DB:51:F1:36:91", 2),
+            vm.uiState.value.scaleRegistration,
+        )
+    }
+
+    @Test
+    fun linkingExistingScaleRestoresMappingWithoutRunningRegistrar() = runTest {
+        val configStore = FakeConfigStore()
+        val consentStore = InMemoryConsentStore()
+        val vm = viewModel(configStore = configStore, consentStore = consentStore)
+        advanceUntilIdle()
+
+        vm.linkExistingScale("e7:db:51:f1:36:91", "2", "1234")
+        advanceUntilIdle()
+
+        assertEquals("E7:DB:51:F1:36:91", configStore.pairedDeviceAddress.value)
+        assertEquals(ScaleCredential(2, 1234), consentStore.credentialFor("E7:DB:51:F1:36:91"))
+        assertEquals(2, vm.uiState.value.registeredUserIndex)
+    }
+
+    @Test
+    fun settingsExportIncludesCredentialsAndScaleMappingOnlyInsideEncryption() = runTest {
+        val configStore = FakeConfigStore(
+            initialBaseUrl = "https://weight.grepon.cc",
+            initialPairedDeviceAddress = "E7:DB:51:F1:36:91",
+        )
+        val consentStore = InMemoryConsentStore().apply {
+            save("E7:DB:51:F1:36:91", ScaleCredential(2, 1234))
+        }
+        val vm = viewModel(
+            configStore = configStore,
+            consentStore = consentStore,
+            sessionCookieStore = FakeSessionCookieStore("session-cookie"),
+        )
+        advanceUntilIdle()
+
+        val bytes = vm.exportSettings("correct horse battery staple").getOrThrow()
+        val restored = SettingsBackupCodec.decrypt(bytes, "correct horse battery staple")
+
+        assertEquals("https://weight.grepon.cc", restored.baseUrl)
+        assertEquals(BackupCredentialType.SESSION, restored.credentialType)
+        assertEquals("session-cookie", restored.credentialValue)
+        assertEquals(ScaleCredential(2, 1234), restored.scaleCredential)
+    }
+
+    @Test
+    fun settingsImportRestoresConfigurationCredentialsAndScaleMapping() = runTest {
+        val configStore = FakeConfigStore()
+        val consentStore = InMemoryConsentStore()
+        val tokenStore = FakeAuthTokenStore()
+        val sessionStore = FakeSessionCookieStore("old-session")
+        val vm = viewModel(
+            configStore = configStore,
+            consentStore = consentStore,
+            authTokenStore = tokenStore,
+            sessionCookieStore = sessionStore,
+        )
+        val bytes = SettingsBackupCodec.encrypt(
+            PortableSettings(
+                baseUrl = "https://weight.grepon.cc",
+                displayUnit = WeightUnit.POUNDS,
+                contractVersion = com.ventouxlabs.bascule.network.ContractVersion.V1_WEIGHT_ONLY,
+                alwaysOnBridging = true,
+                credentialType = BackupCredentialType.TOKEN,
+                credentialValue = "restored-token",
+                pairedDeviceAddress = "E7:DB:51:F1:36:91",
+                scaleCredential = ScaleCredential(2, 1234),
+            ),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals("https://weight.grepon.cc", configStore.baseUrl.value)
+        assertEquals(WeightUnit.POUNDS, configStore.displayUnit.value)
+        assertEquals("restored-token", tokenStore.token())
+        assertEquals(null, sessionStore.cookie())
+        assertEquals(ScaleCredential(2, 1234), consentStore.credentialFor("E7:DB:51:F1:36:91"))
+        assertEquals(2, vm.uiState.value.registeredUserIndex)
     }
 }

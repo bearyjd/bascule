@@ -332,6 +332,7 @@ class GattSession(
      */
     private suspend fun handshake(events: Channel<TransportEvent>, discovered: DiscoveredServices): SessionOutcome {
         var directive = decoder.beginHandshake(discovered, handshakeContext())
+        prepareHandshakeResponseChannel(events, directive)?.let { return it }
         while (true) {
             when (val current = directive) {
                 is HandshakeDirective.Send -> {
@@ -363,6 +364,47 @@ class GattSession(
             }
         }
     }
+
+    private suspend fun prepareHandshakeResponseChannel(
+        events: Channel<TransportEvent>,
+        directive: HandshakeDirective,
+    ): SessionOutcome? {
+        // User Control Point responses are indications. Enabling its CCCD must
+        // complete before the first Register/Consent write or real hardware
+        // has no channel on which to return the acknowledgement (the JVM fake
+        // can emit without a subscription, which previously hid this gap).
+        val responseChar = (directive as? HandshakeDirective.Send)?.op?.let { it as? GattOp.Write }?.char
+        if (responseChar == null) return null
+        transport.enableIndications(responseChar)
+        return when (awaitSubscription(events, responseChar)) {
+            SubscriptionOutcome.Enabled -> null
+            SubscriptionOutcome.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+            SubscriptionOutcome.Failed -> SessionOutcome.HandshakeFailed(
+                "could not enable User Control Point indications",
+            )
+        }
+    }
+
+    private suspend fun awaitSubscription(events: Channel<TransportEvent>, char: UUID): SubscriptionOutcome =
+        withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+            while (true) {
+                when (val event = events.receive()) {
+                    is TransportEvent.AdapterOff -> return@withTimeoutOrNull SubscriptionOutcome.AdapterOff
+                    is TransportEvent.SubscriptionEnabled -> if (event.char == char) {
+                        return@withTimeoutOrNull if (event.status == 0) {
+                            SubscriptionOutcome.Enabled
+                        } else {
+                            SubscriptionOutcome.Failed
+                        }
+                    }
+                    else -> continue
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            SubscriptionOutcome.Failed
+        } ?: SubscriptionOutcome.Failed
+
+    private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff }
 
     /**
      * The wire protocol carries no correlation ID: a Register/Consent response

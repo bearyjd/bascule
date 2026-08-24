@@ -66,4 +66,15 @@ class PermissionRequester(
      * which need no such justification.
      */
     fun needsLocationRationale(): Boolean = sdkInt < Build.VERSION_CODES.S
+
+    /**
+     * True only on API 30 (R) — the one version where the platform still
+     * accepts a standalone `ACCESS_BACKGROUND_LOCATION` request into
+     * `requestPermissions()` but the resulting dialog can no longer grant
+     * "Allow all the time"; only the app's own system Settings screen can.
+     * API 29 (Q) still grants it through the normal second-dialog flow, and
+     * API 31+ never requests background location at all (`BLUETOOTH_SCAN`/
+     * `BLUETOOTH_CONNECT` carry no such restriction).
+     */
+    fun backgroundLocationRequiresSettings(): Boolean = sdkInt == Build.VERSION_CODES.R
 }

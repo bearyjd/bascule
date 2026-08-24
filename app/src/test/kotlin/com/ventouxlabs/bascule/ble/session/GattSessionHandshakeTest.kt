@@ -205,6 +205,18 @@ class GattSessionHandshakeTest {
         )
     }
 
+    @Test
+    fun userControlPointIndicationsAreEnabledBeforeTheFirstHandshakeWrite() = runTest {
+        val transport = happyPathScale()
+
+        session(transport).run()
+
+        val subscription = transport.callOrder.indexOf("subscribe:${SigWeightProfile.USER_CONTROL_POINT}")
+        val firstWrite = transport.callOrder.indexOf("write:${SigWeightProfile.USER_CONTROL_POINT}")
+        assertTrue("the scale cannot acknowledge a write before its indication CCCD is enabled", subscription >= 0)
+        assertTrue("UCP subscription must complete before Register/Consent", subscription < firstWrite)
+    }
+
     /** The E6 gate that exists in prose only until this test enforces it (O-11 item 1). */
     @Test
     fun doesNotSubscribeBeforeConsentIsGranted() = runTest {
@@ -215,8 +227,8 @@ class GattSessionHandshakeTest {
         session(transport).run()
 
         assertTrue(
-            "no measurement characteristic may be subscribed without a granted consent",
-            transport.subscribedCharacteristics.isEmpty(),
+            "the UCP indication is required to receive consent, but measurement characteristics stay gated",
+            transport.subscribedCharacteristics.keys == setOf(SigWeightProfile.USER_CONTROL_POINT),
         )
     }
 

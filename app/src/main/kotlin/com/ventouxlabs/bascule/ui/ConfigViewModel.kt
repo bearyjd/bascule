@@ -5,9 +5,16 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.ble.RegistrationPhase
+import com.ventouxlabs.bascule.ble.ScaleRegistrar
+import com.ventouxlabs.bascule.ble.ScaleRegistrationResult
 import com.ventouxlabs.bascule.ble.session.ConsentStore
+import com.ventouxlabs.bascule.ble.session.ScaleCredential
+import com.ventouxlabs.bascule.data.BackupCredentialType
 import com.ventouxlabs.bascule.data.ConfigStore
+import com.ventouxlabs.bascule.data.PortableSettings
 import com.ventouxlabs.bascule.data.ReadingDao
+import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.network.AuthTokenStore
@@ -28,8 +35,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.URI
 import java.net.URISyntaxException
 
@@ -46,6 +55,7 @@ data class ConfigUiState(
     val registeredUserIndex: Int? = null,
     val baseUrlError: String? = null,
     val connectionTest: ConnectionTestUiState = ConnectionTestUiState.Idle,
+    val scaleRegistration: ScaleRegistrationUiState = ScaleRegistrationUiState.Idle,
 )
 
 sealed interface ConnectionTestUiState {
@@ -53,6 +63,14 @@ sealed interface ConnectionTestUiState {
     data object Testing : ConnectionTestUiState
     data object Success : ConnectionTestUiState
     data class Failure(val message: String) : ConnectionTestUiState
+}
+
+sealed interface ScaleRegistrationUiState {
+    data object Idle : ScaleRegistrationUiState
+    data object Scanning : ScaleRegistrationUiState
+    data object Connecting : ScaleRegistrationUiState
+    data class Success(val address: String, val scaleIndex: Int) : ScaleRegistrationUiState
+    data class Failure(val message: String) : ScaleRegistrationUiState
 }
 
 private data class StoredConfig(
@@ -68,6 +86,7 @@ private data class TransientUiState(
     val connectionTest: ConnectionTestUiState,
     val loginError: String?,
     val isLoggingIn: Boolean,
+    val scaleRegistration: ScaleRegistrationUiState,
 )
 
 /**
@@ -91,6 +110,7 @@ class ConfigViewModel(
     private val dao: ReadingDao,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val scaleRegistrar: ScaleRegistrar? = null,
     /**
      * Contract/shaper are irrelevant to [VitalForgeApi.testConnection]/[VitalForgeApi.login]
      * (neither calls `shape()`), so they are hardcoded here rather than threaded through
@@ -115,9 +135,11 @@ class ConfigViewModel(
     /** Bumped by [reRegister] — [ConsentStore] has no Flow of its own, so this tells [uiState] to re-read it. */
     private val _consentVersion = MutableStateFlow(0)
     private val _connectionTest = MutableStateFlow<ConnectionTestUiState>(ConnectionTestUiState.Idle)
+    private var connectionTestGeneration = 0
     private val _loginError = MutableStateFlow<String?>(null)
     private val _isLoggingIn = MutableStateFlow(false)
     private val _loginSucceeded = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val _scaleRegistration = MutableStateFlow<ScaleRegistrationUiState>(ScaleRegistrationUiState.Idle)
 
     /** One-shot — a sticky boolean would re-fire on every tab-switch return via saveState/restoreState. */
     val loginSucceeded: SharedFlow<Unit> = _loginSucceeded.asSharedFlow()
@@ -138,8 +160,9 @@ class ConfigViewModel(
         _connectionTest,
         _loginError,
         _isLoggingIn,
-    ) { urlError, connectionTest, loginError, isLoggingIn ->
-        TransientUiState(urlError, connectionTest, loginError, isLoggingIn)
+        _scaleRegistration,
+    ) { urlError, connectionTest, loginError, isLoggingIn, scaleRegistration ->
+        TransientUiState(urlError, connectionTest, loginError, isLoggingIn, scaleRegistration)
     }
 
     val uiState: StateFlow<ConfigUiState> = combine(
@@ -164,18 +187,24 @@ class ConfigViewModel(
             registeredUserIndex = stored.pairedDeviceAddress?.let { consentStore.credentialFor(it)?.scaleIndex },
             baseUrlError = transient.baseUrlError,
             connectionTest = transient.connectionTest,
+            scaleRegistration = transient.scaleRegistration,
         )
     }.flowOn(ioDispatcher).stateIn(viewModelScope, SharingStarted.Eagerly, ConfigUiState())
 
     /** Clears a stale validation error as soon as the user starts editing again, rather than leaving it until Save. */
     fun onBaseUrlTextChanged() {
         if (_baseUrlError.value != null) _baseUrlError.value = null
+        connectionTestGeneration++
+        _connectionTest.value = ConnectionTestUiState.Idle
     }
 
     fun saveBaseUrl(url: String) {
         val error = validateBaseUrl(url)
         _baseUrlError.value = error
         if (error == null) {
+            // A prior "Test connection" result no longer describes the active config.
+            connectionTestGeneration++
+            _connectionTest.value = ConnectionTestUiState.Idle
             viewModelScope.launch { configStore.saveBaseUrl(url) }
         }
     }
@@ -211,8 +240,10 @@ class ConfigViewModel(
         // Mutual exclusion: a token and a session cookie are never both active.
         sessionCookieStore.clear()
         _credentialVersion.value++
-        viewModelScope.launch { dao.unblockAuthRows(nowMillis()) }
-        deliveryTrigger.triggerImmediateDrain()
+        // A prior "Test connection" result no longer describes the active credential.
+        connectionTestGeneration++
+        _connectionTest.value = ConnectionTestUiState.Idle
+        viewModelScope.launch { unblockAuthRowsAndDrain() }
     }
 
     /** Clears whichever credential is active — mutual exclusion means at most one ever is. */
@@ -220,6 +251,8 @@ class ConfigViewModel(
         authTokenStore.clear()
         sessionCookieStore.clear()
         _credentialVersion.value++
+        connectionTestGeneration++
+        _connectionTest.value = ConnectionTestUiState.Idle
     }
 
     /**
@@ -232,20 +265,27 @@ class ConfigViewModel(
     fun login(username: String, password: String) {
         if (_isLoggingIn.value) return
         val trimmedUser = username.trim()
-        val trimmedPass = password.trim()
-        if (trimmedUser.isEmpty() || trimmedPass.isEmpty()) {
+        // The password is opaque and VitalForge verifies the exact submitted
+        // string — trimming it would make any password with meaningful
+        // leading/trailing whitespace impossible to authenticate.
+        if (trimmedUser.isEmpty() || password.isEmpty()) {
             _loginError.value = "Enter a username and password"
             return
         }
         _isLoggingIn.value = true
         _loginError.value = null
         viewModelScope.launch {
-            when (val result = apiFactory(uiState.value.baseUrl).login(trimmedUser, trimmedPass)) {
+            when (val result = apiFactory(uiState.value.baseUrl).login(trimmedUser, password)) {
                 is LoginResult.Success -> {
                     sessionCookieStore.save(result.sessionCookie)
                     // Mutual exclusion: a token and a session cookie are never both active.
                     authTokenStore.clear()
                     _credentialVersion.value++
+                    connectionTestGeneration++
+                    _connectionTest.value = ConnectionTestUiState.Idle
+                    // §8.6, same as saveToken: a fresh credential must unblock any
+                    // rows a previous credential's rejection had blocked.
+                    unblockAuthRowsAndDrain()
                     _loginSucceeded.emit(Unit)
                 }
                 LoginResult.InvalidCredentials -> _loginError.value = "Invalid username or password"
@@ -256,36 +296,173 @@ class ConfigViewModel(
     }
 
     /**
+     * §8.6: a new credential flips every `BLOCKED_AUTH` row back to `PENDING`
+     * *and* triggers an immediate drain, rather than waiting for the delivery
+     * worker's own periodic schedule — the flip alone would leave the rows
+     * stuck until that schedule next runs, and the drain alone would find
+     * nothing, since the drain query only ever selects `PENDING` rows.
+     * Sequenced within one coroutine — enqueuing the drain before the row
+     * update lands would let the worker run first, see no `PENDING` rows,
+     * and exit before there is anything to send.
+     *
+     * `DeliveryWorker.doWork` is itself still a WP-21 stub — this enqueue is
+     * correct and will run for real the moment that lands, rather than
+     * needing its own follow-up wiring then.
+     */
+    private suspend fun unblockAuthRowsAndDrain() {
+        dao.unblockAuthRows(nowMillis())
+        deliveryTrigger.triggerImmediateDrain()
+    }
+
+    /**
      * Read-only — never submits a reading. Guards against a second tap
      * re-firing the request while the first is still in flight, mirroring
      * `ManualEntryViewModel.save()`'s `isSaving` guard.
      */
     fun testConnection() {
         if (_connectionTest.value == ConnectionTestUiState.Testing) return
+        val generation = ++connectionTestGeneration
         _connectionTest.value = ConnectionTestUiState.Testing
         viewModelScope.launch {
-            _connectionTest.value = when (val result = apiFactory(uiState.value.baseUrl).testConnection()) {
+            val resultState = when (val result = apiFactory(uiState.value.baseUrl).testConnection()) {
                 ConnectionTestResult.Authorized -> ConnectionTestUiState.Success
                 is ConnectionTestResult.Unauthorized ->
-                    ConnectionTestUiState.Failure("Server rejected the token (HTTP ${result.httpCode})")
+                    ConnectionTestUiState.Failure("Server rejected the credential (HTTP ${result.httpCode})")
                 is ConnectionTestResult.Unreachable -> ConnectionTestUiState.Failure(result.reason)
             }
+            if (connectionTestGeneration == generation) _connectionTest.value = resultState
         }
     }
 
     /**
      * O-08.5: re-registering may consume one of the scale's 8 profile slots
      * (§8.8, HW-26) — the caller must have already shown that warning and
-     * gotten explicit confirmation before this runs. Clearing the stored
-     * credential is what makes the next session's handshake register fresh
-     * (`BeurerDecoder.beginHandshake`'s no-stored-credential branch).
+     * gotten explicit confirmation before this runs. The registrar preserves
+     * the working credential until the scale is actually found, then clears
+     * it immediately before the new handshake so a failed scan loses nothing.
      */
-    fun reRegister(deviceAddress: String) {
-        consentStore.clear(deviceAddress)
-        _consentVersion.value++
+    fun reRegister(@Suppress("UNUSED_PARAMETER") deviceAddress: String) {
+        startScaleRegistration(forceNew = true)
+    }
+
+    fun startScaleRegistration(forceNew: Boolean = false) {
+        if (_scaleRegistration.value == ScaleRegistrationUiState.Scanning ||
+            _scaleRegistration.value == ScaleRegistrationUiState.Connecting
+        ) {
+            return
+        }
+        val registrar = scaleRegistrar
+        if (registrar == null) {
+            _scaleRegistration.value = ScaleRegistrationUiState.Failure("Scale registration is unavailable")
+            return
+        }
+        viewModelScope.launch {
+            val result = registrar.register(forceNew) { phase ->
+                _scaleRegistration.value = when (phase) {
+                    RegistrationPhase.SCANNING -> ScaleRegistrationUiState.Scanning
+                    RegistrationPhase.CONNECTING -> ScaleRegistrationUiState.Connecting
+                }
+            }
+            _scaleRegistration.value = when (result) {
+                is ScaleRegistrationResult.Success -> {
+                    _consentVersion.value++
+                    ScaleRegistrationUiState.Success(result.address, result.scaleIndex)
+                }
+                is ScaleRegistrationResult.Failure -> ScaleRegistrationUiState.Failure(result.message)
+            }
+        }
+    }
+
+    /** Restores a known BF720 mapping without consuming another one of its eight slots. */
+    fun linkExistingScale(address: String, scaleIndex: String, consentCode: String) {
+        val normalizedAddress = address.trim().uppercase()
+        val index = scaleIndex.toIntOrNull()
+        val code = consentCode.toIntOrNull()
+        when {
+            !BLUETOOTH_ADDRESS.matches(normalizedAddress) ->
+                _scaleRegistration.value = ScaleRegistrationUiState.Failure("Enter a valid Bluetooth address")
+            index !in MIN_SCALE_INDEX..MAX_SCALE_INDEX ->
+                _scaleRegistration.value = ScaleRegistrationUiState.Failure(
+                    "User slot must be between $MIN_SCALE_INDEX and $MAX_SCALE_INDEX",
+                )
+            code !in MIN_CONSENT_CODE..MAX_CONSENT_CODE ->
+                _scaleRegistration.value = ScaleRegistrationUiState.Failure(
+                    "Consent code must be between $MIN_CONSENT_CODE and $MAX_CONSENT_CODE",
+                )
+            else -> viewModelScope.launch {
+                consentStore.save(normalizedAddress, ScaleCredential(requireNotNull(index), requireNotNull(code)))
+                configStore.savePairedDeviceAddress(normalizedAddress)
+                _consentVersion.value++
+                _scaleRegistration.value = ScaleRegistrationUiState.Success(normalizedAddress, index)
+            }
+        }
+    }
+
+    suspend fun exportSettings(passphrase: String): Result<ByteArray> = runCatching {
+        withContext(ioDispatcher) {
+            val pairedAddress = configStore.pairedDeviceAddress.first()
+            val token = authTokenStore.token()
+            val session = sessionCookieStore.cookie()
+            val credentialType = when {
+                token != null -> BackupCredentialType.TOKEN
+                session != null -> BackupCredentialType.SESSION
+                else -> BackupCredentialType.NONE
+            }
+            SettingsBackupCodec.encrypt(
+                PortableSettings(
+                    baseUrl = configStore.baseUrl.first().orEmpty(),
+                    displayUnit = configStore.displayUnit.first(),
+                    contractVersion = configStore.contractVersion.first(),
+                    alwaysOnBridging = configStore.alwaysOnBridging.first(),
+                    credentialType = credentialType,
+                    credentialValue = token ?: session,
+                    pairedDeviceAddress = pairedAddress,
+                    scaleCredential = pairedAddress?.let(consentStore::credentialFor),
+                ),
+                passphrase,
+            )
+        }
+    }
+
+    suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<Unit> = runCatching {
+        withContext(ioDispatcher) {
+            val imported = SettingsBackupCodec.decrypt(bytes, passphrase)
+            require(imported.baseUrl.isBlank() || validateBaseUrl(imported.baseUrl) == null) {
+                "Backup contains an invalid server URL"
+            }
+            val previousAddress = configStore.pairedDeviceAddress.first()
+            configStore.saveBaseUrl(imported.baseUrl)
+            configStore.saveDisplayUnit(imported.displayUnit)
+            configStore.saveContractVersion(imported.contractVersion)
+            configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
+            configStore.savePairedDeviceAddress(imported.pairedDeviceAddress)
+            if (previousAddress != null) consentStore.clear(previousAddress)
+            imported.pairedDeviceAddress?.let { address ->
+                imported.scaleCredential?.let { consentStore.save(address, it) }
+            }
+            authTokenStore.clear()
+            sessionCookieStore.clear()
+            when (imported.credentialType) {
+                BackupCredentialType.NONE -> Unit
+                BackupCredentialType.TOKEN -> authTokenStore.save(requireNotNull(imported.credentialValue))
+                BackupCredentialType.SESSION -> sessionCookieStore.save(requireNotNull(imported.credentialValue))
+            }
+            _credentialVersion.value++
+            _consentVersion.value++
+            connectionTestGeneration++
+            _connectionTest.value = ConnectionTestUiState.Idle
+            _scaleRegistration.value = ScaleRegistrationUiState.Idle
+            if (imported.credentialType != BackupCredentialType.NONE) unblockAuthRowsAndDrain()
+        }
     }
 
     companion object {
+        private val BLUETOOTH_ADDRESS = Regex("(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
+        private const val MIN_SCALE_INDEX = 0
+        private const val MAX_SCALE_INDEX = 255
+        private const val MIN_CONSENT_CODE = 0
+        private const val MAX_CONSENT_CODE = 0xFFFF
+
         fun validateBaseUrl(url: String): String? {
             val uri = try {
                 URI(url)
@@ -309,6 +486,7 @@ class ConfigViewModel(
                     sessionCookieStore = app.sessionCookieStore,
                     deliveryTrigger = app.deliveryTrigger,
                     dao = app.database.readingDao(),
+                    scaleRegistrar = app.scaleRegistrar,
                 )
             }
         }

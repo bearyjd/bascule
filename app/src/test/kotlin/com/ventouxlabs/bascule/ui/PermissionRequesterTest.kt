@@ -106,4 +106,23 @@ class PermissionRequesterTest {
         assertTrue(PermissionRequester(sdkInt = Build.VERSION_CODES.R, isGranted = { false }).needsLocationRationale())
         assertFalse(PermissionRequester(sdkInt = Build.VERSION_CODES.S, isGranted = { false }).needsLocationRationale())
     }
+
+    @Test
+    fun backgroundLocationUsesSettingsOnApi30Only() {
+        assertFalse(
+            "API 29 still offers Allow all the time in the second runtime dialog",
+            PermissionRequester(sdkInt = Build.VERSION_CODES.Q, isGranted = { false })
+                .backgroundLocationRequiresSettings(),
+        )
+        assertTrue(
+            "API 30 removed Allow all the time from the runtime dialog",
+            PermissionRequester(sdkInt = Build.VERSION_CODES.R, isGranted = { false })
+                .backgroundLocationRequiresSettings(),
+        )
+        assertFalse(
+            "API 31+ uses the Bluetooth runtime permissions instead",
+            PermissionRequester(sdkInt = Build.VERSION_CODES.S, isGranted = { false })
+                .backgroundLocationRequiresSettings(),
+        )
+    }
 }
