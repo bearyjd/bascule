@@ -11,6 +11,7 @@ import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingSource
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.data.WeightUnit
+import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -35,6 +36,7 @@ data class ManualEntryUiState(
 class ManualEntryViewModel(
     private val dao: ReadingDao,
     configStore: ConfigStore,
+    private val deliveryTrigger: DeliveryTrigger? = null,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ManualEntryUiState())
@@ -118,6 +120,7 @@ class ManualEntryViewModel(
         _uiState.value = state.copy(isSaving = true)
         viewModelScope.launch {
             dao.insert(reading)
+            deliveryTrigger?.triggerImmediateDrain()
             _uiState.value = ManualEntryUiState(unit = state.unit)
             _savedEvents.emit(Unit)
         }
@@ -136,7 +139,7 @@ class ManualEntryViewModel(
         const val MAX_PLAUSIBLE_WEIGHT_KG = 300.0
 
         fun factory(app: BasculeApplication) = viewModelFactory {
-            initializer { ManualEntryViewModel(app.database.readingDao(), app.configStore) }
+            initializer { ManualEntryViewModel(app.database.readingDao(), app.configStore, app.deliveryTrigger) }
         }
     }
 }

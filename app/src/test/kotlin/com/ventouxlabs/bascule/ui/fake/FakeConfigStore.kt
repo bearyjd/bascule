@@ -28,6 +28,9 @@ class FakeConfigStore(
     private val _alwaysOnBridging = MutableStateFlow(initialAlwaysOnBridging)
     override val alwaysOnBridging: StateFlow<Boolean> = _alwaysOnBridging.asStateFlow()
 
+    private val _automaticCaptureEnabled = MutableStateFlow(false)
+    override val automaticCaptureEnabled: StateFlow<Boolean> = _automaticCaptureEnabled.asStateFlow()
+
     private val _pairedDeviceAddress = MutableStateFlow(initialPairedDeviceAddress)
     override val pairedDeviceAddress: StateFlow<String?> = _pairedDeviceAddress.asStateFlow()
 
@@ -45,6 +48,10 @@ class FakeConfigStore(
 
     override suspend fun saveAlwaysOnBridging(enabled: Boolean) {
         _alwaysOnBridging.value = enabled
+    }
+
+    override suspend fun saveAutomaticCaptureEnabled(enabled: Boolean) {
+        _automaticCaptureEnabled.value = enabled
     }
 
     override suspend fun savePairedDeviceAddress(address: String?) {

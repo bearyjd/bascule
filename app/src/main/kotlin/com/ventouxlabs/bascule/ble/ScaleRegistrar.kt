@@ -14,6 +14,8 @@ import com.ventouxlabs.bascule.ble.session.AndroidGattTransport
 import com.ventouxlabs.bascule.ble.session.ConsentStore
 import com.ventouxlabs.bascule.ble.session.GattSession
 import com.ventouxlabs.bascule.ble.session.SessionOutcome
+import com.ventouxlabs.bascule.ble.session.ScaleOperationCoordinator
+import com.ventouxlabs.bascule.ble.session.ScaleSessionPurpose
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import kotlin.coroutines.resume
@@ -38,6 +40,7 @@ class AndroidScaleRegistrar(
     private val consentStore: ConsentStore,
     private val configStore: ConfigStore,
     private val diagnostics: DiagnosticsCounters,
+    private val coordinator: ScaleOperationCoordinator = ScaleOperationCoordinator(),
 ) : ScaleRegistrar {
 
     private val appContext = context.applicationContext
@@ -72,27 +75,35 @@ class AndroidScaleRegistrar(
         forceNew: Boolean,
     ): ScaleRegistrationResult {
         val address = device.device.address
-        val previousCredential = consentStore.credentialFor(address)
-        if (forceNew) consentStore.clear(address)
+        var newlySavedCredential: com.ventouxlabs.bascule.ble.session.ScaleCredential? = null
+        val sessionConsentStore = if (!forceNew) consentStore else object : ConsentStore {
+            override fun credentialFor(deviceAddress: String) = null
+            override fun save(deviceAddress: String, credential: com.ventouxlabs.bascule.ble.session.ScaleCredential) {
+                newlySavedCredential = credential
+                consentStore.save(deviceAddress, credential)
+            }
+            override fun clear(deviceAddress: String) = Unit
+            override fun newConsentCode(): Int = consentStore.newConsentCode()
+        }
         val session = GattSession(
             transport = AndroidGattTransport(appContext, device.device, adapter),
             decoder = BeurerDecoder(),
-            consentStore = consentStore,
+            consentStore = sessionConsentStore,
             deviceAddress = address,
             diagnostics = diagnostics,
+            purpose = ScaleSessionPurpose.REGISTER_NEW,
+            stopAfterHandshake = true,
         )
         val outcome = try {
-            session.run()
+            coordinator.withScale(ScaleSessionPurpose.REGISTER_NEW) { session.run() }
         } catch (_: SecurityException) {
-            if (forceNew && previousCredential != null) consentStore.save(address, previousCredential)
             return ScaleRegistrationResult.Failure("Bluetooth permission was revoked during registration")
         }
-        val credential = consentStore.credentialFor(address)
+        val credential = newlySavedCredential ?: consentStore.credentialFor(address)
         if (credential != null) {
             configStore.savePairedDeviceAddress(address)
             return ScaleRegistrationResult.Success(address, credential.scaleIndex)
         }
-        if (forceNew && previousCredential != null) consentStore.save(address, previousCredential)
         return ScaleRegistrationResult.Failure(
             when (outcome) {
                 is SessionOutcome.HandshakeFailed -> outcome.detail

@@ -79,6 +79,7 @@ fun BasculeApp() {
                     ManualEntryScreen(onSaved = { navController.popBackStack() })
                 }
                 composable(BasculeDestination.Config.route) { ConfigScreen() }
+                composable(BasculeDestination.Scale.route) { ScaleScreen() }
             }
         }
     }

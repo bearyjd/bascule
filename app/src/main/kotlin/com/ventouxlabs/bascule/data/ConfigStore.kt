@@ -35,12 +35,14 @@ interface ConfigStore {
     val displayUnit: Flow<WeightUnit>
     val contractVersion: Flow<ContractVersion>
     val alwaysOnBridging: Flow<Boolean>
+    val automaticCaptureEnabled: Flow<Boolean>
     val pairedDeviceAddress: Flow<String?>
 
     suspend fun saveBaseUrl(url: String)
     suspend fun saveDisplayUnit(unit: WeightUnit)
     suspend fun saveContractVersion(version: ContractVersion)
     suspend fun saveAlwaysOnBridging(enabled: Boolean)
+    suspend fun saveAutomaticCaptureEnabled(enabled: Boolean)
     suspend fun savePairedDeviceAddress(address: String?)
 }
 
@@ -60,6 +62,7 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
     }
 
     override val alwaysOnBridging: Flow<Boolean> = store.data.map { it[ALWAYS_ON_BRIDGING] ?: false }
+    override val automaticCaptureEnabled: Flow<Boolean> = store.data.map { it[AUTOMATIC_CAPTURE] ?: false }
 
     override val pairedDeviceAddress: Flow<String?> = store.data.map { it[PAIRED_DEVICE_ADDRESS] }
 
@@ -79,6 +82,10 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
         store.edit { it[ALWAYS_ON_BRIDGING] = enabled }
     }
 
+    override suspend fun saveAutomaticCaptureEnabled(enabled: Boolean) {
+        store.edit { it[AUTOMATIC_CAPTURE] = enabled }
+    }
+
     override suspend fun savePairedDeviceAddress(address: String?) {
         store.edit { prefs ->
             if (address == null) prefs.remove(PAIRED_DEVICE_ADDRESS) else prefs[PAIRED_DEVICE_ADDRESS] = address
@@ -90,6 +97,7 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
         val DISPLAY_UNIT = stringPreferencesKey("display_unit")
         val CONTRACT_VERSION = stringPreferencesKey("contract_version")
         val ALWAYS_ON_BRIDGING = booleanPreferencesKey("always_on_bridging")
+        val AUTOMATIC_CAPTURE = booleanPreferencesKey("automatic_capture_enabled")
         val PAIRED_DEVICE_ADDRESS = stringPreferencesKey("paired_device_address")
     }
 }

@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.ventouxlabs.bascule.data
 
 import androidx.room.Dao
@@ -59,4 +61,13 @@ interface ReadingDao {
         """,
     )
     suspend fun unblockAuthRows(nowMillis: Long)
+
+    @Query("UPDATE readings SET status = 'BLOCKED_AUTH', lastError = 'authentication required', lastErrorClass = 'AUTH' WHERE status = 'PENDING'")
+    suspend fun blockAllPendingForAuth()
+
+    @Query("SELECT COUNT(*) FROM readings WHERE status = 'PENDING'")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("SELECT MAX(capturedAtMillis) FROM readings WHERE source = 'SCALE'")
+    fun observeLastScaleCapture(): Flow<Long?>
 }

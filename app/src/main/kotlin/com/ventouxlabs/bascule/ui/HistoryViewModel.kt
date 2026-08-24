@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.ventouxlabs.bascule.ui
 
 import androidx.lifecycle.ViewModel
@@ -10,6 +12,7 @@ import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
+import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -38,6 +41,7 @@ class HistoryViewModel(
     private val dao: ReadingDao,
     private val diagnostics: DiagnosticsCounters,
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val deliveryTrigger: DeliveryTrigger? = null,
 ) : ViewModel() {
 
     /**
@@ -90,6 +94,7 @@ class HistoryViewModel(
                     lastErrorClass = if (resetRetryEpoch) null else reading.lastErrorClass,
                 ),
             )
+            if (status == ReadingStatus.PENDING) deliveryTrigger?.triggerImmediateDrain()
         }
     }
 
@@ -107,7 +112,7 @@ class HistoryViewModel(
             .thenByDescending { it.capturedAtMillis }
 
         fun factory(app: BasculeApplication) = viewModelFactory {
-            initializer { HistoryViewModel(app.database.readingDao(), app.diagnosticsCounters) }
+            initializer { HistoryViewModel(app.database.readingDao(), app.diagnosticsCounters, deliveryTrigger = app.deliveryTrigger) }
         }
     }
 }

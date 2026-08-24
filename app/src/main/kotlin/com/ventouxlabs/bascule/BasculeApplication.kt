@@ -1,21 +1,35 @@
+@file:Suppress("MaxLineLength")
+
 package com.ventouxlabs.bascule
 
 import android.app.Application
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
+import com.ventouxlabs.bascule.ble.ScaleScanner
 import com.ventouxlabs.bascule.ble.session.ConsentStore
 import com.ventouxlabs.bascule.ble.session.EncryptedConsentStore
+import com.ventouxlabs.bascule.ble.session.ScaleOperationCoordinator
 import com.ventouxlabs.bascule.data.BasculeDatabase
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.DataStoreConfigStore
+import com.ventouxlabs.bascule.data.EncryptedScaleProfileStore
+import com.ventouxlabs.bascule.data.ReadingIngestor
+import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
-import com.ventouxlabs.bascule.delivery.WorkManagerDeliveryTrigger
+import com.ventouxlabs.bascule.delivery.DeliveryScheduler
+import com.ventouxlabs.bascule.delivery.WorkManagerDeliveryScheduler
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
 import com.ventouxlabs.bascule.network.SessionCookieStore
+import com.ventouxlabs.bascule.network.RuntimeApiFactory
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Composition root. No DI framework is in this project's dependency set
@@ -34,15 +48,29 @@ import com.ventouxlabs.bascule.network.SessionCookieStore
  * to this UI work.
  */
 class BasculeApplication : Application() {
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val database: BasculeDatabase by lazy { BasculeDatabase.getInstance(this) }
     val authTokenStore: AuthTokenStore by lazy { EncryptedAuthTokenStore(this) }
     val sessionCookieStore: SessionCookieStore by lazy { EncryptedSessionCookieStore(this) }
-    val consentStore: ConsentStore by lazy { EncryptedConsentStore(this) }
+    private val legacyConsentStore: ConsentStore by lazy { EncryptedConsentStore(this) }
+    val scaleProfileStore: ScaleProfileStore by lazy { EncryptedScaleProfileStore(this, legacyConsentStore) }
+    val consentStore: ConsentStore get() = scaleProfileStore
     val configStore: ConfigStore by lazy { DataStoreConfigStore(this) }
-    val deliveryTrigger: DeliveryTrigger by lazy { WorkManagerDeliveryTrigger(this) }
+    val deliveryScheduler: DeliveryScheduler by lazy { WorkManagerDeliveryScheduler(this) }
+    val deliveryTrigger: DeliveryTrigger get() = deliveryScheduler
+    val runtimeApiFactory: RuntimeApiFactory by lazy { RuntimeApiFactory(configStore, authTokenStore, sessionCookieStore) }
+    val scaleOperationCoordinator by lazy { ScaleOperationCoordinator() }
+    val readingIngestor by lazy {
+        ReadingIngestor(
+            database.readingDao(),
+            scaleProfileStore,
+            unitProvider = { configStore.displayUnit.first() },
+        )
+    }
+    val scaleScanner by lazy { ScaleScanner(this, configStore, scaleProfileStore) }
     val scaleRegistrar: ScaleRegistrar by lazy {
-        AndroidScaleRegistrar(this, consentStore, configStore, diagnosticsCounters)
+        AndroidScaleRegistrar(this, consentStore, configStore, diagnosticsCounters, scaleOperationCoordinator)
     }
 
     /**
@@ -52,4 +80,25 @@ class BasculeApplication : Application() {
      * and the UI observe the same counts, not independent copies.
      */
     val diagnosticsCounters: DiagnosticsCounters by lazy { InMemoryDiagnosticsCounters() }
+
+    override fun onCreate() {
+        super.onCreate()
+        deliveryScheduler.ensurePeriodicDrain()
+        applicationScope.launch {
+            // Lazy, non-destructive migration of the existing BF720 slot mapping.
+            configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::credentialFor)
+            scaleScanner.arm()
+            if (configStore.alwaysOnBridging.first()) {
+                runCatching {
+                    androidx.core.content.ContextCompat.startForegroundService(
+                        this@BasculeApplication,
+                        android.content.Intent(
+                            this@BasculeApplication,
+                            com.ventouxlabs.bascule.service.BridgeForegroundService::class.java,
+                        ),
+                    )
+                }
+            }
+        }
+    }
 }

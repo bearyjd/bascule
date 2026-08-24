@@ -74,4 +74,6 @@ data class ReadingEntity(
     val contractVersionAtDelivery: Int?,
     val remoteDuplicate: Boolean,
     val source: ReadingSource,
+    /** Stable local profile association. Null for manual and schema-v1 rows. */
+    val scaleProfileId: String? = null,
 )

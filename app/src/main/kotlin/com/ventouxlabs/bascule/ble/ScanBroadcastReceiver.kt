@@ -1,18 +1,43 @@
+@file:Suppress("MaxLineLength")
+
 package com.ventouxlabs.bascule.ble
 
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanResult
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkManager
+import com.ventouxlabs.bascule.ble.session.ScaleSessionWorker
 
-/**
- * Receives the scan PendingIntent and does one thing: enqueue the session
- * worker. It never connects — a BroadcastReceiver is dead ~10 s after
- * onReceive and a BF720 session runs tens of seconds (ADR-004).
- *
- * PHASE 2 SKELETON. Implemented in Phase 3 WP-08.
- */
 class ScanBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        TODO("WP-08: enqueue expedited ScaleSessionWorker under unique work 'scale-session'")
+        if (intent.action != ScaleScanner.ACTION_SCAN) return
+        val results: List<ScanResult> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableArrayListExtra(BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT, ScanResult::class.java).orEmpty()
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableArrayListExtra<ScanResult>(BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT).orEmpty()
+        }
+        val address = results.firstOrNull()?.device?.address ?: return
+        enqueueSession(context, address, System.currentTimeMillis())
+    }
+
+    companion object {
+        fun enqueueSession(context: Context, address: String, seenAtMillis: Long) {
+            val input = Data.Builder().putString(ScaleSessionWorker.KEY_ADDRESS, address)
+                .putLong(ScaleSessionWorker.KEY_SEEN_AT, seenAtMillis).build()
+            val request = OneTimeWorkRequestBuilder<ScaleSessionWorker>().setInputData(input)
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST).build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                ScaleSessionWorker.UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request,
+            )
+        }
     }
 }

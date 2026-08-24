@@ -102,6 +102,7 @@ interface ScaleDecoder {
 data class HandshakeContext(
     val storedCredential: ScaleCredential?,
     val freshConsentCode: Int,
+    val permitsRegistration: Boolean = true,
 )
 
 sealed interface HandshakeDirective {

@@ -1,3 +1,5 @@
+@file:Suppress("ReturnCount")
+
 package com.ventouxlabs.bascule.ble.decoders
 
 import com.ventouxlabs.bascule.ble.session.DecodeEvent
@@ -88,6 +90,9 @@ class BeurerDecoder(
 
         val stored = context.storedCredential
         return if (stored == null) {
+            if (!context.permitsRegistration) {
+                return HandshakeDirective.Abort("no existing scale profile is available")
+            }
             handshake = HandshakeState.AwaitingRegistration(context.freshConsentCode)
             HandshakeDirective.Send(registerWrite(context.freshConsentCode), ACK_TIMEOUT)
         } else {
@@ -141,6 +146,9 @@ class BeurerDecoder(
         // A stored credential the scale no longer honours — its user slot was
         // deleted or reassigned. Registering again is the only recovery, and it
         // is the branch a fixed initSequence could not express (ADR-007).
+        if (context?.permitsRegistration != true) {
+            return HandshakeDirective.Abort("stored scale consent was rejected")
+        }
         val freshCode = context?.freshConsentCode
             ?: return HandshakeDirective.Abort("no consent code available to re-register")
         // Up to HANDSHAKE_ACK_MAX_RETRIES consent writes for the *stale*

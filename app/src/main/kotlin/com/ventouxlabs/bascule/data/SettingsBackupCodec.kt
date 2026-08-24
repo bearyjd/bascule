@@ -12,6 +12,8 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
@@ -30,6 +32,8 @@ data class PortableSettings(
     val credentialValue: String?,
     val pairedDeviceAddress: String?,
     val scaleCredential: ScaleCredential?,
+    val profiles: List<ScaleProfile> = emptyList(),
+    val automaticCaptureEnabled: Boolean = false,
 )
 
 /** Passphrase-encrypted, versioned settings file. No secret is ever emitted as plaintext. */
@@ -83,11 +87,23 @@ object SettingsBackupCodec {
         put("paired_device_address", settings.pairedDeviceAddress?.let(::JsonPrimitive) ?: JsonNull)
         put("scale_index", settings.scaleCredential?.scaleIndex?.let(::JsonPrimitive) ?: JsonNull)
         put("consent_code", settings.scaleCredential?.consentCode?.let(::JsonPrimitive) ?: JsonNull)
+        put("automatic_capture_enabled", JsonPrimitive(settings.automaticCaptureEnabled))
+        put("profiles", JsonArray(settings.profiles.map { profile ->
+            buildJsonObject {
+                put("id", JsonPrimitive(profile.id)); put("address", JsonPrimitive(profile.deviceAddress))
+                put("index", JsonPrimitive(profile.scaleIndex)); put("code", JsonPrimitive(profile.consentCode))
+                put("label", JsonPrimitive(profile.label)); put("registered", JsonPrimitive(profile.registeredAtMillis))
+                put("active", JsonPrimitive(profile.active))
+                profile.lastVerifiedAtMillis?.let { put("verified", JsonPrimitive(it)) }
+                put("incomplete", JsonPrimitive(profile.initializationIncomplete))
+            }
+        }))
     }.toString()
 
     private fun decode(text: String): PortableSettings {
         val obj = Json.parseToJsonElement(text).jsonObject
-        require(obj.getValue("version").jsonPrimitive.int == FORMAT_VERSION) { "Unsupported backup version" }
+        val version = obj.getValue("version").jsonPrimitive.int
+        require(version in 1..FORMAT_VERSION) { "Unsupported backup version" }
         val address = obj["paired_device_address"]?.jsonPrimitive?.contentOrNull
         val scaleIndex = obj["scale_index"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
         val consentCode = obj["consent_code"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
@@ -99,6 +115,22 @@ object SettingsBackupCodec {
         require((scaleIndex == null) == (consentCode == null)) {
             "Backup scale mapping is incomplete"
         }
+        val profiles = if (version >= 2) {
+            (obj["profiles"] as? JsonArray).orEmpty().map { element ->
+                val profile = element as JsonObject
+                ScaleProfile(
+                    id = profile.getValue("id").jsonPrimitive.content,
+                    deviceAddress = profile.getValue("address").jsonPrimitive.content,
+                    scaleIndex = profile.getValue("index").jsonPrimitive.int,
+                    consentCode = profile.getValue("code").jsonPrimitive.int,
+                    label = profile.getValue("label").jsonPrimitive.content,
+                    registeredAtMillis = profile.getValue("registered").jsonPrimitive.content.toLong(),
+                    active = profile.getValue("active").jsonPrimitive.boolean,
+                    lastVerifiedAtMillis = profile["verified"]?.jsonPrimitive?.content?.toLongOrNull(),
+                    initializationIncomplete = profile["incomplete"]?.jsonPrimitive?.boolean ?: false,
+                )
+            }
+        } else emptyList()
         return PortableSettings(
             baseUrl = obj.getValue("base_url").jsonPrimitive.content,
             displayUnit = WeightUnit.valueOf(obj.getValue("display_unit").jsonPrimitive.content),
@@ -115,13 +147,15 @@ object SettingsBackupCodec {
             } else {
                 null
             },
+            profiles = profiles,
+            automaticCaptureEnabled = obj["automatic_capture_enabled"]?.jsonPrimitive?.boolean ?: false,
         )
     }
 
     private val JsonPrimitive.contentOrNull: String?
         get() = if (this is JsonNull) null else content
 
-    private const val FORMAT_VERSION = 1
+    private const val FORMAT_VERSION = 2
     const val MIN_PASSPHRASE_LENGTH = 8
     const val MAX_BACKUP_BYTES = 1024 * 1024
     private const val MIN_SCALE_INDEX = 0

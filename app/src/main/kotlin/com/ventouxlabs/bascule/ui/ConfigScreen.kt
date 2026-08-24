@@ -111,25 +111,9 @@ fun ConfigScreen(
             )
         }
         item {
-            RegisteredScaleSection(
-                pairedDeviceAddress = state.pairedDeviceAddress,
-                registeredUserIndex = state.registeredUserIndex,
-                registration = state.scaleRegistration,
-                onRegister = viewModel::startScaleRegistration,
-                onLinkExisting = viewModel::linkExistingScale,
-                onReRegister = viewModel::reRegister,
-            )
-        }
-        item {
             SettingsTransferSection(
                 onExport = viewModel::exportSettings,
                 onImport = viewModel::importSettings,
-            )
-        }
-        item {
-            AlwaysOnSection(
-                enabled = state.alwaysOnBridging,
-                onToggle = viewModel::saveAlwaysOnBridging,
             )
         }
     }
@@ -507,7 +491,7 @@ private fun LoginEditForm(
 
 @Composable
 @Suppress("LongMethod", "CyclomaticComplexMethod") // UI states mirror the registration state machine directly.
-private fun RegisteredScaleSection(
+internal fun RegisteredScaleSection(
     pairedDeviceAddress: String?,
     registeredUserIndex: Int?,
     registration: ScaleRegistrationUiState,
@@ -800,27 +784,4 @@ private fun PassphraseDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
-}
-
-@Composable
-private fun AlwaysOnSection(enabled: Boolean, onToggle: (Boolean) -> Unit) {
-    SectionCard(title = "Always-on bridging") {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.padding(end = 16.dp)) {
-                Text(
-                    "Keep scanning in the foreground",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "Off by default — the background wake path is normally enough on its own.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(checked = enabled, onCheckedChange = onToggle)
-        }
-    }
 }

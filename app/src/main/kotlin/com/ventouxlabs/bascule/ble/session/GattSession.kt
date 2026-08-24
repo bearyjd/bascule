@@ -1,3 +1,5 @@
+@file:Suppress("CyclomaticComplexMethod", "LongMethod", "TooManyFunctions", "ReturnCount")
+
 package com.ventouxlabs.bascule.ble.session
 
 import com.ventouxlabs.bascule.ble.decoders.HandshakeContext
@@ -40,6 +42,8 @@ class GattSession(
     private val consentStore: ConsentStore,
     private val deviceAddress: String,
     private val diagnostics: DiagnosticsCounters,
+    private val purpose: ScaleSessionPurpose = ScaleSessionPurpose.REGISTER_NEW,
+    private val stopAfterHandshake: Boolean = false,
     /** Injected so the Current Time write is deterministic in a JVM test. */
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -52,6 +56,7 @@ class GattSession(
     fun handshakeContext(): HandshakeContext = HandshakeContext(
         storedCredential = consentStore.credentialFor(deviceAddress),
         freshConsentCode = consentStore.newConsentCode(),
+        permitsRegistration = purpose.permitsRegistration,
     )
 
     /**
@@ -78,7 +83,8 @@ class GattSession(
         val events = Channel<TransportEvent>(Channel.UNLIMITED)
         val forwarder = launch { transport.events.collect { events.trySend(it) } }
         try {
-            connectAndDiscover(events)
+            withTimeoutOrNull(SessionBudget.HARD_SESSION_CEILING) { connectAndDiscover(events) }
+                ?: SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
         } finally {
             forwarder.cancel()
             // 00-design.md §8.10: every terminal path calls close() exactly
@@ -350,9 +356,8 @@ class GattSession(
 
                 is HandshakeDirective.Complete -> {
                     current.credential?.let(::rememberCredential)
-                    decoder.measurementCharacteristics.forEach(transport::enableIndications)
-                    // WP-10 owns MEASURING onward; SUBSCRIBED is as far as this package goes.
-                    return SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
+                    if (stopAfterHandshake) return SessionOutcome.Completed(emptyList())
+                    return subscribeAndMeasure(events)
                 }
 
                 is HandshakeDirective.Abort -> {
@@ -385,7 +390,11 @@ class GattSession(
         }
     }
 
-    private suspend fun awaitSubscription(events: Channel<TransportEvent>, char: UUID): SubscriptionOutcome =
+    private suspend fun awaitSubscription(
+        events: Channel<TransportEvent>,
+        char: UUID,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>? = null,
+    ): SubscriptionOutcome =
         withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
             while (true) {
                 when (val event = events.receive()) {
@@ -397,6 +406,7 @@ class GattSession(
                             SubscriptionOutcome.Failed
                         }
                     }
+                    is TransportEvent.CharacteristicChanged -> deferredFrames?.add(event)
                     else -> continue
                 }
             }
@@ -405,6 +415,118 @@ class GattSession(
         } ?: SubscriptionOutcome.Failed
 
     private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff }
+
+    private suspend fun subscribeAndMeasure(events: Channel<TransportEvent>): SessionOutcome {
+        val deferredFrames = mutableListOf<TransportEvent.CharacteristicChanged>()
+        for (characteristic in decoder.measurementCharacteristics) {
+            transport.enableIndications(characteristic)
+            when (awaitSubscription(events, characteristic, deferredFrames)) {
+                SubscriptionOutcome.Enabled -> Unit
+                SubscriptionOutcome.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                SubscriptionOutcome.Failed -> return SessionOutcome.HandshakeFailed(
+                    "could not enable a measurement indication",
+                )
+            }
+        }
+        for (frame in deferredFrames) {
+            val decoded = decoder.onNotification(frame.char, frame.value)
+            if (decoded is DecodeEvent.Stable) return finishEmission(events, decoded.reading)
+        }
+        return awaitMeasurement(events)
+    }
+
+    private suspend fun awaitMeasurement(events: Channel<TransportEvent>): SessionOutcome {
+        var malformed = 0
+        val first = withTimeoutOrNull(SessionBudget.FIRST_INDICATION_TIMEOUT) {
+            while (true) {
+                when (val event = events.receive()) {
+                    is TransportEvent.AdapterOff -> return@withTimeoutOrNull MeasureStep.AdapterOff
+                    is TransportEvent.ConnectionStateChanged -> if (!event.connected) {
+                        return@withTimeoutOrNull MeasureStep.Dropped
+                    }
+                    is TransportEvent.CharacteristicChanged -> {
+                        when (val decoded = decoder.onNotification(event.char, event.value)) {
+                            is DecodeEvent.Stable -> return@withTimeoutOrNull MeasureStep.Reading(decoded.reading)
+                            is DecodeEvent.Malformed -> malformed++
+                            DecodeEvent.SessionComplete -> {
+                                val flushed = decoder.flush()
+                                if (flushed is DecodeEvent.Stable) {
+                                    return@withTimeoutOrNull MeasureStep.Reading(flushed.reading)
+                                }
+                            }
+                            else -> Unit
+                        }
+                        return@withTimeoutOrNull MeasureStep.Pending
+                    }
+                    else -> Unit
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            MeasureStep.Pending
+        } ?: return if (malformed > 0) SessionOutcome.DecodeFailure(malformed)
+        else SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
+
+        return when (first) {
+            MeasureStep.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+            MeasureStep.Dropped -> SessionOutcome.Missed(MissReason.DROPPED)
+            is MeasureStep.Reading -> finishEmission(events, first.reading)
+            MeasureStep.Pending -> {
+                val paired = withTimeoutOrNull(SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW) {
+                    while (true) {
+                        when (val event = events.receive()) {
+                            is TransportEvent.AdapterOff -> return@withTimeoutOrNull MeasureStep.AdapterOff
+                            is TransportEvent.ConnectionStateChanged -> if (!event.connected) {
+                                return@withTimeoutOrNull MeasureStep.Dropped
+                            }
+                            is TransportEvent.CharacteristicChanged -> when (
+                                val decoded = decoder.onNotification(event.char, event.value)
+                            ) {
+                                is DecodeEvent.Stable -> return@withTimeoutOrNull MeasureStep.Reading(decoded.reading)
+                                is DecodeEvent.Malformed -> malformed++
+                                else -> Unit
+                            }
+                            else -> Unit
+                        }
+                    }
+                    @Suppress("UNREACHABLE_CODE")
+                    MeasureStep.Pending
+                } ?: decoder.flush().let { flushed ->
+                    if (flushed is DecodeEvent.Stable) MeasureStep.Reading(flushed.reading) else MeasureStep.Pending
+                }
+                when (paired) {
+                    is MeasureStep.Reading -> finishEmission(events, paired.reading)
+                    MeasureStep.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                    MeasureStep.Dropped -> SessionOutcome.Missed(MissReason.DROPPED)
+                    MeasureStep.Pending -> if (malformed > 0) SessionOutcome.DecodeFailure(malformed)
+                    else SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
+                }
+            }
+        }
+    }
+
+    private suspend fun finishEmission(
+        events: Channel<TransportEvent>,
+        reading: com.ventouxlabs.bascule.ble.ScaleReading,
+    ): SessionOutcome {
+        withTimeoutOrNull(SessionBudget.POST_EMISSION_IDLE) {
+            while (true) {
+                when (val event = events.receive()) {
+                    is TransportEvent.AdapterOff -> return@withTimeoutOrNull
+                    is TransportEvent.ConnectionStateChanged -> if (!event.connected) return@withTimeoutOrNull
+                    is TransportEvent.CharacteristicChanged -> decoder.onNotification(event.char, event.value)
+                    else -> Unit
+                }
+            }
+        }
+        return SessionOutcome.Completed(listOf(reading))
+    }
+
+    private sealed interface MeasureStep {
+        data object Pending : MeasureStep
+        data object AdapterOff : MeasureStep
+        data object Dropped : MeasureStep
+        data class Reading(val reading: com.ventouxlabs.bascule.ble.ScaleReading) : MeasureStep
+    }
 
     /**
      * The wire protocol carries no correlation ID: a Register/Consent response

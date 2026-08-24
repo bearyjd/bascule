@@ -6,6 +6,7 @@ import com.ventouxlabs.bascule.data.ReadingStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 
 /** In-memory [ReadingDao] for JVM tests — no Room, no instrumented test needed. */
 class FakeReadingDao : ReadingDao {
@@ -50,5 +51,17 @@ class FakeReadingDao : ReadingDao {
                 )
             }
         }
+    }
+
+    override suspend fun blockAllPendingForAuth() {
+        _rows.value = _rows.value.map {
+            if (it.status == ReadingStatus.PENDING) it.copy(status = ReadingStatus.BLOCKED_AUTH) else it
+        }
+    }
+
+    override fun observePendingCount() = rows.map { list -> list.count { it.status == ReadingStatus.PENDING } }
+
+    override fun observeLastScaleCapture() = rows.map { list ->
+        list.filter { it.source.name == "SCALE" }.maxOfOrNull { it.capturedAtMillis }
     }
 }

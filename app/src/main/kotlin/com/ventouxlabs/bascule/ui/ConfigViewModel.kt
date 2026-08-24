@@ -15,6 +15,7 @@ import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.PortableSettings
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.SettingsBackupCodec
+import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.network.AuthTokenStore
@@ -111,6 +112,7 @@ class ConfigViewModel(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scaleRegistrar: ScaleRegistrar? = null,
+    private val scaleProfileStore: ScaleProfileStore? = null,
     /**
      * Contract/shaper are irrelevant to [VitalForgeApi.testConnection]/[VitalForgeApi.login]
      * (neither calls `shape()`), so they are hardcoded here rather than threaded through
@@ -418,6 +420,8 @@ class ConfigViewModel(
                     credentialValue = token ?: session,
                     pairedDeviceAddress = pairedAddress,
                     scaleCredential = pairedAddress?.let(consentStore::credentialFor),
+                    profiles = scaleProfileStore?.profiles?.value.orEmpty(),
+                    automaticCaptureEnabled = configStore.automaticCaptureEnabled.first(),
                 ),
                 passphrase,
             )
@@ -435,10 +439,15 @@ class ConfigViewModel(
             configStore.saveDisplayUnit(imported.displayUnit)
             configStore.saveContractVersion(imported.contractVersion)
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
+            configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
             configStore.savePairedDeviceAddress(imported.pairedDeviceAddress)
-            if (previousAddress != null) consentStore.clear(previousAddress)
-            imported.pairedDeviceAddress?.let { address ->
-                imported.scaleCredential?.let { consentStore.save(address, it) }
+            if (imported.profiles.isNotEmpty() && scaleProfileStore != null) {
+                scaleProfileStore.replaceAll(imported.profiles)
+            } else {
+                if (previousAddress != null) consentStore.clear(previousAddress)
+                imported.pairedDeviceAddress?.let { address ->
+                    imported.scaleCredential?.let { consentStore.save(address, it) }
+                }
             }
             authTokenStore.clear()
             sessionCookieStore.clear()
@@ -487,6 +496,7 @@ class ConfigViewModel(
                     deliveryTrigger = app.deliveryTrigger,
                     dao = app.database.readingDao(),
                     scaleRegistrar = app.scaleRegistrar,
+                    scaleProfileStore = app.scaleProfileStore,
                 )
             }
         }
