@@ -18,6 +18,19 @@ class SettingsBackupCodecTest {
         credentialValue = "secret-session-cookie",
         pairedDeviceAddress = "E7:DB:51:F1:36:91",
         scaleCredential = ScaleCredential(2, 1234),
+        profiles = listOf(
+            ScaleProfile(
+                id = "bf720-slot-2",
+                deviceAddress = "E7:DB:51:F1:36:91",
+                scaleIndex = 2,
+                consentCode = 1234,
+                label = "Profile 2",
+                registeredAtMillis = 1_777_777_777L,
+                active = true,
+                lastVerifiedAtMillis = 1_888_888_888L,
+            ),
+        ),
+        automaticCaptureEnabled = true,
     )
 
     @Test
