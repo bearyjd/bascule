@@ -1,5 +1,15 @@
 # Plan: Scale-Admin / Hands-Off-Capture Testing Completeness
 
+> **Status (2026-08-25): Tasks 1-4 and 5a/5b done, CI-green.** Task 5c
+> (`BridgeForegroundServiceTest`) and Task 4's full scope (branches after the
+> `applicationContext as BasculeApplication` cast) remain — both need a
+> decision on making `BasculeApplication`'s dependencies swappable
+> (`WorkerFactory` or `open` properties), materially bigger than this pass's
+> `ScaleSessionEnqueuer` extraction. Task 6 (`connectedDebugAndroidTest` CI
+> job) remains deliberately deferred, as originally scoped. See
+> `.claude/PRPs/reports/scale-admin-testing-completeness-report.md` for full
+> detail. Not moved to `completed/` — real work remains.
+
 ## Summary
 
 A devil's-advocate review of `vitalforge-connectivity-and-login` (this session, commits `a7bb664`/`32fd6b1`) closed the highest-value testing gap in the hands-off-capture feature: `ReadingIngestor`, `ReadingMapper`, `ScaleProfileCodec`, and `DeliveryDrainer` now have full JVM unit coverage (232/232 tests green). This plan covers what's left — the Android-framework-coupled classes that logic extraction can't reach (workers, receivers, a service, the real BLE transport), plus a discovered gap this review missed: `GattSession`'s measurement-phase edge cases (E7/E8/E9/E17/E18, `docs/prp/01-plan.md` WP-10) were spec'd with a named `GattSessionMeasureTest` that was never written — the code exists, dedicated regression tests for it do not.
