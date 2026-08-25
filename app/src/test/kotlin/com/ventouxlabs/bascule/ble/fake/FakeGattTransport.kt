@@ -105,6 +105,11 @@ class FakeGattTransport(
         emit(TransportEvent.AdapterOff)
     }
 
+    /** Pushes an unsolicited disconnect, as the scale dropping mid-session does (E8) — distinct from [disconnect]. */
+    fun dropConnection(status: Int = STATUS_GATT_CONN_TERMINATE_LOCAL_HOST) {
+        emit(TransportEvent.ConnectionStateChanged(connected = false, status = status))
+    }
+
     override fun write(char: UUID, bytes: ByteArray) {
         _callOrder += "write:$char"
         writesPerformed += char to bytes
@@ -156,6 +161,7 @@ class FakeGattTransport(
     private companion object {
         const val BOND_BONDED = 12
         const val REPLAY_CAPACITY = 128
+        const val STATUS_GATT_CONN_TERMINATE_LOCAL_HOST = 19
     }
 }
 
