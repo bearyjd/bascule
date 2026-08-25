@@ -9,14 +9,18 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.OutOfQuotaPolicy
-import androidx.work.WorkManager
-import com.ventouxlabs.bascule.ble.session.ScaleSessionWorker
+import com.ventouxlabs.bascule.ble.session.ScaleSessionEnqueuer
+import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
 
-class ScanBroadcastReceiver : BroadcastReceiver() {
+/**
+ * [enqueuerFactory] defaults to the real [WorkManagerScaleSessionEnqueuer] —
+ * Android instantiates this receiver via a no-arg reflective constructor, so
+ * production behavior is unchanged. A test constructs it directly with a
+ * fake instead.
+ */
+class ScanBroadcastReceiver(
+    private val enqueuerFactory: (Context) -> ScaleSessionEnqueuer = { WorkManagerScaleSessionEnqueuer(it) },
+) : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ScaleScanner.ACTION_SCAN) return
         val results: List<ScanResult> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -26,18 +30,6 @@ class ScanBroadcastReceiver : BroadcastReceiver() {
             intent.getParcelableArrayListExtra<ScanResult>(BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT).orEmpty()
         }
         val address = results.firstOrNull()?.device?.address ?: return
-        enqueueSession(context, address, System.currentTimeMillis())
-    }
-
-    companion object {
-        fun enqueueSession(context: Context, address: String, seenAtMillis: Long) {
-            val input = Data.Builder().putString(ScaleSessionWorker.KEY_ADDRESS, address)
-                .putLong(ScaleSessionWorker.KEY_SEEN_AT, seenAtMillis).build()
-            val request = OneTimeWorkRequestBuilder<ScaleSessionWorker>().setInputData(input)
-                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST).build()
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                ScaleSessionWorker.UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request,
-            )
-        }
+        enqueuerFactory(context).enqueue(address, System.currentTimeMillis())
     }
 }

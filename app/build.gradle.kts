@@ -97,6 +97,11 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.robolectric)
     testImplementation(libs.turbine)
+    // Robolectric-based JVM tests for Android-framework-coupled classes
+    // (BroadcastReceiver/Service/CoroutineWorker) — see
+    // .claude/PRPs/plans/scale-admin-testing-completeness.plan.md Task 2.
+    testImplementation(libs.androidx.test.junit)
+    testImplementation(libs.androidx.work.testing)
 
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.test.runner)

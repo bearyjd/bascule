@@ -19,12 +19,13 @@ import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.BasculeApplication
-import com.ventouxlabs.bascule.ble.ScanBroadcastReceiver
 import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
+import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
 
 /** Optional active-scan fallback; every result is routed through the same unique worker path. */
 class BridgeForegroundService : Service() {
     private val scanner get() = getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner
+    private val enqueuer by lazy { WorkManagerScaleSessionEnqueuer(this) }
 
     override fun onCreate() {
         super.onCreate()
@@ -52,7 +53,7 @@ class BridgeForegroundService : Service() {
 
     private val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            ScanBroadcastReceiver.enqueueSession(this@BridgeForegroundService, result.device.address, System.currentTimeMillis())
+            enqueuer.enqueue(result.device.address, System.currentTimeMillis())
         }
     }
 
