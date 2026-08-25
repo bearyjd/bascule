@@ -12,13 +12,19 @@ import kotlinx.coroutines.launch
  * Re-arms the scan after reboot — required, because scan registrations do not
  * survive one (00-design.md §8.2).
  *
- * PHASE 2 SKELETON. Implemented in Phase 3 WP-27.
+ * [arm] defaults to the real re-arm path via [BasculeApplication] — Android
+ * instantiates this receiver via a no-arg reflective constructor, so
+ * production behavior is unchanged. A test constructs it directly with a
+ * fake instead, avoiding the real `BasculeApplication` entirely (see
+ * `ScanBroadcastReceiver`'s KDoc for why that matters in this environment).
  */
-class BootReceiver : BroadcastReceiver() {
+class BootReceiver(
+    private val arm: suspend (Context) -> Boolean = { (it.applicationContext as BasculeApplication).scaleScanner.arm() },
+) : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
-            try { (context.applicationContext as BasculeApplication).scaleScanner.arm() } finally { pending.finish() }
+            try { arm(context) } finally { pending.finish() }
         }
     }
 }
