@@ -4,6 +4,23 @@ Written 2026-08-22 to let a fresh session pick up Phase 3 without replaying
 this one. Read this first, then the docs it points at — don't re-derive
 anything below from git log archaeology.
 
+> **2026-08-24 update:** everything this file lists below as "deliberately
+> stubbed" — `GattSession.run()` (WP-06/07/10), `ScaleScanner`/
+> `ScanBroadcastReceiver`/`ScaleSessionWorker` (WP-08), `AndroidGattTransport`
+> (WP-04), `ReadingMapper` (WP-13), `BridgeForegroundService`/`BootReceiver`
+> (WP-25/27), `DeliveryCoordinator`/`DeliveryWorker` (WP-21/22), and `ui/`
+> (WP-23/24/28) — is now real, implemented code; grep confirms no `TODO()`
+> left in `app/src/main/kotlin/`. `ScaleSessionContractTest` passes all 4
+> cases (was 3-of-4 red). Per `02-ci-notes.md`'s own "Phase 3 flips this step
+> to blocking" note, the split contract-test lane (`bascule.contractTests`
+> Gradle property, the non-blocking CI step) has been removed — contract
+> tests now run in the ordinary `testDebugUnitTest` task and CI's single
+> `Unit tests` step. `docs/prp/04-scale-admin-and-automation-plan.md` covers
+> the scale-administration/hands-off-capture work this added on top of the
+> original WP list. Still true: no on-device live verification since the
+> Pixel 9 Pro Fold has not been reconnected in this environment (`adb
+> devices` still returns empty).
+
 ## Where things actually are
 
 - **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0), pushed and

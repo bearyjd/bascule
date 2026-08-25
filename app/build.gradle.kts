@@ -62,27 +62,6 @@ kotlin {
     }
 }
 
-/**
- * Phase 2 ships contract tests that are deliberately red against an
- * unimplemented session layer (bascule-agent-prompt.md §Phase 2 item 2). They
- * are held in a separate lane so an expected failure cannot be confused with a
- * regression: `testDebugUnitTest` excludes them and must be green, while
- * `-Pbascule.contractTests=true` runs only them. See docs/prp/02-ci-notes.md.
- */
-val contractTestPattern = "*ContractTest"
-val runContractTests = providers.gradleProperty("bascule.contractTests").orNull == "true"
-
-tasks.withType<Test>().configureEach {
-    filter {
-        if (runContractTests) {
-            includeTestsMatching(contractTestPattern)
-        } else {
-            excludeTestsMatching(contractTestPattern)
-        }
-        isFailOnNoMatchingTests = false
-    }
-}
-
 // Room schema export from the first commit so migrations are diffable
 // (00-design.md §3.1, §8.12).
 ksp {
