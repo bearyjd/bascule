@@ -25,4 +25,15 @@ class ScaleOperationCoordinatorTest {
         administration.await()
         assertEquals(1, peak.get())
     }
+
+    @Test
+    fun busyWithReflectsTheHeldPurposeThenClearsOnRelease() = runTest {
+        val coordinator = ScaleOperationCoordinator()
+        var observedDuringHold: ScaleSessionPurpose? = null
+        coordinator.withScale(ScaleSessionPurpose.REGISTER_NEW) {
+            observedDuringHold = coordinator.busyWith
+        }
+        assertEquals(ScaleSessionPurpose.REGISTER_NEW, observedDuringHold)
+        assertEquals(null, coordinator.busyWith)
+    }
 }
