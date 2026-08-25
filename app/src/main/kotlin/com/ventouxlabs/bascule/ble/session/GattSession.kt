@@ -513,7 +513,11 @@ class GattSession(
                 when (val event = events.receive()) {
                     is TransportEvent.AdapterOff -> return@withTimeoutOrNull
                     is TransportEvent.ConnectionStateChanged -> if (!event.connected) return@withTimeoutOrNull
-                    is TransportEvent.CharacteristicChanged -> decoder.onNotification(event.char, event.value)
+                    is TransportEvent.CharacteristicChanged -> {
+                        if (decoder.onNotification(event.char, event.value) is DecodeEvent.Stable) {
+                            diagnostics.increment(DiagnosticsCounterKey.DUPLICATE_STABLE_SUPPRESSED)
+                        }
+                    }
                     else -> Unit
                 }
             }

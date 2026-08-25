@@ -10,16 +10,6 @@ import com.ventouxlabs.bascule.network.encryptedPreferences
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonPrimitive
 
 data class ScaleProfile(
     val id: String,
@@ -107,13 +97,7 @@ class EncryptedScaleProfileStore(
 
     override fun saveProfile(profile: ScaleProfile) {
         require(profile.scaleIndex in 0..255 && profile.consentCode in 0..0xFFFF)
-        val current = mutableProfiles.value
-        val next = current.filterNot { it.id == profile.id }.toMutableList()
-        if (profile.active) {
-            for (index in next.indices) next[index] = next[index].copy(active = false)
-        }
-        next += profile
-        persist(next)
+        persist(ScaleProfileCodec.upsertEnforcingSingleActive(mutableProfiles.value, profile))
     }
 
     override fun deleteProfile(profileId: String) = persist(mutableProfiles.value.filterNot { it.id == profileId })
@@ -129,42 +113,14 @@ class EncryptedScaleProfileStore(
     }
 
     private fun persist(next: List<ScaleProfile>) {
-        prefs.edit().putString(KEY_PROFILES, encode(next)).commit()
+        prefs.edit().putString(KEY_PROFILES, ScaleProfileCodec.encodeToString(next)).commit()
         mutableProfiles.value = next
         mutableActive.value = next.firstOrNull { it.active }
     }
 
     private fun readProfiles(): List<ScaleProfile> = runCatching {
-        prefs.getString(KEY_PROFILES, null)?.let(::decode).orEmpty()
+        prefs.getString(KEY_PROFILES, null)?.let(ScaleProfileCodec::decodeFromString).orEmpty()
     }.getOrDefault(emptyList())
-
-    private fun encode(items: List<ScaleProfile>): String = buildJsonArray {
-        items.forEach { profile ->
-            add(buildJsonObject {
-                put("id", JsonPrimitive(profile.id)); put("address", JsonPrimitive(profile.deviceAddress))
-                put("index", JsonPrimitive(profile.scaleIndex)); put("code", JsonPrimitive(profile.consentCode))
-                put("label", JsonPrimitive(profile.label)); put("registered", JsonPrimitive(profile.registeredAtMillis))
-                put("active", JsonPrimitive(profile.active))
-                profile.lastVerifiedAtMillis?.let { put("verified", JsonPrimitive(it)) }
-                put("incomplete", JsonPrimitive(profile.initializationIncomplete))
-            })
-        }
-    }.toString()
-
-    private fun decode(text: String): List<ScaleProfile> = Json.parseToJsonElement(text).jsonArray.map { element ->
-        val obj = element as JsonObject
-        ScaleProfile(
-            id = obj.getValue("id").jsonPrimitive.content,
-            deviceAddress = obj.getValue("address").jsonPrimitive.content,
-            scaleIndex = obj.getValue("index").jsonPrimitive.int,
-            consentCode = obj.getValue("code").jsonPrimitive.int,
-            label = obj.getValue("label").jsonPrimitive.content,
-            registeredAtMillis = obj.getValue("registered").jsonPrimitive.content.toLong(),
-            active = obj.getValue("active").jsonPrimitive.boolean,
-            lastVerifiedAtMillis = obj["verified"]?.jsonPrimitive?.content?.toLongOrNull(),
-            initializationIncomplete = obj["incomplete"]?.jsonPrimitive?.boolean ?: false,
-        )
-    }
 
     override fun toString(): String = "EncryptedScaleProfileStore"
 

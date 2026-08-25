@@ -40,7 +40,7 @@ class AndroidScaleRegistrar(
     private val consentStore: ConsentStore,
     private val configStore: ConfigStore,
     private val diagnostics: DiagnosticsCounters,
-    private val coordinator: ScaleOperationCoordinator = ScaleOperationCoordinator(),
+    private val coordinator: ScaleOperationCoordinator,
 ) : ScaleRegistrar {
 
     private val appContext = context.applicationContext

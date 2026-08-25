@@ -13,7 +13,6 @@ import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
@@ -88,16 +87,7 @@ object SettingsBackupCodec {
         put("scale_index", settings.scaleCredential?.scaleIndex?.let(::JsonPrimitive) ?: JsonNull)
         put("consent_code", settings.scaleCredential?.consentCode?.let(::JsonPrimitive) ?: JsonNull)
         put("automatic_capture_enabled", JsonPrimitive(settings.automaticCaptureEnabled))
-        put("profiles", JsonArray(settings.profiles.map { profile ->
-            buildJsonObject {
-                put("id", JsonPrimitive(profile.id)); put("address", JsonPrimitive(profile.deviceAddress))
-                put("index", JsonPrimitive(profile.scaleIndex)); put("code", JsonPrimitive(profile.consentCode))
-                put("label", JsonPrimitive(profile.label)); put("registered", JsonPrimitive(profile.registeredAtMillis))
-                put("active", JsonPrimitive(profile.active))
-                profile.lastVerifiedAtMillis?.let { put("verified", JsonPrimitive(it)) }
-                put("incomplete", JsonPrimitive(profile.initializationIncomplete))
-            }
-        }))
+        put("profiles", ScaleProfileCodec.encode(settings.profiles))
     }.toString()
 
     private fun decode(text: String): PortableSettings {
@@ -116,21 +106,11 @@ object SettingsBackupCodec {
             "Backup scale mapping is incomplete"
         }
         val profiles = if (version >= 2) {
-            (obj["profiles"] as? JsonArray).orEmpty().map { element ->
-                val profile = element as JsonObject
-                ScaleProfile(
-                    id = profile.getValue("id").jsonPrimitive.content,
-                    deviceAddress = profile.getValue("address").jsonPrimitive.content,
-                    scaleIndex = profile.getValue("index").jsonPrimitive.int,
-                    consentCode = profile.getValue("code").jsonPrimitive.int,
-                    label = profile.getValue("label").jsonPrimitive.content,
-                    registeredAtMillis = profile.getValue("registered").jsonPrimitive.content.toLong(),
-                    active = profile.getValue("active").jsonPrimitive.boolean,
-                    lastVerifiedAtMillis = profile["verified"]?.jsonPrimitive?.content?.toLongOrNull(),
-                    initializationIncomplete = profile["incomplete"]?.jsonPrimitive?.boolean ?: false,
-                )
-            }
-        } else emptyList()
+            (obj["profiles"] as? JsonArray)?.let(ScaleProfileCodec::decode).orEmpty()
+        } else {
+            emptyList()
+        }
+        require(profiles.count { it.active } <= 1) { "Backup has more than one active profile" }
         return PortableSettings(
             baseUrl = obj.getValue("base_url").jsonPrimitive.content,
             displayUnit = WeightUnit.valueOf(obj.getValue("display_unit").jsonPrimitive.content),
