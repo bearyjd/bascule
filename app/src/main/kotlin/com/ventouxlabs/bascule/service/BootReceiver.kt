@@ -19,7 +19,9 @@ import kotlinx.coroutines.launch
  * `ScanBroadcastReceiver`'s KDoc for why that matters in this environment).
  */
 class BootReceiver(
-    private val arm: suspend (Context) -> Boolean = { (it.applicationContext as BasculeApplication).scaleScanner.arm() },
+    private val arm: suspend (Context) -> Boolean = {
+        (it.applicationContext as BasculeApplication).scaleScanner.arm()
+    },
 ) : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val pending = goAsync()
