@@ -16,6 +16,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.BasculeApplication
@@ -39,8 +40,12 @@ class BridgeForegroundService : Service() {
     internal var enqueuerFactory: (Context) -> ScaleSessionEnqueuer =
         { WorkManagerScaleSessionEnqueuer(it) }
 
+    /** The same seam as [enqueuerFactory], for [startActiveScan]'s early exits. */
+    internal var activeAddressProvider: () -> String? =
+        { (application as BasculeApplication).scaleProfileStore.activeProfile.value?.deviceAddress }
+
     private val enqueuer by lazy { enqueuerFactory(this) }
-    private val cooldown = ScanEnqueueCooldown(ENQUEUE_COOLDOWN_MILLIS)
+    private val cooldown by lazy { ScanEnqueueCooldown(this) }
 
     /**
      * The permission check runs before [startForeground], not after it as the
@@ -74,13 +79,26 @@ class BridgeForegroundService : Service() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) ==
             PackageManager.PERMISSION_GRANTED
 
+    /**
+     * Every exit that leaves no scan running stops the service, for the same
+     * reason the permission gate in [onCreate] does: this service's whole
+     * purpose is to hold a scan open, so one that has none is an ongoing
+     * notification the user cannot dismiss over a process doing nothing. A
+     * revoked permission reaching the [runCatching] as a `SecurityException`
+     * (E13) is the same inert state arrived at by a different route, so it
+     * gets the same treatment plus a diagnostic.
+     */
     @SuppressLint("MissingPermission")
     private fun startActiveScan() {
-        val active = (application as BasculeApplication).scaleProfileStore.activeProfile.value ?: return
-        val adapter = getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        val activeAddress = activeAddressProvider()
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        if (activeAddress == null || adapter == null) {
+            stopSelf()
+            return
+        }
         // Inside the guard, not before it — see ScaleScanner.arm() for why.
         runCatching {
-            val filter = ScanFilter.Builder().setDeviceAddress(active.deviceAddress)
+            val filter = ScanFilter.Builder().setDeviceAddress(activeAddress)
                 .setServiceUuid(ParcelUuid(SigWeightProfile.WEIGHT_SCALE_SERVICE)).build()
             val settings = ScanSettings.Builder()
                 // BALANCED, not LOW_LATENCY: this scan runs from the moment the
@@ -93,6 +111,10 @@ class BridgeForegroundService : Service() {
                 .setReportDelay(if (adapter.isOffloadedScanBatchingSupported) BATCH_REPORT_DELAY_MILLIS else 0L)
                 .build()
             adapter.bluetoothLeScanner?.startScan(listOf(filter), settings, callback)
+                ?: error("no BluetoothLeScanner")
+        }.onFailure { error ->
+            Log.w(TAG, "active scan could not be started; stopping the bridge", error)
+            stopSelf()
         }
     }
 
@@ -128,37 +150,9 @@ class BridgeForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "BridgeForegroundService"
         private const val CHANNEL = "scale_bridge"
         private const val NOTIFICATION_ID = 721
         private const val BATCH_REPORT_DELAY_MILLIS = 5_000L
-        private const val ENQUEUE_COOLDOWN_MILLIS = 5L * 60 * 1_000
-    }
-}
-
-/**
- * Gates repeat session enqueues for one device address. Without it every
- * advertisement — 2-10 per second while the scale is in radio range — starts a
- * fresh GATT connect/handshake cycle the moment the previous one finishes,
- * because `ExistingWorkPolicy` only suppresses work that is actually in flight.
- *
- * The window is stamped when a session is *enqueued* rather than when it ends:
- * the terminal outcome is known only inside `ScaleSessionWorker`. It is sized
- * well past `SessionBudget`'s 90s hard ceiling so that even a session that runs
- * to that ceiling still leaves several minutes of quiet behind it.
- */
-internal class ScanEnqueueCooldown(
-    private val windowMillis: Long,
-    private val clock: () -> Long = System::currentTimeMillis,
-) {
-    private val lastEnqueuedAt = mutableMapOf<String, Long>()
-
-    /** Reserves the next session for [address], or returns false while the window is open. */
-    @Synchronized
-    fun claim(address: String): Boolean {
-        val now = clock()
-        val last = lastEnqueuedAt[address]
-        if (last != null && now - last < windowMillis) return false
-        lastEnqueuedAt[address] = now
-        return true
     }
 }

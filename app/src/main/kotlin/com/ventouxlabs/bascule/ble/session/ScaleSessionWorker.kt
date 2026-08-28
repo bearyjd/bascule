@@ -16,6 +16,8 @@ import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
+import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
+import kotlinx.coroutines.CancellationException
 
 class ScaleSessionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -23,7 +25,6 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         val seenAt = inputData.getLong(KEY_SEEN_AT, 0L)
         if (seenAt <= 0L || System.currentTimeMillis() - seenAt > STALENESS_ABORT_MILLIS) return Result.success()
         if (!hasConnectPermission()) return Result.failure()
-        setForeground(foregroundInfo())
         return runSession(address)
     }
 
@@ -42,6 +43,17 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         val profile = app.scaleProfileStore.activeProfile.value
         if (profile == null || !profile.deviceAddress.equals(address, true)) return Result.success()
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return Result.failure()
+        // Last, after every viability gate above: the "capturing" notification
+        // is a promise to the user that a session is about to happen, and a
+        // stale advertisement for a non-active address used to show it and then
+        // silently no-op.
+        //
+        // retry(), on the same reasoning as ADAPTER_OFF below: a refused
+        // foreground start is a statement about this moment, not this device.
+        // Best-effort in the same way DecodeFailure's is — WorkManager's 10s
+        // backoff floor often lands past STALENESS_ABORT_MILLIS, at which point
+        // the retry returns success() without touching the radio.
+        if (!enterForeground(app)) return Result.retry()
         val session = GattSession(
             transport = AndroidGattTransport(applicationContext, device, adapter),
             decoder = BeurerDecoder(),
@@ -54,6 +66,29 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
             .withScale(ScaleSessionPurpose.MEASUREMENT) { session.run() }
         return resultFor(app, address, outcome)
     }
+
+    /**
+     * `setForeground` is the one call in this worker that can fail for reasons
+     * outside the app: on API 31+ a background start raises
+     * `ForegroundServiceStartNotAllowedException`, and API 34 adds
+     * `ForegroundServiceTypeException`/`SecurityException` around the
+     * `connectedDevice` type. Those have no common supertype worth naming, and
+     * left uncaught `CoroutineWorker` absorbs them itself — `doWork` never
+     * reaches the session, so the weigh-in disappears with no retry and no
+     * diagnostic. This is E10's mechanism arriving by its other route (a worker
+     * downgraded out of the expedited quota is exactly a worker the platform
+     * will not let go foreground), so it books the same `MISSED_QUOTA` counter.
+     */
+    private suspend fun enterForeground(app: BasculeApplication): Boolean =
+        try {
+            setForeground(foregroundInfo())
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            app.diagnosticsCounters.increment(DiagnosticsCounterKey.MISSED_QUOTA)
+            false
+        }
 
     private suspend fun resultFor(
         app: BasculeApplication,

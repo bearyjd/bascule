@@ -21,7 +21,14 @@ import java.util.concurrent.Executors
  * Task 3's revision note).
  */
 interface ScaleSessionEnqueuer {
-    fun enqueue(address: String, seenAtMillis: Long)
+    /**
+     * [onEnqueued] fires once the request is durably recorded by WorkManager,
+     * or once the attempt has failed — never both, and not necessarily on the
+     * calling thread. [ScanBroadcastReceiver][com.ventouxlabs.bascule.ble.ScanBroadcastReceiver]
+     * holds its `goAsync()` window open until it fires, because a process woken
+     * solely for that broadcast can be killed before the write lands.
+     */
+    fun enqueue(address: String, seenAtMillis: Long, onEnqueued: () -> Unit = {})
 }
 
 class WorkManagerScaleSessionEnqueuer(context: Context) : ScaleSessionEnqueuer {
@@ -36,7 +43,7 @@ class WorkManagerScaleSessionEnqueuer(context: Context) : ScaleSessionEnqueuer {
      * whichever of those threads called this, at the cost of one extra hop
      * before the work is actually enqueued.
      */
-    override fun enqueue(address: String, seenAtMillis: Long) {
+    override fun enqueue(address: String, seenAtMillis: Long, onEnqueued: () -> Unit) {
         val request = OneTimeWorkRequestBuilder<ScaleSessionWorker>()
             .setInputData(
                 Data.Builder()
@@ -51,7 +58,15 @@ class WorkManagerScaleSessionEnqueuer(context: Context) : ScaleSessionEnqueuer {
             {
                 val policy = runCatching { existingWorkPolicyFor(existingWork.get().map { it.state }) }
                     .getOrDefault(ExistingWorkPolicy.KEEP)
-                manager.enqueueUniqueWork(ScaleSessionWorker.UNIQUE_WORK_NAME, policy, request)
+                // The Operation's future completes when the request has been
+                // written to WorkManager's own database — the point past which
+                // losing this process no longer loses the wake. Any throw from
+                // the enqueue itself has to signal too, or the caller's
+                // goAsync() window is held until its timeout for nothing.
+                runCatching {
+                    manager.enqueueUniqueWork(ScaleSessionWorker.UNIQUE_WORK_NAME, policy, request)
+                        .result.addListener({ onEnqueued() }, policyExecutor)
+                }.onFailure { onEnqueued() }
             },
             policyExecutor,
         )
@@ -63,8 +78,14 @@ class WorkManagerScaleSessionEnqueuer(context: Context) : ScaleSessionEnqueuer {
          * single background thread is enough to resolve one query and enqueue
          * one request per advertisement — the whole point is keeping this work
          * off the caller's thread, not making it fast.
+         *
+         * Daemon, because nothing ever shuts this executor down: it is a
+         * process-lifetime singleton, and a non-daemon thread would keep the
+         * JVM alive past the last other thread in a unit-test lane.
          */
-        val policyExecutor: Executor = Executors.newSingleThreadExecutor()
+        val policyExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "scale-session-enqueue").apply { isDaemon = true }
+        }
     }
 }
 

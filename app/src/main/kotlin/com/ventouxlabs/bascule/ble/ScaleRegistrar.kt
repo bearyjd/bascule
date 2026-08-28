@@ -152,6 +152,7 @@ class AndroidScaleRegistrar(
                     }
 
                     override fun onScanFailed(errorCode: Int) {
+                        scanner.stopScan(this)
                         if (continuation.isActive) continuation.resume(null)
                     }
                 }

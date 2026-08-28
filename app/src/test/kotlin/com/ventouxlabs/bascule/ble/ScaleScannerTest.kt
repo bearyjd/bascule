@@ -69,6 +69,14 @@ class ScaleScannerTest {
         assertEquals(1, shadowOf(leScanner).activeScans.size)
     }
 
+    // pr-1-review-round3.md's LOW on arm()/disarm() being unsynchronized is
+    // fixed in production (a lock around the stop-then-start pair) but is not
+    // covered here: a driver running arm() from N threads passes identically
+    // with and without the lock, because ShadowBluetoothLeScanner keys its
+    // registrations by PendingIntent identity and so converges on one entry
+    // whatever the interleaving. A test that cannot fail is worse than none,
+    // so the interleaving stays PHONE-bucket alongside the rest of arm().
+
     private fun profile(active: Boolean) = ScaleProfile(
         id = "p1",
         deviceAddress = "AA:BB:CC:DD:EE:FF",
