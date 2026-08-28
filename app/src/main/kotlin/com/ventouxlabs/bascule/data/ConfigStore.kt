@@ -16,11 +16,9 @@ private val Context.configDataStore: DataStore<Preferences> by preferencesDataSt
 /**
  * Non-secret configuration (`00-design.md` §5): base URL, display unit,
  * contract version, always-on bridging toggle, and the address of the one
- * scale this app is paired with. The last of those is not yet populated by
- * anything — WP-08's scan/session layer, which would discover and remember
- * it, is unimplemented — but the slot exists now so ConfigScreen's read-only
- * registered-index display (WP-25) has somewhere real to read from the
- * moment WP-08 does write it, rather than needing its own follow-up wiring.
+ * scale this app is paired with. That last one is written by the registration
+ * path, by manual linking, and by a settings import, and is what
+ * ConfigScreen's read-only registered-index display (WP-25) reads from.
  *
  * Never holds the VitalForge token — that stays in
  * [com.ventouxlabs.bascule.network.AuthTokenStore]'s encrypted storage, a
@@ -46,6 +44,44 @@ interface ConfigStore {
     suspend fun savePairedDeviceAddress(address: String?)
 }
 
+/**
+ * The three states a persisted enum name can be in, mirroring
+ * [ScaleProfileCodec.StoredProfiles]. [Unreadable] exists because the other two
+ * are not exhaustive, and collapsing it into [Absent] is what makes an L1-class
+ * silent revert possible: a stored `ContractVersion` that no longer parses —
+ * corrupted, or renamed by a refactor — currently reads back as
+ * [ContractVersion.V1_WEIGHT_ONLY], and every body-composition field stops
+ * being delivered with nothing telling the user their collection scope shrank.
+ *
+ * Retaining [raw] keeps that case distinguishable. Nothing consumes the
+ * distinction yet — surfacing it needs a [ConfigStore] member and a matching
+ * fake, both outside this change — but the classification is now made once,
+ * here, rather than being thrown away inside a `runCatching`.
+ */
+sealed interface StoredEnum<out T> {
+    /** Nothing has ever been written. Falling back to the default is correct. */
+    data object Absent : StoredEnum<Nothing>
+
+    data class Parsed<out T>(val value: T) : StoredEnum<T>
+
+    /** A value exists and matches no constant of the current build. */
+    data class Unreadable(val raw: String) : StoredEnum<Nothing>
+}
+
+/**
+ * Classifies a persisted enum name without throwing. Matches by [Enum.name]
+ * rather than calling `valueOf` in a `runCatching`, so an unknown value is a
+ * returned state rather than an exception used for control flow.
+ */
+internal fun <T : Enum<T>> readStoredEnum(raw: String?, values: List<T>): StoredEnum<T> {
+    if (raw == null) return StoredEnum.Absent
+    val match = values.firstOrNull { it.name == raw } ?: return StoredEnum.Unreadable(raw)
+    return StoredEnum.Parsed(match)
+}
+
+internal fun <T> StoredEnum<T>.valueOr(default: T): T =
+    if (this is StoredEnum.Parsed) value else default
+
 class DataStoreConfigStore(context: Context) : ConfigStore {
 
     private val store = context.applicationContext.configDataStore
@@ -53,12 +89,11 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
     override val baseUrl: Flow<String?> = store.data.map { it[BASE_URL] }
 
     override val displayUnit: Flow<WeightUnit> = store.data.map { prefs ->
-        prefs[DISPLAY_UNIT]?.let { runCatching { WeightUnit.valueOf(it) }.getOrNull() } ?: WeightUnit.KILOGRAMS
+        readStoredEnum(prefs[DISPLAY_UNIT], WeightUnit.entries).valueOr(WeightUnit.KILOGRAMS)
     }
 
     override val contractVersion: Flow<ContractVersion> = store.data.map { prefs ->
-        prefs[CONTRACT_VERSION]?.let { runCatching { ContractVersion.valueOf(it) }.getOrNull() }
-            ?: ContractVersion.V1_WEIGHT_ONLY
+        readStoredEnum(prefs[CONTRACT_VERSION], ContractVersion.entries).valueOr(ContractVersion.V1_WEIGHT_ONLY)
     }
 
     override val alwaysOnBridging: Flow<Boolean> = store.data.map { it[ALWAYS_ON_BRIDGING] ?: false }

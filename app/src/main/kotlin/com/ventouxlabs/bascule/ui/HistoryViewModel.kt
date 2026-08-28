@@ -1,5 +1,3 @@
-@file:Suppress("MaxLineLength")
-
 package com.ventouxlabs.bascule.ui
 
 import androidx.lifecycle.ViewModel
@@ -13,11 +11,17 @@ import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** Sort buckets, most-actionable first — declaration order *is* the sort order. */
+private enum class StatusRank { NEEDS_CONFIRMATION, BLOCKED, PENDING, DECLINED, SENT }
 
 data class HistoryUiState(
     val rows: List<ReadingEntity> = emptyList(),
@@ -42,6 +46,7 @@ class HistoryViewModel(
     private val diagnostics: DiagnosticsCounters,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val deliveryTrigger: DeliveryTrigger? = null,
+    computeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     /**
@@ -49,22 +54,27 @@ class HistoryViewModel(
      * inside its collect block — a counter can change (E7's `NO_MEASUREMENT`,
      * most notably: a session that produced no reading inserts no row by
      * definition) with no corresponding row change to trigger a recompute.
+     *
+     * `flowOn` keeps the sort and the summary pass off `Dispatchers.Main`:
+     * `stateIn` collects on the main dispatcher, so without it the whole
+     * readings table was re-sorted on the UI thread on every emission — and a
+     * drain emits once per row it updates. `WhileSubscribed` stops that work
+     * entirely when the History screen is not on-screen.
      */
     val uiState: StateFlow<HistoryUiState> = combine(
         dao.observeAll(),
         diagnostics.observeAll(),
     ) { readings, counters ->
+        val summary = summarize(readings)
         HistoryUiState(
             rows = readings.sortedWith(rowOrdering),
-            hasBlockedAuth = readings.any { it.status == ReadingStatus.BLOCKED_AUTH },
-            hasFailedPermanent = readings.any { it.status == ReadingStatus.FAILED_PERMANENT },
-            oldestPendingAgeMillis = readings
-                .filter { it.status == ReadingStatus.PENDING }
-                .minOfOrNull { it.capturedAtMillis }
-                ?.let { nowMillis() - it },
+            hasBlockedAuth = summary.hasBlockedAuth,
+            hasFailedPermanent = summary.hasFailedPermanent,
+            oldestPendingAgeMillis = summary.oldestPendingCaptureMillis?.let { nowMillis() - it },
             counters = counters,
         )
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, HistoryUiState())
+    }.flowOn(computeDispatcher)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), HistoryUiState())
 
     /** "Yes, that's me" — the row was correctly attributed after all. */
     fun confirm(reading: ReadingEntity) = updateStatus(reading, ReadingStatus.PENDING, resetRetryEpoch = true)
@@ -81,6 +91,10 @@ class HistoryViewModel(
      * the very first retry of a row that had already failed many times, per
      * §8.6's own worked example. A stale failure reason from the old attempt
      * is also cleared, since the row is `PENDING` again, not still failed.
+     *
+     * `nextAttemptMillis` clears for the same reason: an explicit tap on
+     * "Retry" is the user asking for this row *now*, so it must not stay parked
+     * behind a backoff the previous attempt scheduled.
      */
     private fun updateStatus(reading: ReadingEntity, status: ReadingStatus, resetRetryEpoch: Boolean) {
         viewModelScope.launch {
@@ -92,27 +106,64 @@ class HistoryViewModel(
                     retryEpochMillis = if (resetRetryEpoch) now else reading.retryEpochMillis,
                     lastError = if (resetRetryEpoch) null else reading.lastError,
                     lastErrorClass = if (resetRetryEpoch) null else reading.lastErrorClass,
+                    nextAttemptMillis = if (resetRetryEpoch) null else reading.nextAttemptMillis,
                 ),
             )
             if (status == ReadingStatus.PENDING) deliveryTrigger?.triggerImmediateDrain()
         }
     }
 
-    companion object {
-        val statusRank = mapOf(
-            ReadingStatus.HELD_CONFIRM to 0,
-            ReadingStatus.BLOCKED_AUTH to 1,
-            ReadingStatus.FAILED_PERMANENT to 1,
-            ReadingStatus.PENDING to 2,
-            ReadingStatus.DECLINED to 3,
-            ReadingStatus.SENT to 4,
-        )
+    /** The three banner facts in one pass, rather than three more full scans of the table. */
+    private data class Summary(
+        val hasBlockedAuth: Boolean,
+        val hasFailedPermanent: Boolean,
+        val oldestPendingCaptureMillis: Long?,
+    )
 
-        val rowOrdering = compareBy<ReadingEntity> { statusRank.getValue(it.status) }
+    private fun summarize(readings: List<ReadingEntity>): Summary {
+        var hasBlockedAuth = false
+        var hasFailedPermanent = false
+        var oldestPending: Long? = null
+        for (reading in readings) {
+            when (reading.status) {
+                ReadingStatus.BLOCKED_AUTH -> hasBlockedAuth = true
+                ReadingStatus.FAILED_PERMANENT -> hasFailedPermanent = true
+                ReadingStatus.PENDING ->
+                    oldestPending = minOf(oldestPending ?: reading.capturedAtMillis, reading.capturedAtMillis)
+
+                ReadingStatus.HELD_CONFIRM, ReadingStatus.SENT, ReadingStatus.DECLINED -> Unit
+            }
+        }
+        return Summary(hasBlockedAuth, hasFailedPermanent, oldestPending)
+    }
+
+    companion object {
+        /** This project's `stateIn` convention — outlives a configuration change, not a screen exit. */
+        private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
+
+        /**
+         * A `when` rather than a map lookup so that adding a [ReadingStatus]
+         * fails to compile here instead of throwing at render time.
+         */
+        private fun statusRank(status: ReadingStatus): StatusRank = when (status) {
+            ReadingStatus.HELD_CONFIRM -> StatusRank.NEEDS_CONFIRMATION
+            ReadingStatus.BLOCKED_AUTH, ReadingStatus.FAILED_PERMANENT -> StatusRank.BLOCKED
+            ReadingStatus.PENDING -> StatusRank.PENDING
+            ReadingStatus.DECLINED -> StatusRank.DECLINED
+            ReadingStatus.SENT -> StatusRank.SENT
+        }
+
+        val rowOrdering = compareBy<ReadingEntity> { statusRank(it.status) }
             .thenByDescending { it.capturedAtMillis }
 
         fun factory(app: BasculeApplication) = viewModelFactory {
-            initializer { HistoryViewModel(app.database.readingDao(), app.diagnosticsCounters, deliveryTrigger = app.deliveryTrigger) }
+            initializer {
+                HistoryViewModel(
+                    app.database.readingDao(),
+                    app.diagnosticsCounters,
+                    deliveryTrigger = app.deliveryTrigger,
+                )
+            }
         }
     }
 }

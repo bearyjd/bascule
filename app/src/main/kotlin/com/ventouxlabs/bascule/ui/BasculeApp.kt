@@ -10,9 +10,12 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -24,7 +27,7 @@ import com.ventouxlabs.bascule.ui.nav.BasculeDestination
 import com.ventouxlabs.bascule.ui.theme.BasculeTheme
 
 /**
- * The app shell: a flat bottom-navigation bar across the three top-level
+ * The app shell: a flat bottom-navigation bar across the four top-level
  * screens (`00-design.md` §5), plus a History-only FAB shortcut straight into
  * Manual Entry — the one-tap path for "I want to log a weight right now"
  * without detouring through the tab bar first.
@@ -35,6 +38,7 @@ fun BasculeApp() {
         val navController = rememberNavController()
         val currentBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = currentBackStackEntry?.destination
+        val sharedOwner = checkNotNull(LocalViewModelStoreOwner.current)
 
         Scaffold(
             bottomBar = {
@@ -78,9 +82,22 @@ fun BasculeApp() {
                 composable(BasculeDestination.ManualEntry.route) {
                     ManualEntryScreen(onSaved = { navController.popBackStack() })
                 }
-                composable(BasculeDestination.Config.route) { ConfigScreen() }
-                composable(BasculeDestination.Scale.route) { ScaleScreen() }
+                composable(BasculeDestination.Config.route) { SharedViewModelScope(sharedOwner) { ConfigScreen() } }
+                composable(BasculeDestination.Scale.route) { SharedViewModelScope(sharedOwner) { ScaleScreen() } }
             }
         }
     }
+}
+
+/**
+ * Settings and Scale both surface the registration flow and have to see one
+ * [ConfigViewModel]. Left to itself, `viewModel()` resolves against each
+ * destination's own `NavBackStackEntry`, so each tab gets a private copy of the
+ * registration and connection-test state — a registration started on one tab is
+ * invisible on the other. Hoisting the store owner above the `NavHost` is what
+ * makes the two calls resolve to one instance.
+ */
+@Composable
+private fun SharedViewModelScope(owner: ViewModelStoreOwner, content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalViewModelStoreOwner provides owner, content = content)
 }

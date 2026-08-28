@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.network
 
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.WeightUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -80,20 +81,15 @@ class VitalForgeHttpClient(
             request = request,
             onFailure = { SubmitResult.TransientFailure(it, null) },
         ) { response ->
-            val classified = ResponseClassifier.classify(
+            // The status code alone decides. A 2xx means the server already
+            // committed the write; an unreadable or oversized response body does
+            // not un-commit it, and downgrading to TransientFailure would leave
+            // the row PENDING and resubmit it, duplicating the reading remotely.
+            ResponseClassifier.classify(
                 httpCode = response.code,
                 deliveredFields = payload.fields,
                 retryAfterHeader = response.header("Retry-After"),
             )
-            // The status code is authoritative: a 401 with an oversized body is
-            // still an auth rejection and must still pause the drain. The cap
-            // only downgrades a response we would otherwise have accepted,
-            // because a success we could not read is not a success.
-            if (classified is SubmitResult.Accepted && response.bodyExceedsCap()) {
-                SubmitResult.TransientFailure(OVERSIZED_BODY_REASON, null)
-            } else {
-                classified
-            }
         }
     }
 
@@ -187,6 +183,11 @@ class VitalForgeHttpClient(
      * Runs the call off the main thread and guarantees no throwable escapes: a
      * malformed or hostile response may delay a delivery, never crash the app
      * (00-design.md §8.7).
+     *
+     * Cancellation is the one exception and is rethrown. A `DeliveryWorker`
+     * stopped by WorkManager mid-submit made no attempt the server ever saw;
+     * recording it as a transient failure would burn an `attemptCount` and
+     * inflate the §3.4 backoff exponent for an attempt that never happened.
      */
     private suspend fun <T> execute(
         request: Request,
@@ -195,6 +196,7 @@ class VitalForgeHttpClient(
     ): T = withContext(Dispatchers.IO) {
         runCatching { client.newCall(request).execute().use(handle) }
             .getOrElse { throwable ->
+                if (throwable is CancellationException) throw throwable
                 onFailure(
                     when (throwable) {
                         is IOException -> "network error"
@@ -232,7 +234,6 @@ class VitalForgeHttpClient(
 
         /** 00-design.md §8.7. */
         const val MAX_BODY_BYTES = 64L * 1024
-        const val OVERSIZED_BODY_REASON = "response body exceeded 64 KiB cap"
 
         private const val JSON_CONTENT_TYPE = "application/json"
         private val JSON_MEDIA_TYPE = JSON_CONTENT_TYPE.toMediaType()

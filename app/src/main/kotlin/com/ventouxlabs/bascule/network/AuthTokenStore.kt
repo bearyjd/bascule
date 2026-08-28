@@ -2,8 +2,6 @@ package com.ventouxlabs.bascule.network
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 
 /**
  * The VitalForge bearer token. EncryptedSharedPreferences only — never plain
@@ -48,17 +46,4 @@ class EncryptedAuthTokenStore(context: Context) : AuthTokenStore {
         const val FILE_NAME = "bascule_auth"
         const val KEY_TOKEN = "vitalforge_token"
     }
-}
-
-internal fun encryptedPreferences(context: Context, fileName: String): SharedPreferences {
-    val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-    return EncryptedSharedPreferences.create(
-        context,
-        fileName,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
 }

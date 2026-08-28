@@ -8,7 +8,12 @@ package com.ventouxlabs.bascule.ble.decoders
  * kind is not a complete reading on its own (ADR-007).
  */
 internal data class BodyCompositionMeasurement(
-    val bodyFatPct: Double,
+    /**
+     * Null when the scale reported the SIG "value unknown" sentinel — the BIA
+     * impedance pass failed (socks, poor foot contact, too short a stand). The
+     * frame is still structurally valid and its other fields still usable.
+     */
+    val bodyFatPct: Double?,
     val timestampMillis: Long?,
     val userIndex: Int?,
     val basalMetabolismKj: Double?,
@@ -70,12 +75,12 @@ internal object BodyCompositionMeasurementParser {
         }
         val massToKg = if (imperial) WeightMeasurementParser.KG_PER_LB else 1.0
 
-        val bodyFat = reader.u16()
+        val bodyFat = reader.u16()?.takeIf { it != WeightMeasurementParser.VALUE_UNKNOWN }
         val timestamp = if (flags.hasBit(FLAG_TIMESTAMP)) reader.dateTimeMillis() else null
         val userIndex = if (flags.hasBit(FLAG_USER_ID)) reader.u8() else null
 
         val measurement = BodyCompositionMeasurement(
-            bodyFatPct = (bodyFat ?: 0) * SigWeightProfile.PERCENT_PER_LSB,
+            bodyFatPct = bodyFat?.times(SigWeightProfile.PERCENT_PER_LSB),
             timestampMillis = timestamp,
             userIndex = userIndex,
             basalMetabolismKj = reader.field(flags, FLAG_BASAL_METABOLISM) { it.toDouble() },
@@ -96,9 +101,15 @@ internal object BodyCompositionMeasurementParser {
         return if (reader.underrun) null else measurement
     }
 
+    /**
+     * A flagged-but-unknown field must still be *read* — the sentinel occupies
+     * its two bytes on the wire, and skipping the read would shift every
+     * following field's offset and misparse the rest of the frame silently.
+     */
     private inline fun FrameReader.field(flags: Int, bit: Int, scale: (Int) -> Double): Double? {
         if (!flags.hasBit(bit)) return null
         val raw = u16() ?: return null
+        if (raw == WeightMeasurementParser.VALUE_UNKNOWN) return null
         return scale(raw)
     }
 }

@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.data
 
+import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -24,6 +25,130 @@ class ScaleProfileCodecTest {
         lastVerifiedAtMillis = 2_000L,
         initializationIncomplete = false,
     )
+
+    // --- TS-H3: an unreadable stored blob must never be mistaken for an empty registry.
+
+    @Test
+    fun readStoredReportsAbsentOnlyWhenNothingHasEverBeenWritten() {
+        assertEquals(ScaleProfileCodec.StoredProfiles.Absent, ScaleProfileCodec.readStored(null))
+    }
+
+    @Test
+    fun readStoredParsesAWellFormedBlob() {
+        val stored = ScaleProfileCodec.readStored(ScaleProfileCodec.encodeToString(listOf(profile())))
+
+        val parsed = stored as ScaleProfileCodec.StoredProfiles.Parsed
+        assertEquals(listOf(profile()), parsed.profiles)
+    }
+
+    /**
+     * The live TS-H3 scenario: a validation rule added after data was stored.
+     * The blob is intact and the address is simply one this build now rejects;
+     * reporting an empty registry would let the next write erase it.
+     */
+    @Test
+    fun readStoredReportsUnreadableForAnAddressThisBuildNowRejects() {
+        val blob = ScaleProfileCodec.encodeToString(listOf(profile()))
+            .replace("AA:BB:CC:DD:EE:FF", "AA-BB-CC-DD-EE-FF")
+
+        val stored = ScaleProfileCodec.readStored(blob)
+
+        assertEquals(blob, (stored as ScaleProfileCodec.StoredProfiles.Unreadable).raw)
+    }
+
+    @Test
+    fun readStoredReportsUnreadableForEveryShapeFailureRatherThanThrowing() {
+        val blobs = listOf(
+            "not json at all",
+            "{}",
+            "[42]",
+            """[{"id":"a"}]""",
+            ScaleProfileCodec.encodeToString(listOf(profile()))
+                .replace(""""registered":1000""", """"registered":"x""""),
+        )
+
+        blobs.forEach { blob ->
+            assertTrue(
+                "must classify rather than throw: $blob",
+                ScaleProfileCodec.readStored(blob) is ScaleProfileCodec.StoredProfiles.Unreadable,
+            )
+        }
+    }
+
+    // --- S1: a decoded profile comes from an imported backup file, so decode is a trust boundary.
+
+    @Test(expected = IllegalArgumentException::class)
+    fun decodeRejectsAMalformedDeviceAddress() {
+        val json = ScaleProfileCodec.encodeToString(listOf(profile()))
+            .replace("AA:BB:CC:DD:EE:FF", "not-an-address")
+        ScaleProfileCodec.decodeFromString(json)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun decodeRejectsAnOutOfRangeScaleIndex() {
+        val json = ScaleProfileCodec.encodeToString(listOf(profile(scaleIndex = 1)))
+            .replace("\"index\":1", "\"index\":256")
+        ScaleProfileCodec.decodeFromString(json)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun decodeRejectsAnOutOfRangeConsentCode() {
+        val json = ScaleProfileCodec.encodeToString(listOf(profile(consentCode = 4321)))
+            .replace("\"code\":4321", "\"code\":65536")
+        ScaleProfileCodec.decodeFromString(json)
+    }
+
+    @Test
+    fun decodeNormalisesAddressCaseSoComparisonsAreStable() {
+        val json = ScaleProfileCodec.encodeToString(listOf(profile()))
+            .replace("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff")
+        assertEquals("AA:BB:CC:DD:EE:FF", ScaleProfileCodec.decodeFromString(json).single().deviceAddress)
+    }
+
+    // --- H5: the migration rule, split out of credentialFor so a read never writes.
+
+    @Test
+    fun legacyMigrationProfileBuildsAnActiveProfileFromTheLegacyCredential() {
+        val migrated = ScaleProfileCodec.legacyMigrationProfile(
+            current = emptyList(),
+            deviceAddress = "aa:bb:cc:dd:ee:ff",
+            legacy = ScaleCredential(scaleIndex = 3, consentCode = 999),
+            id = "new-id",
+            nowMillis = 42L,
+        )
+        assertEquals("AA:BB:CC:DD:EE:FF", migrated?.deviceAddress)
+        assertEquals(3, migrated?.scaleIndex)
+        assertEquals(999, migrated?.consentCode)
+        assertEquals(42L, migrated?.registeredAtMillis)
+        assertTrue(migrated?.active == true)
+    }
+
+    @Test
+    fun legacyMigrationProfileIsNullWhenAnActiveProfileAlreadyCoversTheAddress() {
+        val existing = listOf(profile(deviceAddress = "AA:BB:CC:DD:EE:FF", active = true))
+        assertNull(
+            ScaleProfileCodec.legacyMigrationProfile(
+                current = existing,
+                deviceAddress = "aa:bb:cc:dd:ee:ff",
+                legacy = ScaleCredential(scaleIndex = 3, consentCode = 999),
+                id = "new-id",
+                nowMillis = 42L,
+            ),
+        )
+    }
+
+    @Test
+    fun legacyMigrationProfileIsNullWhenTheLegacyStoreHasNothing() {
+        assertNull(
+            ScaleProfileCodec.legacyMigrationProfile(
+                current = emptyList(),
+                deviceAddress = "AA:BB:CC:DD:EE:FF",
+                legacy = null,
+                id = "new-id",
+                nowMillis = 42L,
+            ),
+        )
+    }
 
     @Test
     fun encodeThenDecodeRoundTripsEveryField() {

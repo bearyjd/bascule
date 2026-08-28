@@ -50,6 +50,9 @@ internal class MeasurementCorrelator(
 
     private val correlationClosed: Boolean get() = emissions >= MAX_EMISSIONS_PER_SESSION
 
+    /** True while a completed weight is buffered waiting for its body-composition pair. */
+    val hasPendingCorrelation: Boolean get() = pendingWeight != null
+
     fun onWeight(measurement: WeightMeasurement): DecodeEvent {
         val identity = FrameIdentity(measurement)
         if (identity in emittedFrames || identity == pendingWeight?.let(::FrameIdentity)) {

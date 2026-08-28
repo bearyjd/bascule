@@ -2,4 +2,12 @@
 <resources>
     <string name="app_name">Bascule</string>
     <string name="add_weight_fab">Add a weight entry</string>
+
+    <string name="scale_bridge_channel">Scale bridge</string>
+    <string name="scale_bridge_title">Scale bridge active</string>
+    <string name="scale_bridge_text">Waiting for the configured scale</string>
+
+    <string name="scale_capture_channel">Scale capture</string>
+    <string name="scale_capture_title">Connecting to scale</string>
+    <string name="scale_capture_text">Capturing a measurement</string>
 </resources>

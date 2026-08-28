@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.data.fake
 
+import com.ventouxlabs.bascule.ble.session.ConsentStore
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.data.ScaleProfileCodec
@@ -8,15 +9,35 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /** In-memory [ScaleProfileStore] for JVM tests — no EncryptedSharedPreferences/Keystore needed. */
-class FakeScaleProfileStore(initial: List<ScaleProfile> = emptyList()) : ScaleProfileStore {
+class FakeScaleProfileStore(
+    initial: List<ScaleProfile> = emptyList(),
+    private val legacy: ConsentStore? = null,
+    override val readFailure: Throwable? = null,
+) : ScaleProfileStore {
 
     private val mutableProfiles = MutableStateFlow(initial)
     override val profiles: StateFlow<List<ScaleProfile>> = mutableProfiles
     private val mutableActive = MutableStateFlow(initial.firstOrNull { it.active })
     override val activeProfile: StateFlow<ScaleProfile?> = mutableActive
 
-    override fun credentialFor(deviceAddress: String): ScaleCredential? =
-        mutableProfiles.value.firstOrNull { it.deviceAddress.equals(deviceAddress, true) && it.active }?.credential
+    override fun credentialFor(deviceAddress: String): ScaleCredential? {
+        val matches = mutableProfiles.value.filter { it.deviceAddress.equals(deviceAddress, true) }
+        return (matches.firstOrNull { it.active } ?: matches.firstOrNull())?.credential
+            ?: legacy?.credentialFor(deviceAddress)
+    }
+
+    override fun migrateLegacyCredential(deviceAddress: String) {
+        ScaleProfileCodec.legacyMigrationProfile(
+            current = mutableProfiles.value,
+            deviceAddress = deviceAddress,
+            legacy = legacy?.credentialFor(deviceAddress),
+            id = "migrated-$deviceAddress",
+            nowMillis = 0L,
+        )?.let {
+            saveProfile(it)
+            legacy?.clear(deviceAddress)
+        }
+    }
 
     override fun credentialFor(deviceAddress: String, scaleIndex: Int): ScaleCredential? =
         mutableProfiles.value.firstOrNull {
@@ -47,6 +68,7 @@ class FakeScaleProfileStore(initial: List<ScaleProfile> = emptyList()) : ScalePr
     override fun newConsentCode(): Int = FIXED_CONSENT_CODE
 
     override fun saveProfile(profile: ScaleProfile) {
+        ScaleProfileCodec.requireWithinBounds(profile)
         persist(ScaleProfileCodec.upsertEnforcingSingleActive(mutableProfiles.value, profile))
     }
 
@@ -55,10 +77,13 @@ class FakeScaleProfileStore(initial: List<ScaleProfile> = emptyList()) : ScalePr
     }
 
     override fun setActive(profileId: String) {
+        require(mutableProfiles.value.any { it.id == profileId }) { "No profile with id $profileId" }
         persist(mutableProfiles.value.map { it.copy(active = it.id == profileId) })
     }
 
     override fun replaceAll(profiles: List<ScaleProfile>) {
+        require(profiles.count { it.active } <= 1) { "At most one profile may be active" }
+        profiles.forEach(ScaleProfileCodec::requireWithinBounds)
         persist(profiles.distinctBy { it.id })
     }
 

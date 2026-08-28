@@ -8,7 +8,7 @@ import androidx.compose.material.icons.filled.MonitorWeight
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
- * The app's three top-level, peer screens — no destination is nested under
+ * The app's four top-level, peer screens — no destination is nested under
  * another, so a flat bottom-navigation bar is the lowest-friction shell:
  * every screen is one tap away from every other, always.
  */

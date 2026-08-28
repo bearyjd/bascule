@@ -1,5 +1,3 @@
-@file:Suppress("MaxLineLength")
-
 package com.ventouxlabs.bascule.ble
 
 import android.annotation.SuppressLint
@@ -28,14 +26,29 @@ class ScaleScanner(context: Context, private val config: ConfigStore, private va
     suspend fun arm(): Boolean {
         if (!config.automaticCaptureEnabled.first()) return false
         val profile = profiles.activeProfile.value ?: return false
-        val filter = ScanFilter.Builder().setDeviceAddress(profile.deviceAddress)
-            .setServiceUuid(ParcelUuid(SigWeightProfile.WEIGHT_SCALE_SERVICE)).build()
-        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build()
-        return runCatching { scanner?.startScan(listOf(filter), settings, pendingIntent) == 0 }.getOrDefault(false)
+        // Inside the guard, not before it: setDeviceAddress throws
+        // IllegalArgumentException on a malformed address, and a stored profile
+        // can carry one. arm() runs inside BasculeApplication's launch, where an
+        // escaping throwable kills the process on every launch.
+        return runCatching {
+            val filter = ScanFilter.Builder().setDeviceAddress(profile.deviceAddress)
+                .setServiceUuid(ParcelUuid(SigWeightProfile.WEIGHT_SCALE_SERVICE)).build()
+            val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build()
+            // Re-arming reuses one PendingIntent identity with a different filter,
+            // which the platform may either ignore (leaving the previous profile's
+            // address filtered, so capture silently stops) or reject with
+            // SCAN_FAILED_ALREADY_STARTED. Dropping the old registration first is
+            // correct under either behavior.
+            disarm()
+            scanner?.startScan(listOf(filter), settings, pendingIntent) == 0
+        }.getOrDefault(false)
     }
 
     @SuppressLint("MissingPermission")
     fun disarm() { runCatching { scanner?.stopScan(pendingIntent) } }
 
-    companion object { const val ACTION_SCAN = "com.ventouxlabs.bascule.SCALE_SCAN"; private const val REQUEST_CODE = 720 }
+    companion object {
+        const val ACTION_SCAN = "com.ventouxlabs.bascule.SCALE_SCAN"
+        private const val REQUEST_CODE = 720
+    }
 }

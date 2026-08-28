@@ -12,6 +12,7 @@ import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
 import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.ble.session.AndroidGattTransport
 import com.ventouxlabs.bascule.ble.session.ConsentStore
+import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.ble.session.GattSession
 import com.ventouxlabs.bascule.ble.session.SessionOutcome
 import com.ventouxlabs.bascule.ble.session.ScaleOperationCoordinator
@@ -75,16 +76,8 @@ class AndroidScaleRegistrar(
         forceNew: Boolean,
     ): ScaleRegistrationResult {
         val address = device.device.address
-        var newlySavedCredential: com.ventouxlabs.bascule.ble.session.ScaleCredential? = null
-        val sessionConsentStore = if (!forceNew) consentStore else object : ConsentStore {
-            override fun credentialFor(deviceAddress: String) = null
-            override fun save(deviceAddress: String, credential: com.ventouxlabs.bascule.ble.session.ScaleCredential) {
-                newlySavedCredential = credential
-                consentStore.save(deviceAddress, credential)
-            }
-            override fun clear(deviceAddress: String) = Unit
-            override fun newConsentCode(): Int = consentStore.newConsentCode()
-        }
+        val forcedNewRegistration = ForceNewRegistrationConsentStore(consentStore)
+        val sessionConsentStore = if (forceNew) forcedNewRegistration else consentStore
         val session = GattSession(
             transport = AndroidGattTransport(appContext, device.device, adapter),
             decoder = BeurerDecoder(),
@@ -99,8 +92,13 @@ class AndroidScaleRegistrar(
         } catch (_: SecurityException) {
             return ScaleRegistrationResult.Failure("Bluetooth permission was revoked during registration")
         }
-        val credential = newlySavedCredential ?: consentStore.credentialFor(address)
-        if (credential != null) {
+        // The outcome decides success; the credential only supplies the slot
+        // number. credentialFor matches on address alone, so a credential left
+        // over from an earlier registration is returned whether or not *this*
+        // session got anywhere — reading its presence as success would report a
+        // rejected scale as registered.
+        val credential = forcedNewRegistration.savedCredential ?: consentStore.credentialFor(address)
+        if (outcome is SessionOutcome.Completed && credential != null) {
             configStore.savePairedDeviceAddress(address)
             return ScaleRegistrationResult.Success(address, credential.scaleIndex)
         }
@@ -110,9 +108,37 @@ class AndroidScaleRegistrar(
                 SessionOutcome.Incompatible -> "The discovered device is not a compatible BF720"
                 is SessionOutcome.Missed -> "Registration did not complete (${outcome.reason.name.lowercase()})"
                 is SessionOutcome.DecodeFailure -> "The scale returned an unreadable registration response"
+                // Reachable only with credential == null: the guard above
+                // already returned Success for a Completed session that did
+                // produce a slot. Completed.reading is irrelevant here —
+                // registration runs with stopAfterHandshake, so it is always
+                // null, and the slot is what this path is waiting on.
                 is SessionOutcome.Completed -> "Registration finished without a user slot"
             },
         )
+    }
+
+    /**
+     * Hides any stored credential from the session so the decoder registers a
+     * fresh user slot instead of consenting with the old one, while recording
+     * what the scale assigned. Named rather than an anonymous object so the
+     * "forget the old credential but remember the new one" rule can be read —
+     * and tested — on its own.
+     */
+    private class ForceNewRegistrationConsentStore(private val delegate: ConsentStore) : ConsentStore {
+        var savedCredential: ScaleCredential? = null
+            private set
+
+        override fun credentialFor(deviceAddress: String): ScaleCredential? = null
+
+        override fun save(deviceAddress: String, credential: ScaleCredential) {
+            savedCredential = credential
+            delegate.save(deviceAddress, credential)
+        }
+
+        override fun clear(deviceAddress: String) = Unit
+
+        override fun newConsentCode(): Int = delegate.newConsentCode()
     }
 
     @SuppressLint("MissingPermission")

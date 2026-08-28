@@ -56,8 +56,16 @@ internal object SigWeightProfile {
     /** Response value meaning the request succeeded. */
     const val UCP_RESPONSE_SUCCESS = 0x01
 
+    /** User indices are 8-bit (User Data Service 1.0 §4.9). */
+    const val SCALE_INDEX_MIN = 0
+    const val SCALE_INDEX_MAX = 255
+
     /** Consent codes are 16-bit (User Data Service 1.0 §4.10.2). */
+    const val CONSENT_CODE_MIN = 0
     const val CONSENT_CODE_MAX = 0xFFFF
+
+    val SCALE_INDEX_RANGE = SCALE_INDEX_MIN..SCALE_INDEX_MAX
+    val CONSENT_CODE_RANGE = CONSENT_CODE_MIN..CONSENT_CODE_MAX
 
     /**
      * Weight Measurement resolution. The SIG format fixes these per unit system:

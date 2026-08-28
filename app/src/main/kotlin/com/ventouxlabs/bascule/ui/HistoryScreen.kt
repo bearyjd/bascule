@@ -32,7 +32,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
-import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import java.util.concurrent.TimeUnit
 
@@ -234,25 +233,5 @@ private fun statusColors(status: ReadingStatus): Pair<Color, Color> = when (stat
         MaterialTheme.colorScheme.surface to MaterialTheme.colorScheme.onSurface
 }
 
-private fun formatWeight(reading: ReadingEntity): String {
-    val unit = WeightUnit.entries.firstOrNull { it.wire == reading.displayUnit } ?: WeightUnit.KILOGRAMS
-    return "%.1f".format(unit.fromKilograms(reading.weightKg))
-}
-
-/** Coarse, dependency-free relative-age formatting — no locale-aware library is in this project's dependency set. */
-private fun formatRelativeAge(millis: Long): String {
-    val minutes = TimeUnit.MILLISECONDS.toMinutes(millis)
-    val hours = TimeUnit.MILLISECONDS.toHours(millis)
-    val days = TimeUnit.MILLISECONDS.toDays(millis)
-    return when {
-        minutes < 1 -> "just now"
-        minutes < MINUTES_PER_HOUR -> "${minutes}m"
-        hours < HOURS_PER_DAY -> "${hours}h"
-        else -> "${days}d"
-    }
-}
-
-private const val MINUTES_PER_HOUR = 60
-private const val HOURS_PER_DAY = 24
 private const val STATUS_LABEL_BACKGROUND_ALPHA = 0.6f
 private val PENDING_BACKLOG_WARNING_MILLIS = TimeUnit.HOURS.toMillis(1)

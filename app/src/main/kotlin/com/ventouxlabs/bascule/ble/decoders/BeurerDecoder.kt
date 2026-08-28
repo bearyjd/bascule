@@ -1,5 +1,3 @@
-@file:Suppress("ReturnCount")
-
 package com.ventouxlabs.bascule.ble.decoders
 
 import com.ventouxlabs.bascule.ble.session.DecodeEvent
@@ -126,6 +124,8 @@ class BeurerDecoder(
         return HandshakeDirective.Send(consentWrite(credential), ACK_TIMEOUT)
     }
 
+    // One exit per distinct UDS consent response the scale can send.
+    @Suppress("ReturnCount")
     private fun onConsentEvent(
         state: HandshakeState.AwaitingConsent,
         event: DecodeEvent,
@@ -206,7 +206,7 @@ class BeurerDecoder(
             return malformed("weight frame too short", null, value.size)
         }
         val parsed = WeightMeasurementParser.parse(value)
-            ?: return malformed("weight frame truncated for its flags", null, value.size)
+            ?: return malformed("weight frame truncated for its flags, or no usable weight", null, value.size)
         return correlator.onWeight(parsed)
     }
 
@@ -218,6 +218,8 @@ class BeurerDecoder(
             ?: return malformed("body composition frame truncated for its flags", null, value.size)
         return correlator.onBodyComposition(parsed)
     }
+
+    override val hasPendingCorrelation: Boolean get() = correlator.hasPendingCorrelation
 
     override fun flush(): DecodeEvent? = correlator.flush()
 

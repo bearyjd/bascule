@@ -1,5 +1,3 @@
-@file:Suppress("MagicNumber")
-
 package com.ventouxlabs.bascule.delivery
 
 import android.content.Context
@@ -32,7 +30,13 @@ class WorkManagerDeliveryScheduler(context: Context) : DeliveryScheduler {
         manager.enqueueUniquePeriodicWork(
             DeliveryWorker.PERIODIC_WORK_NAME,
             ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<DeliveryWorker>(15, TimeUnit.MINUTES).setConstraints(network).build(),
+            PeriodicWorkRequestBuilder<DeliveryWorker>(DRAIN_INTERVAL_MINUTES, TimeUnit.MINUTES)
+                .setConstraints(network).build(),
         )
+    }
+
+    private companion object {
+        /** WorkManager's own floor for periodic work; anything shorter is silently raised to it. */
+        const val DRAIN_INTERVAL_MINUTES = 15L
     }
 }

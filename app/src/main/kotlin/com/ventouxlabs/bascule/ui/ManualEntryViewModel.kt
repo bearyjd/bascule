@@ -36,6 +36,7 @@ data class ManualEntryUiState(
 class ManualEntryViewModel(
     private val dao: ReadingDao,
     configStore: ConfigStore,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
     private val deliveryTrigger: DeliveryTrigger? = null,
 ) : ViewModel() {
 
@@ -88,7 +89,7 @@ class ManualEntryViewModel(
         }
 
         val weightKg = state.unit.toKilograms(parsed)
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
         val reading = ReadingEntity(
             id = UUID.randomUUID().toString(),
             capturedAtMillis = now,
@@ -126,20 +127,21 @@ class ManualEntryViewModel(
         }
     }
 
-    private fun minPlausibleForUnit(unit: WeightUnit): Double = unit.fromKilograms(MIN_PLAUSIBLE_WEIGHT_KG)
-    private fun maxPlausibleForUnit(unit: WeightUnit): Double = unit.fromKilograms(MAX_PLAUSIBLE_WEIGHT_KG)
+    private fun minPlausibleForUnit(unit: WeightUnit): Double =
+        unit.fromKilograms(WeightUnit.MIN_PLAUSIBLE_WEIGHT_KG)
+
+    private fun maxPlausibleForUnit(unit: WeightUnit): Double =
+        unit.fromKilograms(WeightUnit.MAX_PLAUSIBLE_WEIGHT_KG)
 
     companion object {
-        // A bathroom scale's plausible human range, generous on both ends
-        // rather than tuned to any one body type. Kilograms is the boundary
-        // that matters for storage; per-unit bounds are derived from it so
-        // both display units reject the same physical range, not the same
-        // raw number.
-        const val MIN_PLAUSIBLE_WEIGHT_KG = 20.0
-        const val MAX_PLAUSIBLE_WEIGHT_KG = 300.0
-
         fun factory(app: BasculeApplication) = viewModelFactory {
-            initializer { ManualEntryViewModel(app.database.readingDao(), app.configStore, app.deliveryTrigger) }
+            initializer {
+                ManualEntryViewModel(
+                    app.database.readingDao(),
+                    app.configStore,
+                    deliveryTrigger = app.deliveryTrigger,
+                )
+            }
         }
     }
 }

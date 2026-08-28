@@ -4,7 +4,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,7 +52,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.WeightUnit
-import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.network.ContractVersion
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.Dispatchers
@@ -120,7 +119,7 @@ fun ConfigScreen(
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
+internal fun SectionCard(title: String, content: @Composable () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -129,32 +128,61 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
     }
 }
 
-@Composable
-@Suppress("LongMethod") // Permission launchers and their SDK-specific UI are intentionally colocated.
-private fun PermissionSection(requester: PermissionRequester) {
-    var pending by remember { mutableStateOf(requester.firstDialogPermissions()) }
-    // Must reflect requester's actual state on first composition, not just
-    // after the first-dialog callback fires — a returning user on API 29/30
-    // who already granted fine location in a prior session composes straight
-    // into this state, and initializing to false would hide the second
-    // dialog forever (there's no other path that ever sets it true).
-    var awaitingBackgroundLocation by remember { mutableStateOf(requester.secondDialogPermission() != null) }
-    val lifecycleOwner = LocalLifecycleOwner.current
+/**
+ * Everything [PermissionRequester] knows, as plain data rather than state
+ * private to one composable. Hoisted so a screen other than Settings can name
+ * the permission that is actually missing — `ScaleViewModel` currently reports
+ * only the generic "Background scan could not be armed. Check Bluetooth and
+ * permissions." because this knowledge was reachable from nowhere else.
+ */
+internal data class PermissionUiState(
+    val pendingPermissions: List<String> = emptyList(),
+    val awaitingBackgroundLocation: Boolean = false,
+    val needsLocationRationale: Boolean = false,
+    val backgroundLocationRequiresSettings: Boolean = false,
+) {
+    val allGranted: Boolean get() = pendingPermissions.isEmpty() && !awaitingBackgroundLocation
+}
 
+internal fun PermissionRequester.uiState() = PermissionUiState(
+    pendingPermissions = firstDialogPermissions(),
+    awaitingBackgroundLocation = secondDialogPermission() != null,
+    needsLocationRationale = needsLocationRationale(),
+    backgroundLocationRequiresSettings = backgroundLocationRequiresSettings(),
+)
+
+/**
+ * Seeded from [requester] rather than from a blank default, so a returning
+ * user on API 29/30 who granted fine location in a prior session composes
+ * straight into the awaiting-background-location state — initializing that to
+ * false would hide the second dialog forever, since no other path sets it true.
+ *
+ * Re-derived on every `ON_RESUME` because permissions can be granted or
+ * revoked in system Settings while this screen is backgrounded. The returned
+ * state is mutable so a permission-result callback can refresh it too.
+ */
+@Composable
+internal fun rememberPermissionUiState(requester: PermissionRequester): MutableState<PermissionUiState> {
+    val state = remember(requester) { mutableStateOf(requester.uiState()) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, requester) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                pending = requester.firstDialogPermissions()
-                awaitingBackgroundLocation = requester.secondDialogPermission() != null
-            }
+            if (event == Lifecycle.Event.ON_RESUME) state.value = requester.uiState()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+    return state
+}
+
+@Composable
+@Suppress("LongMethod") // Permission launchers and their SDK-specific UI are intentionally colocated.
+private fun PermissionSection(requester: PermissionRequester) {
+    val permissionState = rememberPermissionUiState(requester)
+    val permissions = permissionState.value
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        pending = requester.firstDialogPermissions()
-        awaitingBackgroundLocation = requester.secondDialogPermission() != null
+        permissionState.value = requester.uiState()
     }
     val backgroundLocationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -163,13 +191,13 @@ private fun PermissionSection(requester: PermissionRequester) {
         // must not permanently hide this prompt, since the user can still
         // grant it later from system settings and the app should offer it
         // again on the next composition.
-        awaitingBackgroundLocation = requester.secondDialogPermission() != null
+        permissionState.value = requester.uiState()
     }
 
-    if (pending.isEmpty() && !awaitingBackgroundLocation) return
+    if (permissions.allGranted) return
 
     SectionCard(title = "Permissions needed") {
-        if (requester.needsLocationRationale() && pending.isNotEmpty()) {
+        if (permissions.needsLocationRationale && permissions.pendingPermissions.isNotEmpty()) {
             Text(
                 "Bascule asks for location because Android requires it to detect nearby Bluetooth " +
                     "devices on this version of Android — it is never used to track where you are.",
@@ -177,18 +205,18 @@ private fun PermissionSection(requester: PermissionRequester) {
                 modifier = Modifier.padding(bottom = 12.dp),
             )
         }
-        if (pending.isNotEmpty()) {
-            Button(onClick = { launcher.launch(pending.toTypedArray()) }) {
+        if (permissions.pendingPermissions.isNotEmpty()) {
+            Button(onClick = { launcher.launch(permissions.pendingPermissions.toTypedArray()) }) {
                 Text("Grant permissions")
             }
-        } else if (awaitingBackgroundLocation) {
+        } else if (permissions.awaitingBackgroundLocation) {
             Text(
                 "One more: allow background location so weigh-ins are detected even when Bascule " +
                     "isn't open.",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
-            if (requester.backgroundLocationRequiresSettings()) {
+            if (permissions.backgroundLocationRequiresSettings) {
                 // On API 30 the runtime dialog can no longer grant "Allow all
                 // the time" at all — only the app's own Settings screen can.
                 val context = LocalContext.current
@@ -490,150 +518,6 @@ private fun LoginEditForm(
 }
 
 @Composable
-@Suppress("LongMethod", "CyclomaticComplexMethod") // UI states mirror the registration state machine directly.
-internal fun RegisteredScaleSection(
-    pairedDeviceAddress: String?,
-    registeredUserIndex: Int?,
-    registration: ScaleRegistrationUiState,
-    onRegister: (Boolean) -> Unit,
-    onLinkExisting: (String, String, String) -> Unit,
-    onReRegister: (String) -> Unit,
-) {
-    var showWarning by remember { mutableStateOf(false) }
-    var showExisting by remember { mutableStateOf(false) }
-    val busy = registration == ScaleRegistrationUiState.Scanning ||
-        registration == ScaleRegistrationUiState.Connecting
-
-    SectionCard(title = "Scale registration") {
-        Text(
-            registeredUserIndex?.let { "Registered as user slot $it" } ?: "Not registered with a scale yet",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        when (registration) {
-            ScaleRegistrationUiState.Idle -> Unit
-            ScaleRegistrationUiState.Scanning -> Text("Scanning… wake or step on the scale.")
-            ScaleRegistrationUiState.Connecting -> Text("Scale found — registering…")
-            is ScaleRegistrationUiState.Success -> Text(
-                "Connected to ${registration.address}; user slot ${registration.scaleIndex} is saved.",
-                color = MaterialTheme.colorScheme.primary,
-            )
-            is ScaleRegistrationUiState.Failure -> Text(
-                registration.message,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        if (registeredUserIndex == null) {
-            Row(modifier = Modifier.padding(top = 8.dp)) {
-                Button(onClick = { showWarning = true }, enabled = !busy) {
-                    Text("Register scale")
-                }
-                OutlinedButton(
-                    onClick = { showExisting = true },
-                    enabled = !busy,
-                    modifier = Modifier.padding(start = 8.dp),
-                ) {
-                    Text("Use existing")
-                }
-            }
-        } else if (pairedDeviceAddress != null) {
-            OutlinedButton(
-                onClick = { showWarning = true },
-                enabled = !busy,
-                modifier = Modifier.padding(top = 8.dp),
-            ) {
-                Text("Re-register with the scale")
-            }
-        }
-    }
-
-    if (showWarning) {
-        val replacing = registeredUserIndex != null && pairedDeviceAddress != null
-        AlertDialog(
-            onDismissRequest = { showWarning = false },
-            title = { Text(if (replacing) "Re-register with the scale?" else "Register a scale?") },
-            text = {
-                Text(
-                    if (replacing) {
-                        "The BF720 only has 8 user slots. Re-registering uses one of them, and the old " +
-                            "slot is left behind on the scale until it's overwritten or reset."
-                    } else {
-                        "Wake or step on the BF720 after continuing. Registration uses one of the scale's " +
-                            "8 user slots and securely saves the assigned slot on this device."
-                    },
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (replacing) onReRegister(requireNotNull(pairedDeviceAddress)) else onRegister(false)
-                    showWarning = false
-                }) { Text(if (replacing) "Re-register" else "Start scanning") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showWarning = false }) { Text("Cancel") }
-            },
-        )
-    }
-
-    if (showExisting) {
-        ExistingScaleDialog(
-            onDismiss = { showExisting = false },
-            onConfirm = { address, index, code ->
-                onLinkExisting(address, index, code)
-                showExisting = false
-            },
-        )
-    }
-}
-
-@Composable
-private fun ExistingScaleDialog(
-    onDismiss: () -> Unit,
-    onConfirm: (String, String, String) -> Unit,
-) {
-    var address by remember { mutableStateOf("") }
-    var index by remember { mutableStateOf("") }
-    var consentCode by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Use existing registration") },
-        text = {
-            Column {
-                Text("Enter a previously exported or recorded scale mapping. This does not use a new scale slot.")
-                OutlinedTextField(
-                    value = address,
-                    onValueChange = { address = it },
-                    label = { Text("Bluetooth address") },
-                    singleLine = true,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                OutlinedTextField(
-                    value = index,
-                    onValueChange = { index = it },
-                    label = { Text("User slot") },
-                    singleLine = true,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                OutlinedTextField(
-                    value = consentCode,
-                    onValueChange = { consentCode = it },
-                    label = { Text("Consent code") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onConfirm(address, index, consentCode) },
-                enabled = address.isNotBlank() && index.isNotBlank() && consentCode.isNotBlank(),
-            ) { Text("Save mapping") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
 @Suppress("LongMethod") // Document launchers must retain the same remembered transfer state.
 private fun SettingsTransferSection(
     onExport: suspend (String) -> Result<ByteArray>,
@@ -727,20 +611,6 @@ private fun SettingsTransferSection(
 
 private enum class SettingsDialogMode { EXPORT, IMPORT }
 
-private fun InputStream.readSettingsBackup(): ByteArray {
-    val output = ByteArrayOutputStream()
-    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-    var total = 0
-    while (true) {
-        val count = read(buffer)
-        if (count < 0) break
-        total += count
-        require(total <= SettingsBackupCodec.MAX_BACKUP_BYTES) { "Settings backup is too large" }
-        output.write(buffer, 0, count)
-    }
-    return output.toByteArray()
-}
-
 @Composable
 private fun PassphraseDialog(
     confirmPassphrase: Boolean,
@@ -749,8 +619,7 @@ private fun PassphraseDialog(
 ) {
     var passphrase by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    val valid = passphrase.length >= SettingsBackupCodec.MIN_PASSPHRASE_LENGTH &&
-        (!confirmPassphrase || passphrase == confirmation)
+    val valid = isPassphraseValid(passphrase, confirmation, confirmRequired = confirmPassphrase)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },

@@ -7,7 +7,6 @@ import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.network.RecentResult
 import com.ventouxlabs.bascule.network.RuntimeApi
 import com.ventouxlabs.bascule.network.SubmitResult
-import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -28,22 +27,51 @@ class DeliveryDrainer(
         data object Continue : RowOutcome
         data object StopDrain : RowOutcome
         data object RequestRetry : RowOutcome
+
+        /**
+         * The server asked us to slow down (`Retry-After`). Submitting the rest
+         * of the batch would walk straight into the same rate limit, so the pass
+         * ends here and asks to be resumed later.
+         *
+         * Unlike [StopDrain] this still requests a retry, so WorkManager's own
+         * ladder keeps waking the worker while the row is parked. Those wakeups
+         * are no-ops that stop at the `pending()` query above, and they track the
+         * server's deadline far more closely than the 15-minute periodic drain
+         * would — and any earlier row in this pass that failed transiently keeps
+         * the retry it asked for rather than having it discarded here.
+         */
+        data object BackOffDrain : RowOutcome
     }
 
-    /** Returns true if the caller should retry the drain (a transient failure occurred). */
+    /**
+     * Returns true if the caller should retry the drain — either a transient
+     * failure occurred, or the batch filled up and rows remain to be drained.
+     *
+     * Only rows whose §3.4 backoff has elapsed are selected, so an unrelated
+     * trigger (a manual entry saved, a token saved, a scale capture, a History
+     * retry tap) no longer resubmits the whole pending set on top of a backoff
+     * that has not run out.
+     */
     suspend fun drain(): Boolean {
-        val pending = dao.pending()
+        val batchLimit = DeliveryCoordinator.DRAIN_BATCH_LIMIT
+        val pending = dao.pending(clock(), batchLimit)
+        // Nothing due: returns before `recentReadings`, so a drain triggered while
+        // every row is still backing off costs one indexed query and no network.
         if (pending.isEmpty()) return false
         val remote = runtime.api.recentReadings(DedupPolicy.TIME_WINDOW_MILLIS.milliseconds)
         var retryNeeded = false
         for (row in pending) {
             when (processRow(row, remote, clock())) {
                 RowOutcome.StopDrain -> return false
+                RowOutcome.BackOffDrain -> return true
                 RowOutcome.RequestRetry -> retryNeeded = true
                 RowOutcome.Continue -> Unit
             }
         }
-        return retryNeeded
+        // A full batch means the query hit its LIMIT, not that the queue is
+        // empty. Ask to be run again rather than letting the 10-minute
+        // WorkManager ceiling be what decides where this drain stopped.
+        return retryNeeded || pending.size == batchLimit
     }
 
     private suspend fun processRow(row: ReadingEntity, remote: RecentResult, now: Long): RowOutcome {
@@ -66,8 +94,7 @@ class DeliveryDrainer(
 
     private fun isRemoteDuplicate(row: ReadingEntity, remote: RecentResult): Boolean =
         remote is RecentResult.Readings && remote.readings.any {
-            abs(it.weightKg - row.weightKg) <= DedupPolicy.WEIGHT_TOLERANCE_KG &&
-                abs(it.capturedAtMillis - row.capturedAtMillis) <= DedupPolicy.TIME_WINDOW_MILLIS
+            DedupPolicy.withinTolerance(it.weightKg, row.weightKg, it.capturedAtMillis, row.capturedAtMillis)
         }
 
     private suspend fun applySubmitResult(row: ReadingEntity, result: SubmitResult, now: Long): RowOutcome {
@@ -97,15 +124,21 @@ class DeliveryDrainer(
                 ),
             )
             is SubmitResult.TransientFailure -> {
+                val attemptCount = row.attemptCount + 1
                 dao.update(
                     row.copy(
-                        attemptCount = row.attemptCount + 1,
+                        attemptCount = attemptCount,
                         lastAttemptMillis = now,
                         lastError = result.reason,
                         lastErrorClass = ErrorClass.TRANSIENT,
+                        nextAttemptMillis = DeliveryCoordinator.nextAttemptMillis(
+                            now = now,
+                            attemptCount = attemptCount,
+                            retryAfter = result.retryAfter,
+                        ),
                     ),
                 )
-                return RowOutcome.RequestRetry
+                return if (result.retryAfter != null) RowOutcome.BackOffDrain else RowOutcome.RequestRetry
             }
         }
         return RowOutcome.Continue

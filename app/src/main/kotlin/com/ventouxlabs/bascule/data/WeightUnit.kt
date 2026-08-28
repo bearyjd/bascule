@@ -32,5 +32,16 @@ enum class WeightUnit(val wire: String) {
 
         /** VitalForge stores one decimal more than any scale resolves. */
         const val WIRE_SCALE = 2
+
+        // A bathroom scale's plausible human range, generous on both ends
+        // rather than tuned to any one body type. Kilograms is the boundary
+        // that matters for storage; per-unit bounds are derived from it so
+        // both display units reject the same physical range, not the same
+        // raw number. Lives here rather than on either caller so the manual
+        // entry path and the BLE ingest path cannot drift apart.
+        const val MIN_PLAUSIBLE_WEIGHT_KG = 20.0
+        const val MAX_PLAUSIBLE_WEIGHT_KG = 300.0
+
+        val PLAUSIBLE_WEIGHT_KG_RANGE = MIN_PLAUSIBLE_WEIGHT_KG..MAX_PLAUSIBLE_WEIGHT_KG
     }
 }

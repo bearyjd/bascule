@@ -1,5 +1,3 @@
-@file:Suppress("MaxLineLength")
-
 package com.ventouxlabs.bascule.ui
 
 import androidx.compose.foundation.layout.Arrangement
@@ -8,9 +6,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -26,17 +26,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.data.ScaleProfile
 import androidx.compose.ui.platform.LocalContext
 import java.text.DateFormat
 import java.util.Date
 
 @Composable
-fun ScaleScreen() {
-    val app = LocalContext.current.applicationContext as BasculeApplication
-    val vm: ScaleViewModel = viewModel(factory = ScaleViewModel.factory(app))
-    val configVm: ConfigViewModel = viewModel(factory = ConfigViewModel.factory(app))
-    val state by vm.uiState.collectAsState()
-    val configState by configVm.uiState.collectAsState()
+fun ScaleScreen(
+    viewModel: ScaleViewModel = viewModel(
+        factory = ScaleViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
+    ),
+    configViewModel: ConfigViewModel = viewModel(
+        factory = ConfigViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
+    ),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val configState by configViewModel.uiState.collectAsState()
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -45,8 +50,8 @@ fun ScaleScreen() {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Capture")
-                ToggleRow("Automatic background capture", state.automaticCaptureEnabled, vm::setAutomaticCapture)
-                ToggleRow("Always-on foreground fallback", state.alwaysOnBridging, vm::setAlwaysOnBridging)
+                ToggleRow("Automatic background capture", state.automaticCaptureEnabled, viewModel::setAutomaticCapture)
+                ToggleRow("Always-on foreground fallback", state.alwaysOnBridging, viewModel::setAlwaysOnBridging)
                 Text("Pending deliveries: ${state.pendingDeliveries}")
                 Text("Last successful capture: ${state.lastCaptureMillis?.let(::formatTime) ?: "Never"}")
                 state.diagnostic?.let { Text(it) }
@@ -56,43 +61,75 @@ fun ScaleScreen() {
             pairedDeviceAddress = configState.pairedDeviceAddress,
             registeredUserIndex = configState.registeredUserIndex,
             registration = configState.scaleRegistration,
-            onRegister = configVm::startScaleRegistration,
-            onLinkExisting = configVm::linkExistingScale,
-            onReRegister = configVm::reRegister,
+            onRegister = configViewModel::startScaleRegistration,
+            onLinkExisting = configViewModel::linkExistingScale,
+            onReRegister = configViewModel::reRegister,
         )
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Profiles")
-                if (state.profiles.isEmpty()) Text("No locally known profiles. Register or link one from Settings.")
-                state.profiles.forEach { profile ->
-                    var editing by remember(profile.id, profile.label) { mutableStateOf(false) }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(profile.active, onClick = { vm.setActive(profile.id) })
-                        Column(Modifier.weight(1f)) {
-                            Text(profile.label)
-                            Text("${profile.deviceAddress} · slot ${profile.scaleIndex}")
-                            Text("Last verified: ${profile.lastVerifiedAtMillis?.let(::formatTime) ?: "Not yet"}")
-                        }
-                        TextButton(onClick = { editing = !editing }) { Text(if (editing) "Cancel" else "Rename") }
-                    }
-                    if (editing) InlineLabelEditor(profile.label) { vm.rename(profile, it); editing = false }
-                }
-                Text("Scale inventory may be incomplete until List All Users capability probing is supported.")
-            }
-        }
+        ProfilesCard(
+            profiles = state.profiles,
+            isLoading = state.isLoading,
+            onSetActive = viewModel::setActive,
+            onRename = viewModel::rename,
+        )
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Scale status")
                 Text("Battery and live database-change status are available only during a capability probe.")
-                Text("Profile deletion is disabled until consent verification and typed confirmation can be completed safely.")
+                Text(
+                    "Profile deletion is disabled until consent verification and typed " +
+                        "confirmation can be completed safely.",
+                )
             }
         }
     }
 }
 
-@Composable private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+@Composable
+private fun ProfilesCard(
+    profiles: List<ScaleProfile>,
+    isLoading: Boolean,
+    onSetActive: (String) -> Unit,
+    onRename: (ScaleProfile, String) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Profiles")
+            // "No profiles" is a claim about the registry, not about a read
+            // that has not happened yet — asserting it during the seed
+            // emission flashes the empty state on every open.
+            if (isLoading) {
+                CircularProgressIndicator(Modifier.size(PROFILE_SPINNER_SIZE))
+            } else if (profiles.isEmpty()) {
+                Text("No locally known profiles. Register or link one from Settings.")
+            }
+            profiles.forEach { profile ->
+                var editing by remember(profile.id, profile.label) { mutableStateOf(false) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(profile.active, onClick = { onSetActive(profile.id) })
+                    Column(Modifier.weight(1f)) {
+                        Text(profile.label)
+                        Text("${profile.deviceAddress} · slot ${profile.scaleIndex}")
+                        Text("Last verified: ${profile.lastVerifiedAtMillis?.let(::formatTime) ?: "Not yet"}")
+                    }
+                    TextButton(onClick = { editing = !editing }) { Text(if (editing) "Cancel" else "Rename") }
+                }
+                if (editing) {
+                    InlineLabelEditor(profile.label) { newLabel ->
+                        onRename(profile, newLabel)
+                        editing = false
+                    }
+                }
+            }
+            Text("Scale inventory may be incomplete until List All Users capability probing is supported.")
+        }
+    }
+}
+
+@Composable
+private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f)); Switch(checked, onCheckedChange = onChange)
+        Text(label, Modifier.weight(1f))
+        Switch(checked, onCheckedChange = onChange)
     }
 }
 
@@ -104,4 +141,15 @@ fun ScaleScreen() {
     }
 }
 
-private fun formatTime(millis: Long): String = DateFormat.getDateTimeInstance().format(Date(millis))
+/**
+ * Built once rather than per call: `getDateTimeInstance()` resolves a locale,
+ * a pattern and a `Calendar` each time, and [formatTime] runs once per profile
+ * row on every recomposition. `DateFormat` is not thread-safe, which is fine
+ * here — every caller is a composable, so all of them are on the composition
+ * thread.
+ */
+private val TIME_FORMAT: DateFormat = DateFormat.getDateTimeInstance()
+
+private val PROFILE_SPINNER_SIZE = 24.dp
+
+private fun formatTime(millis: Long): String = TIME_FORMAT.format(Date(millis))

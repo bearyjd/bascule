@@ -13,8 +13,10 @@ import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.data.BackupCredentialType
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.PortableSettings
+import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.SettingsBackupCodec
+import com.ventouxlabs.bascule.data.ScaleProfileCodec
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -47,7 +50,6 @@ data class ConfigUiState(
     val baseUrl: String = "",
     val displayUnit: WeightUnit = WeightUnit.KILOGRAMS,
     val contractVersion: ContractVersion = ContractVersion.V1_WEIGHT_ONLY,
-    val alwaysOnBridging: Boolean = false,
     val tokenIsSet: Boolean = false,
     val sessionIsSet: Boolean = false,
     val loginError: String? = null,
@@ -78,8 +80,14 @@ private data class StoredConfig(
     val baseUrl: String?,
     val displayUnit: WeightUnit,
     val contractVersion: ContractVersion,
-    val alwaysOnBridging: Boolean,
+)
+
+/** Everything that costs an [android.content.SharedPreferences] decrypt to read. */
+private data class CredentialState(
     val pairedDeviceAddress: String?,
+    val tokenIsSet: Boolean,
+    val sessionIsSet: Boolean,
+    val registeredUserIndex: Int?,
 )
 
 private data class TransientUiState(
@@ -113,6 +121,13 @@ class ConfigViewModel(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scaleRegistrar: ScaleRegistrar? = null,
     private val scaleProfileStore: ScaleProfileStore? = null,
+    /**
+     * Re-applies the BLE scan registration after this screen changes something
+     * `ScaleScanner.arm()` reads — the automatic-capture flag or which profile
+     * is active. Without it those changes take effect only at the next process
+     * start, leaving a scan filtered on the previous device's address.
+     */
+    private val rearmScanner: (suspend () -> Unit)? = null,
     /**
      * Contract/shaper are irrelevant to [VitalForgeApi.testConnection]/[VitalForgeApi.login]
      * (neither calls `shape()`), so they are hardcoded here rather than threaded through
@@ -150,11 +165,36 @@ class ConfigViewModel(
         configStore.baseUrl,
         configStore.displayUnit,
         configStore.contractVersion,
-        configStore.alwaysOnBridging,
-        configStore.pairedDeviceAddress,
-    ) { baseUrl, displayUnit, contractVersion, alwaysOn, pairedAddress ->
-        StoredConfig(baseUrl, displayUnit, contractVersion, alwaysOn, pairedAddress)
+    ) { baseUrl, displayUnit, contractVersion ->
+        StoredConfig(baseUrl, displayUnit, contractVersion)
     }
+
+    /**
+     * `authTokenStore.isSet()`, `sessionCookieStore.isSet()` and
+     * `consentStore.credentialFor()` are synchronous EncryptedSharedPreferences
+     * reads; `flowOn(ioDispatcher)` keeps them off the collecting (Main)
+     * dispatcher.
+     *
+     * They live in their own sub-flow rather than in [uiState]'s transform
+     * because nothing else can change them: only a version bump or a new
+     * paired address to look a credential up by. Folded into [uiState] they
+     * were re-decrypted by every unrelated emission — a base-URL keystroke, a
+     * unit change, a login-spinner flip — for values that provably had not
+     * changed. `distinctUntilChanged` covers the DataStore flow re-emitting
+     * the same address after an unrelated preference write.
+     */
+    private val credentialState = combine(
+        configStore.pairedDeviceAddress.distinctUntilChanged(),
+        _credentialVersion,
+        _consentVersion,
+    ) { pairedAddress, _, _ ->
+        CredentialState(
+            pairedDeviceAddress = pairedAddress,
+            tokenIsSet = authTokenStore.isSet(),
+            sessionIsSet = sessionCookieStore.isSet(),
+            registeredUserIndex = pairedAddress?.let { consentStore.credentialFor(it)?.scaleIndex },
+        )
+    }.flowOn(ioDispatcher)
 
     /** combine() tops out at 5 typed flows per call — this nests to fit the login/connection-test additions. */
     private val transientState = combine(
@@ -170,32 +210,36 @@ class ConfigViewModel(
     val uiState: StateFlow<ConfigUiState> = combine(
         storedConfig,
         transientState,
-        _credentialVersion,
-        _consentVersion,
-    ) { stored, transient, _, _ ->
-        // authTokenStore.isSet(), sessionCookieStore.isSet(), and
-        // consentStore.credentialFor() are synchronous EncryptedSharedPreferences
-        // reads — flowOn(IO) below keeps them off the collecting (Main) dispatcher.
+        credentialState,
+    ) { stored, transient, credentials ->
         ConfigUiState(
             baseUrl = stored.baseUrl.orEmpty(),
             displayUnit = stored.displayUnit,
             contractVersion = stored.contractVersion,
-            alwaysOnBridging = stored.alwaysOnBridging,
-            tokenIsSet = authTokenStore.isSet(),
-            sessionIsSet = sessionCookieStore.isSet(),
+            tokenIsSet = credentials.tokenIsSet,
+            sessionIsSet = credentials.sessionIsSet,
             loginError = transient.loginError,
             isLoggingIn = transient.isLoggingIn,
-            pairedDeviceAddress = stored.pairedDeviceAddress,
-            registeredUserIndex = stored.pairedDeviceAddress?.let { consentStore.credentialFor(it)?.scaleIndex },
+            pairedDeviceAddress = credentials.pairedDeviceAddress,
+            registeredUserIndex = credentials.registeredUserIndex,
             baseUrlError = transient.baseUrlError,
             connectionTest = transient.connectionTest,
             scaleRegistration = transient.scaleRegistration,
         )
-    }.flowOn(ioDispatcher).stateIn(viewModelScope, SharingStarted.Eagerly, ConfigUiState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), ConfigUiState())
 
     /** Clears a stale validation error as soon as the user starts editing again, rather than leaving it until Save. */
     fun onBaseUrlTextChanged() {
         if (_baseUrlError.value != null) _baseUrlError.value = null
+        invalidateConnectionTest()
+    }
+
+    /**
+     * Retires any in-flight or displayed "Test connection" result: whatever it
+     * reported no longer describes the current server/credential pair. Bumping
+     * the generation is what makes a response still in flight land on the floor.
+     */
+    private fun invalidateConnectionTest() {
         connectionTestGeneration++
         _connectionTest.value = ConnectionTestUiState.Idle
     }
@@ -205,8 +249,7 @@ class ConfigViewModel(
         _baseUrlError.value = error
         if (error == null) {
             // A prior "Test connection" result no longer describes the active config.
-            connectionTestGeneration++
-            _connectionTest.value = ConnectionTestUiState.Idle
+            invalidateConnectionTest()
             viewModelScope.launch { configStore.saveBaseUrl(url) }
         }
     }
@@ -219,43 +262,52 @@ class ConfigViewModel(
         viewModelScope.launch { configStore.saveContractVersion(version) }
     }
 
-    fun saveAlwaysOnBridging(enabled: Boolean) {
-        viewModelScope.launch { configStore.saveAlwaysOnBridging(enabled) }
-    }
-
-    /**
-     * §8.6: saving a new token flips every `BLOCKED_AUTH` row back to
-     * `PENDING` *and* triggers an immediate drain, rather than waiting for
-     * the delivery worker's own periodic schedule — the flip alone would
-     * leave the rows stuck until that schedule next runs, and the drain
-     * alone would find nothing, since the drain query only ever selects
-     * `PENDING` rows.
-     *
-     * `DeliveryWorker.doWork` is itself still a WP-21 stub — this enqueue is
-     * correct and will run for real the moment that lands, rather than
-     * needing its own follow-up wiring then.
-     */
+    /** A fresh credential unblocks the backlog — see [unblockAuthRowsAndDrain]. */
     fun saveToken(token: String) {
         val trimmed = token.trim()
         if (trimmed.isEmpty()) return
-        authTokenStore.save(trimmed)
-        // Mutual exclusion: a token and a session cookie are never both active.
-        sessionCookieStore.clear()
-        _credentialVersion.value++
         // A prior "Test connection" result no longer describes the active credential.
-        connectionTestGeneration++
-        _connectionTest.value = ConnectionTestUiState.Idle
-        viewModelScope.launch { unblockAuthRowsAndDrain() }
+        invalidateConnectionTest()
+        viewModelScope.launch {
+            writeCredentials {
+                authTokenStore.save(trimmed)
+                // Mutual exclusion: a token and a session cookie are never both active.
+                sessionCookieStore.clear()
+            }
+            unblockAuthRowsAndDrain()
+        }
     }
 
     /** Clears whichever credential is active — mutual exclusion means at most one ever is. */
     fun clearCredentials() {
-        authTokenStore.clear()
-        sessionCookieStore.clear()
-        _credentialVersion.value++
-        connectionTestGeneration++
-        _connectionTest.value = ConnectionTestUiState.Idle
+        invalidateConnectionTest()
+        viewModelScope.launch {
+            writeCredentials {
+                authTokenStore.clear()
+                sessionCookieStore.clear()
+            }
+        }
     }
+
+    /**
+     * The single seam for writing an encrypted credential store: the write is a
+     * synchronous `SharedPreferences` commit against an AndroidX Tink keyset,
+     * so it belongs on [ioDispatcher] just as the matching reads in
+     * [credentialState] do. The version bump lands strictly after the write —
+     * it is what makes [credentialState] re-read the stores, and bumping first
+     * would race a re-read against the value it is meant to report.
+     */
+    private suspend fun writeCredentials(write: () -> Unit) {
+        withContext(ioDispatcher) { write() }
+        _credentialVersion.value++
+    }
+
+    /**
+     * Read from the store, not from `uiState.value`: [uiState] is
+     * `WhileSubscribed`, so its cached value is the initial [ConfigUiState]
+     * — an empty base URL — whenever nothing is collecting it.
+     */
+    private suspend fun currentBaseUrl(): String = configStore.baseUrl.first().orEmpty()
 
     /**
      * Exchanges a username/password for a session cookie (`shared/auth.py`'s
@@ -277,14 +329,14 @@ class ConfigViewModel(
         _isLoggingIn.value = true
         _loginError.value = null
         viewModelScope.launch {
-            when (val result = apiFactory(uiState.value.baseUrl).login(trimmedUser, password)) {
+            when (val result = apiFactory(currentBaseUrl()).login(trimmedUser, password)) {
                 is LoginResult.Success -> {
-                    sessionCookieStore.save(result.sessionCookie)
-                    // Mutual exclusion: a token and a session cookie are never both active.
-                    authTokenStore.clear()
-                    _credentialVersion.value++
-                    connectionTestGeneration++
-                    _connectionTest.value = ConnectionTestUiState.Idle
+                    writeCredentials {
+                        sessionCookieStore.save(result.sessionCookie)
+                        // Mutual exclusion: a token and a session cookie are never both active.
+                        authTokenStore.clear()
+                    }
+                    invalidateConnectionTest()
                     // §8.6, same as saveToken: a fresh credential must unblock any
                     // rows a previous credential's rejection had blocked.
                     unblockAuthRowsAndDrain()
@@ -306,10 +358,6 @@ class ConfigViewModel(
      * Sequenced within one coroutine — enqueuing the drain before the row
      * update lands would let the worker run first, see no `PENDING` rows,
      * and exit before there is anything to send.
-     *
-     * `DeliveryWorker.doWork` is itself still a WP-21 stub — this enqueue is
-     * correct and will run for real the moment that lands, rather than
-     * needing its own follow-up wiring then.
      */
     private suspend fun unblockAuthRowsAndDrain() {
         dao.unblockAuthRows(nowMillis())
@@ -326,7 +374,7 @@ class ConfigViewModel(
         val generation = ++connectionTestGeneration
         _connectionTest.value = ConnectionTestUiState.Testing
         viewModelScope.launch {
-            val resultState = when (val result = apiFactory(uiState.value.baseUrl).testConnection()) {
+            val resultState = when (val result = apiFactory(currentBaseUrl()).testConnection()) {
                 ConnectionTestResult.Authorized -> ConnectionTestUiState.Success
                 is ConnectionTestResult.Unauthorized ->
                     ConnectionTestUiState.Failure("Server rejected the credential (HTTP ${result.httpCode})")
@@ -343,7 +391,7 @@ class ConfigViewModel(
      * the working credential until the scale is actually found, then clears
      * it immediately before the new handshake so a failed scan loses nothing.
      */
-    fun reRegister(@Suppress("UNUSED_PARAMETER") deviceAddress: String) {
+    fun reRegister() {
         startScaleRegistration(forceNew = true)
     }
 
@@ -383,20 +431,43 @@ class ConfigViewModel(
         when {
             !BLUETOOTH_ADDRESS.matches(normalizedAddress) ->
                 _scaleRegistration.value = ScaleRegistrationUiState.Failure("Enter a valid Bluetooth address")
-            index !in MIN_SCALE_INDEX..MAX_SCALE_INDEX ->
+            index !in SCALE_INDEX_RANGE ->
                 _scaleRegistration.value = ScaleRegistrationUiState.Failure(
-                    "User slot must be between $MIN_SCALE_INDEX and $MAX_SCALE_INDEX",
+                    "User slot must be between ${SCALE_INDEX_RANGE.first} and ${SCALE_INDEX_RANGE.last}",
                 )
-            code !in MIN_CONSENT_CODE..MAX_CONSENT_CODE ->
+            code !in CONSENT_CODE_RANGE ->
                 _scaleRegistration.value = ScaleRegistrationUiState.Failure(
-                    "Consent code must be between $MIN_CONSENT_CODE and $MAX_CONSENT_CODE",
+                    "Consent code must be between ${CONSENT_CODE_RANGE.first} and ${CONSENT_CODE_RANGE.last}",
                 )
             else -> viewModelScope.launch {
-                consentStore.save(normalizedAddress, ScaleCredential(requireNotNull(index), requireNotNull(code)))
+                val scaleIndexValue = requireNotNull(index)
+                // Encrypted-prefs write — same seam as writeCredentials.
+                withContext(ioDispatcher) {
+                    consentStore.save(normalizedAddress, ScaleCredential(scaleIndexValue, requireNotNull(code)))
+                }
+                activateLinkedProfile(normalizedAddress, scaleIndexValue)
                 configStore.savePairedDeviceAddress(normalizedAddress)
+                rearmScanner?.invoke()
                 _consentVersion.value++
-                _scaleRegistration.value = ScaleRegistrationUiState.Success(normalizedAddress, index)
+                _scaleRegistration.value = ScaleRegistrationUiState.Success(normalizedAddress, scaleIndexValue)
             }
+        }
+    }
+
+    /**
+     * A profile the registry creates for an already-active device is stored
+     * inactive, and only the active profile is scanned and captured for — so
+     * without this, linking a second scale reports success and then silently
+     * never captures. The user hand-entered this mapping just now; that is the
+     * one they mean to use.
+     */
+    private suspend fun activateLinkedProfile(address: String, scaleIndex: Int) {
+        val store = scaleProfileStore ?: return
+        withContext(ioDispatcher) {
+            store.profiles.value
+                .firstOrNull { it.deviceAddress.equals(address, true) && it.scaleIndex == scaleIndex }
+                ?.takeUnless { it.active }
+                ?.let { store.setActive(it.id) }
         }
     }
 
@@ -428,13 +499,31 @@ class ConfigViewModel(
         }
     }
 
+    /**
+     * A backup file sets both *which server* and *which credential*, and the two
+     * are consistent with each other, so a swapped pair produces no auth error
+     * the user would notice. Draining the backlog straight after the swap would
+     * POST every stored reading — weight and, under the V2 contract, the full
+     * body-composition set — to a host the user never chose. So the immediate
+     * drain fires only when the imported URL keeps the same host as the one
+     * already configured; against a new host the rows stay `BLOCKED_AUTH` until
+     * the user does something deliberate ([saveToken] or [login], both of which
+     * unblock and drain on their own).
+     */
     suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<Unit> = runCatching {
         withContext(ioDispatcher) {
             val imported = SettingsBackupCodec.decrypt(bytes, passphrase)
             require(imported.baseUrl.isBlank() || validateBaseUrl(imported.baseUrl) == null) {
                 "Backup contains an invalid server URL"
             }
+            // Checked before the first write: a registry with no active profile
+            // arms nothing, so importing one would leave capture inert with
+            // nothing said about it. Aborting here keeps the import atomic.
+            require(imported.profiles.isEmpty() || imported.profiles.any { it.active }) {
+                "Backup has profiles but none of them is active"
+            }
             val previousAddress = configStore.pairedDeviceAddress.first()
+            val keepsSameHost = hostOf(configStore.baseUrl.first()) == hostOf(imported.baseUrl)
             configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
             configStore.saveContractVersion(imported.contractVersion)
@@ -444,7 +533,11 @@ class ConfigViewModel(
             if (imported.profiles.isNotEmpty() && scaleProfileStore != null) {
                 scaleProfileStore.replaceAll(imported.profiles)
             } else {
-                if (previousAddress != null) consentStore.clear(previousAddress)
+                // Only a pre-registry backup is evidence the device had no
+                // profiles. A registry-era backup that carried none says nothing
+                // about this device's, and clearing on that basis deletes consent
+                // codes that can only be recovered by re-registering with the scale.
+                if (previousAddress != null && !imported.supportsProfiles) consentStore.clear(previousAddress)
                 imported.pairedDeviceAddress?.let { address ->
                     imported.scaleCredential?.let { consentStore.save(address, it) }
                 }
@@ -458,19 +551,42 @@ class ConfigViewModel(
             }
             _credentialVersion.value++
             _consentVersion.value++
-            connectionTestGeneration++
-            _connectionTest.value = ConnectionTestUiState.Idle
+            invalidateConnectionTest()
             _scaleRegistration.value = ScaleRegistrationUiState.Idle
-            if (imported.credentialType != BackupCredentialType.NONE) unblockAuthRowsAndDrain()
+            rearmScanner?.invoke()
+            if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
+                unblockAuthRowsAndDrain()
+            }
         }
     }
 
     companion object {
-        private val BLUETOOTH_ADDRESS = Regex("(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
-        private const val MIN_SCALE_INDEX = 0
-        private const val MAX_SCALE_INDEX = 255
-        private const val MIN_CONSENT_CODE = 0
-        private const val MAX_CONSENT_CODE = 0xFFFF
+        private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
+        private val BLUETOOTH_ADDRESS = ScaleProfileCodec.BLUETOOTH_ADDRESS
+        private val SCALE_INDEX_RANGE = SigWeightProfile.SCALE_INDEX_RANGE
+        private val CONSENT_CODE_RANGE = SigWeightProfile.CONSENT_CODE_RANGE
+
+        /**
+         * The host *and port* — hostname alone would treat two different
+         * deployments on the same domain (a staging and a production instance
+         * distinguished only by port) as "the same server" and drain the
+         * backlog to whichever one the import happened to point at. No
+         * explicit port means the URL's default for its scheme, so a bare
+         * `https://weight.example.com` and `https://weight.example.com:443`
+         * still compare equal. Null for a blank or unparseable URL — two of
+         * those must never compare equal.
+         */
+        private fun hostOf(url: String?): String? = url
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { URI(it) }.getOrNull() }
+            ?.takeIf { it.host != null }
+            ?.let { uri -> "${uri.host.lowercase()}:${if (uri.port != -1) uri.port else defaultPortFor(uri.scheme)}" }
+
+        private fun defaultPortFor(scheme: String?): Int =
+            if (scheme.equals("http", ignoreCase = true)) DEFAULT_HTTP_PORT else DEFAULT_HTTPS_PORT
+
+        private const val DEFAULT_HTTP_PORT = 80
+        private const val DEFAULT_HTTPS_PORT = 443
 
         fun validateBaseUrl(url: String): String? {
             val uri = try {
@@ -497,6 +613,13 @@ class ConfigViewModel(
                     dao = app.database.readingDao(),
                     scaleRegistrar = app.scaleRegistrar,
                     scaleProfileStore = app.scaleProfileStore,
+                    // disarm-then-arm covers both directions: arm() is itself
+                    // gated on automatic capture and an active profile, so it
+                    // no-ops when the import turned capture off.
+                    rearmScanner = {
+                        app.scaleScanner.disarm()
+                        app.scaleScanner.arm()
+                    },
                 )
             }
         }

@@ -8,6 +8,7 @@ import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.UUID
@@ -68,23 +69,42 @@ class ScaleSessionContractTest {
             },
         )
 
-    private fun session(transport: FakeGattTransport) = GattSession(
+    private fun session(transport: FakeGattTransport, stopAfterHandshake: Boolean = false) = GattSession(
         transport = transport,
         decoder = BeurerDecoder(),
         consentStore = consentStore,
         deviceAddress = DEVICE_ADDRESS,
         diagnostics = InMemoryDiagnosticsCounters(),
+        stopAfterHandshake = stopAfterHandshake,
     )
+
+    /**
+     * pr-1-review-patterns.md P14. The registration path finishes at the
+     * handshake with nothing weighed, and the type now says so: a null
+     * [SessionOutcome.Completed.reading] rather than an empty list a caller
+     * could iterate as though it might hold more than one.
+     */
+    @Test
+    fun aRegistrationOnlySessionCompletesWithNoReading() = runTest {
+        val outcome = session(scale(), stopAfterHandshake = true).run()
+
+        assertTrue("expected Completed, got $outcome", outcome is SessionOutcome.Completed)
+        assertNull(
+            "registration stops at the handshake — there is no weigh-in to carry",
+            (outcome as SessionOutcome.Completed).reading,
+        )
+    }
 
     @Test
     fun aWeighInProducesExactlyOneAttributedReading() = runTest {
         val outcome = session(scale()).run()
 
         assertTrue("expected Completed, got $outcome", outcome is SessionOutcome.Completed)
-        val readings = (outcome as SessionOutcome.Completed).readings
-        assertEquals("one physical weigh-in is one reading", 1, readings.size)
-
-        val reading = readings.single()
+        // The type now carries the cardinality: Completed holds 0-or-1
+        // readings, so "one weigh-in is one reading" is the non-null assertion.
+        val reading = requireNotNull((outcome as SessionOutcome.Completed).reading) {
+            "one physical weigh-in is one reading"
+        }
         assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
         assertEquals(Bf720Capture.EXPECTED_USER_INDEX, reading.userIndex)
         assertEquals(Bf720Capture.EXPECTED_BODY_FAT_PCT, reading.bodyFatPct!!, TOLERANCE)

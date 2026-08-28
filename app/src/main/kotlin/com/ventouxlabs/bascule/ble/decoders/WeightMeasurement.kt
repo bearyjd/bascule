@@ -45,12 +45,22 @@ internal object WeightMeasurementParser {
     const val KG_PER_LB = 0.45359237
     const val METRES_PER_INCH = 0.0254
 
+    /**
+     * Bluetooth SIG "value unknown / measurement unsuccessful" for a uint16
+     * measurement field (Weight Scale Service 1.0, Body Composition Service
+     * 1.0). Scaling it as a number yields 327.675 kg or 6553.5 %, which is why
+     * every uint16 field is checked for it before it is scaled.
+     */
+    const val VALUE_UNKNOWN = 0xFFFF
+
     fun parse(bytes: ByteArray): WeightMeasurement? {
         val reader = FrameReader(bytes)
         val flags = reader.u8() ?: return null
         val imperial = flags.hasBit(FLAG_IMPERIAL)
 
-        val rawWeight = reader.u16() ?: return null
+        // The weight field is mandatory, so an unsuccessful measurement leaves
+        // nothing to correlate — the whole frame is unusable, not just a field.
+        val rawWeight = reader.u16()?.takeIf { it != VALUE_UNKNOWN } ?: return null
         val weightKg = if (imperial) {
             rawWeight * SigWeightProfile.WEIGHT_LB_PER_LSB * KG_PER_LB
         } else {
@@ -63,8 +73,10 @@ internal object WeightMeasurementParser {
         var bmi: Double? = null
         var heightM: Double? = null
         if (flags.hasBit(FLAG_BMI_AND_HEIGHT)) {
-            bmi = reader.u16()?.times(SigWeightProfile.BMI_PER_LSB)
-            heightM = reader.u16()?.let { raw ->
+            // Read unconditionally, then discard the sentinel: skipping the read
+            // would shift every following field by two bytes.
+            bmi = reader.u16()?.takeIf { it != VALUE_UNKNOWN }?.times(SigWeightProfile.BMI_PER_LSB)
+            heightM = reader.u16()?.takeIf { it != VALUE_UNKNOWN }?.let { raw ->
                 if (imperial) {
                     raw * SigWeightProfile.HEIGHT_INCHES_PER_LSB * METRES_PER_INCH
                 } else {

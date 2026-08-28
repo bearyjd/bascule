@@ -1,8 +1,8 @@
-@file:Suppress("MaxLineLength")
-
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
 import com.ventouxlabs.bascule.ble.ScaleScanner
@@ -25,6 +25,10 @@ import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
 import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.RuntimeApiFactory
+import com.ventouxlabs.bascule.service.BridgeForegroundService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,12 +44,13 @@ import kotlinx.coroutines.launch
  * companion `factory` function is what actually reaches in here, once, at
  * the Compose call site.
  *
- * The background wake path (scanning, session handling — WP-08) is
- * deliberately not started here: [com.ventouxlabs.bascule.ble.ScaleScanner],
- * [com.ventouxlabs.bascule.ble.ScanBroadcastReceiver] and
- * [com.ventouxlabs.bascule.ble.session.ScaleSessionWorker] are unimplemented
- * stubs today, not merely unwired. Arming them belongs to WP-08 landing, not
- * to this UI work.
+ * The background wake path (WP-08) is armed from [onCreate]:
+ * [com.ventouxlabs.bascule.ble.ScaleScanner] registers a `PendingIntent` scan
+ * that wakes [com.ventouxlabs.bascule.ble.ScanBroadcastReceiver], which in turn
+ * enqueues [com.ventouxlabs.bascule.ble.session.ScaleSessionWorker].
+ * [com.ventouxlabs.bascule.ble.ScaleScanner.arm] is itself gated on the
+ * automatic-capture setting and a registered active profile, so this call is a
+ * no-op until the user has opted in.
  */
 class BasculeApplication : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -59,7 +64,9 @@ class BasculeApplication : Application() {
     val configStore: ConfigStore by lazy { DataStoreConfigStore(this) }
     val deliveryScheduler: DeliveryScheduler by lazy { WorkManagerDeliveryScheduler(this) }
     val deliveryTrigger: DeliveryTrigger get() = deliveryScheduler
-    val runtimeApiFactory: RuntimeApiFactory by lazy { RuntimeApiFactory(configStore, authTokenStore, sessionCookieStore) }
+    val runtimeApiFactory: RuntimeApiFactory by lazy {
+        RuntimeApiFactory(configStore, authTokenStore, sessionCookieStore)
+    }
     val scaleOperationCoordinator by lazy { ScaleOperationCoordinator() }
     val readingIngestor by lazy {
         ReadingIngestor(
@@ -81,24 +88,45 @@ class BasculeApplication : Application() {
      */
     val diagnosticsCounters: DiagnosticsCounters by lazy { InMemoryDiagnosticsCounters() }
 
+    private val _alwaysOnBridgingStartFailed = MutableStateFlow(false)
+
+    /** True when [startBridgeService]'s last attempt was refused by the platform. */
+    val alwaysOnBridgingStartFailed: StateFlow<Boolean> = _alwaysOnBridgingStartFailed.asStateFlow()
+
     override fun onCreate() {
         super.onCreate()
         deliveryScheduler.ensurePeriodicDrain()
         applicationScope.launch {
             // Lazy, non-destructive migration of the existing BF720 slot mapping.
-            configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::credentialFor)
+            configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::migrateLegacyCredential)
             scaleScanner.arm()
-            if (configStore.alwaysOnBridging.first()) {
-                runCatching {
-                    androidx.core.content.ContextCompat.startForegroundService(
-                        this@BasculeApplication,
-                        android.content.Intent(
-                            this@BasculeApplication,
-                            com.ventouxlabs.bascule.service.BridgeForegroundService::class.java,
-                        ),
-                    )
-                }
-            }
+            if (configStore.alwaysOnBridging.first()) startBridgeService()
+        }
+    }
+
+    /**
+     * Android 12+ throws `ForegroundServiceStartNotAllowedException` when the
+     * process is not in a state permitted to start a foreground service — at
+     * boot, exactly the state this call runs in. Caught as its
+     * `IllegalStateException` supertype so no API-31 reference is needed, and
+     * caught *narrowly*: the previous `runCatching` swallowed `Throwable`,
+     * which in a coroutine also swallows `CancellationException`.
+     *
+     * The failure is only recorded, never rethrown — the app is still usable
+     * without always-on bridging, and this codebase has no logging by design.
+     * [alwaysOnBridgingStartFailed] is the surface a future ConfigScreen note
+     * would read; nothing renders it yet, so a boot-time failure is still
+     * invisible to the user.
+     */
+    private fun startBridgeService() {
+        try {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, BridgeForegroundService::class.java),
+            )
+            _alwaysOnBridgingStartFailed.value = false
+        } catch (_: IllegalStateException) {
+            _alwaysOnBridgingStartFailed.value = true
         }
     }
 }

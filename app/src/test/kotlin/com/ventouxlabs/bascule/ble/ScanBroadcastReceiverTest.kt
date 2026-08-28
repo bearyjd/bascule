@@ -35,13 +35,15 @@ class ScanBroadcastReceiverTest {
     private val receiver = ScanBroadcastReceiver(enqueuerFactory = { enqueuer })
 
     @Suppress("DEPRECATION")
-    private fun scanResultIntent(address: String): Intent {
+    private fun scanResultIntent(vararg addresses: String): Intent {
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
-        val remoteDevice = requireNotNull(adapter?.getRemoteDevice(address)) { "no shadow BluetoothAdapter" }
-        val scanResult = ScanResult(remoteDevice, null, RSSI, System.nanoTime())
+        val results = addresses.mapTo(ArrayList()) { address ->
+            val remoteDevice = requireNotNull(adapter?.getRemoteDevice(address)) { "no shadow BluetoothAdapter" }
+            ScanResult(remoteDevice, null, RSSI, System.nanoTime())
+        }
         return Intent(ScaleScanner.ACTION_SCAN).putParcelableArrayListExtra(
             BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT,
-            arrayListOf(scanResult),
+            results,
         )
     }
 
@@ -101,8 +103,41 @@ class ScanBroadcastReceiverTest {
         assertEquals(1, enqueuer.calls.size)
     }
 
+    /**
+     * pr-1-review-correctness.md M13. A batched PendingIntent delivery routinely
+     * carries several results and the scale's own is not necessarily first —
+     * acting on `firstOrNull()` alone drops the weigh-in that triggered the scan.
+     */
+    @Test
+    fun theScaleIsFoundWhenItIsNotFirstInTheBatch() {
+        val receiver = ScanBroadcastReceiver({ enqueuer }, { DEVICE_ADDRESS })
+
+        receiver.onReceive(context, scanResultIntent(OTHER_ADDRESS, DEVICE_ADDRESS))
+
+        assertEquals(DEVICE_ADDRESS, enqueuer.calls.single().address)
+    }
+
+    @Test
+    fun aBatchWithNoResultForTheActiveProfileEnqueuesNothing() {
+        val receiver = ScanBroadcastReceiver({ enqueuer }, { DEVICE_ADDRESS })
+
+        receiver.onReceive(context, scanResultIntent(OTHER_ADDRESS))
+
+        assertTrue("no advertisement from the active scale — nothing to capture", enqueuer.calls.isEmpty())
+    }
+
+    @Test
+    fun anUnknownActiveAddressFallsBackToTheLeadingResult() {
+        val receiver = ScanBroadcastReceiver({ enqueuer }, { null })
+
+        receiver.onReceive(context, scanResultIntent(OTHER_ADDRESS, DEVICE_ADDRESS))
+
+        assertEquals(OTHER_ADDRESS, enqueuer.calls.single().address)
+    }
+
     private companion object {
         const val DEVICE_ADDRESS = "AA:BB:CC:DD:EE:FF"
+        const val OTHER_ADDRESS = "11:22:33:44:55:66"
         const val RSSI = -50
     }
 }

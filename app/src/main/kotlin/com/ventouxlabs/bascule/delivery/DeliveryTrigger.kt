@@ -1,8 +1,5 @@
 package com.ventouxlabs.bascule.delivery
 
-import android.content.Context
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 
 /**
@@ -16,14 +13,4 @@ import androidx.work.WorkManager
 interface DeliveryTrigger {
     /** Enqueues [DeliveryWorker] under its unique work name, keeping any run already in flight. */
     fun triggerImmediateDrain()
-}
-
-class WorkManagerDeliveryTrigger(context: Context) : DeliveryTrigger {
-
-    private val workManager = WorkManager.getInstance(context)
-
-    override fun triggerImmediateDrain() {
-        val request = OneTimeWorkRequestBuilder<DeliveryWorker>().build()
-        workManager.enqueueUniqueWork(DeliveryWorker.UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
-    }
 }

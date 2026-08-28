@@ -65,6 +65,16 @@ object SessionBudget {
     /** E7: consecutive `NoMeasurement` sessions that raise a re-pairing notice. */
     const val NO_MEASUREMENT_STREAK_NOTIFY_THRESHOLD: Int = 3
 
+    /**
+     * E8: the window for the single reconnect attempt allowed after the link
+     * drops mid-`MEASURING`. The scale is usually still powered at that point,
+     * which is why one attempt is worth making and a second is not.
+     */
+    val RECONNECT_ONCE_WINDOW: Duration = 5.seconds
+
+    /** E8: "exactly one" reconnect attempt before the session gives up. */
+    const val RECONNECT_MAX_ATTEMPTS: Int = 1
+
     /** E17: correlation window for a buffered Weight Measurement. */
     val BODY_COMPOSITION_CORRELATION_WINDOW: Duration = 4.seconds
 

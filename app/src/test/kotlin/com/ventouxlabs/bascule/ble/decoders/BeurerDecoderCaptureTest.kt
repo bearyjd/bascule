@@ -3,6 +3,7 @@ package com.ventouxlabs.bascule.ble.decoders
 import com.ventouxlabs.bascule.ble.fake.Bf720Capture
 import com.ventouxlabs.bascule.ble.session.DecodeEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -222,8 +223,87 @@ class BeurerDecoderCaptureTest {
         assertNull(decoder.flush())
     }
 
+    /**
+     * Bluetooth SIG defines `0xFFFF` in these uint16 fields as "value unknown /
+     * measurement unsuccessful" — the BIA impedance pass failing on bare feet,
+     * socks, or too short a stand. Scaled as a number it becomes 6553.5 % body
+     * fat or 327.675 kg, and `ReadingIngestor`'s plausibility gate only checks
+     * `weightKg`, so nothing downstream would have caught it before the payload
+     * reached VitalForge.
+     */
+    @Test
+    fun anUnknownBodyFatIsNullRatherThanSixThousandPercent() {
+        val parsed = BodyCompositionMeasurementParser.parse(
+            withSentinelAt(Bf720Capture.BODY_COMPOSITION_MEASUREMENT, BODY_FAT_OFFSET),
+        )
+
+        assertNotNull(parsed)
+        assertNull("0xFFFF body fat must decode as unknown", parsed?.bodyFatPct)
+        assertEquals(
+            "the sentinel still occupies its two bytes — following fields must not shift",
+            Bf720Capture.EXPECTED_BASAL_METABOLISM_KJ,
+            parsed?.basalMetabolismKj ?: 0.0,
+            TOLERANCE,
+        )
+    }
+
+    @Test
+    fun anUnknownOptionalFieldDoesNotShiftTheFieldsBehindIt() {
+        val parsed = BodyCompositionMeasurementParser.parse(
+            withSentinelAt(Bf720Capture.BODY_COMPOSITION_MEASUREMENT, MUSCLE_PCT_OFFSET),
+        )
+
+        assertNotNull(parsed)
+        assertNull(parsed?.musclePct)
+        assertEquals(
+            Bf720Capture.EXPECTED_SOFT_LEAN_MASS_KG,
+            parsed?.softLeanMassKg ?: 0.0,
+            TOLERANCE,
+        )
+        assertEquals(
+            Bf720Capture.EXPECTED_IMPEDANCE_OHMS,
+            parsed?.impedanceOhms ?: 0.0,
+            TOLERANCE,
+        )
+    }
+
+    @Test
+    fun anUnknownBmiIsNullAndLeavesHeightIntact() {
+        val parsed = WeightMeasurementParser.parse(
+            withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, BMI_OFFSET),
+        )
+
+        assertNotNull(parsed)
+        assertNull(parsed?.bmi)
+        assertEquals(Bf720Capture.EXPECTED_HEIGHT_M, parsed?.heightM ?: 0.0, TOLERANCE)
+    }
+
+    /** Weight is the one mandatory field, so an unknown value voids the whole frame. */
+    @Test
+    fun anUnknownWeightIsRejectedRatherThanDecodedAsThreeHundredKilos() {
+        assertNull(WeightMeasurementParser.parse(withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, WEIGHT_OFFSET)))
+
+        val event = decoder.onNotification(
+            SigWeightProfile.WEIGHT_MEASUREMENT,
+            withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, WEIGHT_OFFSET),
+        )
+        assertTrue("expected Malformed, got $event", event is DecodeEvent.Malformed)
+        assertNull("nothing may be buffered from a voided frame", decoder.flush())
+    }
+
+    private fun withSentinelAt(frame: ByteArray, offset: Int): ByteArray = frame.copyOf().also {
+        it[offset] = 0xFF.toByte()
+        it[offset + 1] = 0xFF.toByte()
+    }
+
     private companion object {
         const val TOLERANCE = 1e-6
+
+        /** Offsets into the captured frames, after their flags word. */
+        const val BODY_FAT_OFFSET = 2
+        const val MUSCLE_PCT_OFFSET = 6
+        const val WEIGHT_OFFSET = 1
+        const val BMI_OFFSET = 11
 
         /** Another household member: index 5, 15 000 × 0.005 kg = 75.00 kg. */
         const val OTHER_USER_INDEX = 5

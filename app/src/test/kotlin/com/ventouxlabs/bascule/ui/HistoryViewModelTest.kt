@@ -2,12 +2,16 @@ package com.ventouxlabs.bascule.ui
 
 import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
+import com.ventouxlabs.bascule.ui.fake.FakeDeliveryTrigger
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -23,8 +27,31 @@ class HistoryViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    private fun viewModel(dao: FakeReadingDao, now: Long = 0L) =
-        HistoryViewModel(dao, InMemoryDiagnosticsCounters(), nowMillis = { now })
+    /**
+     * `uiState` is `WhileSubscribed`, so it computes nothing until something
+     * collects it — a test that only reads `.value` would see the initial state
+     * forever. Collecting in `backgroundScope` is the runTest-native equivalent
+     * of the screen being on-screen, and it is cancelled when the test ends.
+     *
+     * The compute dispatcher is the rule's own, so it shares runTest's scheduler
+     * and `advanceUntilIdle()` still drives the `flowOn` hop deterministically.
+     */
+    private fun TestScope.viewModel(
+        dao: FakeReadingDao,
+        now: Long = 0L,
+        diagnostics: InMemoryDiagnosticsCounters = InMemoryDiagnosticsCounters(),
+        deliveryTrigger: DeliveryTrigger? = null,
+    ): HistoryViewModel {
+        val vm = HistoryViewModel(
+            dao,
+            diagnostics,
+            nowMillis = { now },
+            deliveryTrigger = deliveryTrigger,
+            computeDispatcher = mainDispatcherRule.dispatcher,
+        )
+        backgroundScope.launch { vm.uiState.collect {} }
+        return vm
+    }
 
     @Test
     fun heldConfirmRowsRankAboveAllOthers() = runTest {
@@ -149,6 +176,73 @@ class HistoryViewModelTest {
         assertNull(updated.lastErrorClass)
     }
 
+    /**
+     * C14: the `deliveryTrigger` collaborator was left null in every test here, so
+     * nothing covered the guard that decides whether a row action kicks off a
+     * drain. Both sides matter: a confirm makes a row deliverable and must not
+     * wait for the next periodic run, and a decline is terminal (ADR-006) — a
+     * drain for it would be pure wakeup cost for a row that can never be sent.
+     */
+    @Test
+    fun confirmTriggersADrainAndDeclineDoesNot() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        val confirmed = readingFixture(id = "yes", status = ReadingStatus.HELD_CONFIRM)
+        val declined = readingFixture(id = "no", status = ReadingStatus.HELD_CONFIRM)
+        dao.insert(confirmed)
+        dao.insert(declined)
+        val vm = viewModel(dao, deliveryTrigger = trigger)
+        advanceUntilIdle()
+
+        vm.confirm(confirmed)
+        advanceUntilIdle()
+        assertEquals("a confirmed row is deliverable now, not at the next periodic drain", 1, trigger.triggerCount)
+
+        vm.decline(declined)
+        advanceUntilIdle()
+        assertEquals("DECLINED is terminal — draining for it would never send anything", 1, trigger.triggerCount)
+    }
+
+    @Test
+    fun retryTriggersADrain() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        val row = readingFixture(id = "r1", status = ReadingStatus.FAILED_PERMANENT)
+        dao.insert(row)
+        val vm = viewModel(dao, deliveryTrigger = trigger)
+        advanceUntilIdle()
+
+        vm.retry(row)
+        advanceUntilIdle()
+
+        assertEquals(1, trigger.triggerCount)
+    }
+
+    /**
+     * The §3.4 backoff gate is keyed on `nextAttemptMillis`, so a "Retry" tap that
+     * left it set would enqueue a drain that then skips the very row the user
+     * asked for — a button that visibly does nothing.
+     */
+    @Test
+    fun retryClearsTheBackoffGateSoTheDrainItTriggersActuallySeesTheRow() = runTest {
+        val dao = FakeReadingDao()
+        val row = readingFixture(
+            id = "r1",
+            status = ReadingStatus.FAILED_PERMANENT,
+            attemptCount = 7,
+            nextAttemptMillis = Long.MAX_VALUE,
+        )
+        dao.insert(row)
+        val vm = viewModel(dao)
+        advanceUntilIdle()
+
+        vm.retry(row)
+        advanceUntilIdle()
+
+        assertNull(dao.rows.value.single { it.id == "r1" }.nextAttemptMillis)
+        assertEquals(listOf("r1"), dao.pending(nowMillis = 0L, limit = 10).map { it.id })
+    }
+
     @Test
     fun showsPendingBacklogAge() = runTest {
         val dao = FakeReadingDao()
@@ -175,7 +269,7 @@ class HistoryViewModelTest {
         diagnostics.increment(DiagnosticsCounterKey.MALFORMED_COUNT)
         diagnostics.increment(DiagnosticsCounterKey.MALFORMED_COUNT)
         val dao = FakeReadingDao()
-        val vm = HistoryViewModel(dao, diagnostics)
+        val vm = viewModel(dao, diagnostics = diagnostics)
         advanceUntilIdle()
 
         assertEquals(2, vm.uiState.value.counters[DiagnosticsCounterKey.MALFORMED_COUNT])
@@ -193,7 +287,7 @@ class HistoryViewModelTest {
     fun diagnosticsCounterUpdatesReachUiStateWithoutAnyRowChange() = runTest {
         val diagnostics = InMemoryDiagnosticsCounters()
         val dao = FakeReadingDao()
-        val vm = HistoryViewModel(dao, diagnostics)
+        val vm = viewModel(dao, diagnostics = diagnostics)
         advanceUntilIdle()
 
         assertEquals(0, vm.uiState.value.counters[DiagnosticsCounterKey.NO_MEASUREMENT] ?: 0)

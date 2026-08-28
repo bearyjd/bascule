@@ -35,7 +35,15 @@ class AndroidGattTransport(
     private val appContext = context.applicationContext
     private val _events = MutableSharedFlow<TransportEvent>(replay = EVENT_REPLAY)
     override val events: SharedFlow<TransportEvent> = _events.asSharedFlow()
+    // Written from the GattSession coroutine (connect/close), read from
+    // BluetoothGattCallback methods on a binder thread. Without @Volatile the
+    // JMM gives no happens-before edge, so close()'s null could stay invisible
+    // and a later write()/subscribe() could act on a closed BluetoothGatt —
+    // exactly the leak 00-design.md §8.10's teardown discipline exists to stop.
+    @Volatile
     private var gatt: BluetoothGatt? = null
+
+    @Volatile
     private var receiverRegistered = false
     private val pendingSubscriptions =
         ConcurrentHashMap<BluetoothGattDescriptor, Pair<UUID, SubscriptionKind>>()
@@ -55,7 +63,11 @@ class AndroidGattTransport(
 
     override fun write(char: UUID, bytes: ByteArray) {
         val active = gatt ?: return
-        val characteristic = active.findCharacteristic(char) ?: return
+        val characteristic = active.findCharacteristic(char)
+        if (characteristic == null) {
+            emit(TransportEvent.WriteComplete(char, STATUS_CHARACTERISTIC_MISSING))
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val status = active.writeCharacteristic(
                 characteristic,
@@ -79,7 +91,11 @@ class AndroidGattTransport(
 
     private fun subscribe(char: UUID, kind: SubscriptionKind) {
         val active = gatt ?: return
-        val characteristic = active.findCharacteristic(char) ?: return
+        val characteristic = active.findCharacteristic(char)
+        if (characteristic == null) {
+            emit(TransportEvent.SubscriptionEnabled(char, kind, STATUS_CHARACTERISTIC_MISSING))
+            return
+        }
         if (!active.setCharacteristicNotification(characteristic, true)) {
             emit(TransportEvent.SubscriptionEnabled(char, kind, STATUS_OPERATION_NOT_STARTED))
             return
@@ -235,5 +251,13 @@ class AndroidGattTransport(
         const val EVENT_REPLAY = 128
         const val STATUS_OPERATION_NOT_STARTED = -1
         const val STATUS_DESCRIPTOR_MISSING = -2
+
+        /**
+         * The requested characteristic is absent from the discovered services,
+         * so the operation was never attempted. Emitted rather than returned
+         * silently: GattSession's awaits are event-driven, and silence makes a
+         * firmware/profile mismatch arrive as a plain timeout minutes later.
+         */
+        const val STATUS_CHARACTERISTIC_MISSING = -3
     }
 }

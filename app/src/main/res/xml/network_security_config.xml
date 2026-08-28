@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares the TLS posture the app already had by default, so a future
+     targetSdk change cannot silently relax it. cleartextTrafficPermitted is
+     false for every destination; ConfigViewModel.validateBaseUrl rejects
+     non-https schemes at input time as the matching in-app gate.
+
+     No <debug-overrides> block deliberately: the usual template trusts the
+     user CA store, which would loosen the MITM posture that targeting API 24+
+     otherwise gives for free. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

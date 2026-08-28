@@ -24,8 +24,13 @@ class FakeReadingDao : ReadingDao {
 
     override fun observeAll() = rows
 
-    override suspend fun pending(): List<ReadingEntity> =
-        _rows.value.filter { it.status == ReadingStatus.PENDING }.sortedBy { it.capturedAtMillis }
+    /** Mirrors the live `@Query` clause for clause: status, the §3.4 due-gate, ordering, then the LIMIT. */
+    override suspend fun pending(nowMillis: Long, limit: Int): List<ReadingEntity> =
+        _rows.value
+            .filter { it.status == ReadingStatus.PENDING }
+            .filter { it.nextAttemptMillis == null || it.nextAttemptMillis <= nowMillis }
+            .sortedBy { it.capturedAtMillis }
+            .take(limit)
 
     override suspend fun dedupCandidates(source: String, fromMillis: Long, toMillis: Long): List<ReadingEntity> =
         _rows.value.filter {
@@ -48,6 +53,7 @@ class FakeReadingDao : ReadingDao {
                     retryEpochMillis = nowMillis,
                     lastError = null,
                     lastErrorClass = null,
+                    nextAttemptMillis = null,
                 )
             }
         }

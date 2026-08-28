@@ -1,6 +1,7 @@
 package com.ventouxlabs.bascule.ble
 
 import android.app.Application
+import android.bluetooth.BluetoothManager
 import androidx.test.core.app.ApplicationProvider
 import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
@@ -10,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -44,6 +46,27 @@ class ScaleScannerTest {
         val scanner = ScaleScanner(context, config, profiles)
 
         assertEquals(false, scanner.arm())
+    }
+
+    /**
+     * pr-1-review-correctness.md H4. Every `arm()` reuses one PendingIntent
+     * identity with a filter keyed to the *then*-active profile's address, so a
+     * registration left standing from a previous profile can keep the scan
+     * filtered on the old device — automatic capture then silently never fires
+     * for the new one.
+     */
+    @Test
+    fun reArmingLeavesExactlyOneScanRegistered() = runTest {
+        val config = FakeConfigStore()
+        config.saveAutomaticCaptureEnabled(true)
+        val profiles = FakeScaleProfileStore(listOf(profile(active = true)))
+        val scanner = ScaleScanner(context, config, profiles)
+        val leScanner = context.getSystemService(BluetoothManager::class.java).adapter.bluetoothLeScanner
+
+        scanner.arm()
+        scanner.arm()
+
+        assertEquals(1, shadowOf(leScanner).activeScans.size)
     }
 
     private fun profile(active: Boolean) = ScaleProfile(

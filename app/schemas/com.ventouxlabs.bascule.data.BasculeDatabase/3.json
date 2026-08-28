@@ -1,0 +1,191 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "d838c35dd28b23e9a0c242d8aed9bc05",
+    "entities": [
+      {
+        "tableName": "readings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `capturedAtMillis` INTEGER NOT NULL, `scaleTimestampMillis` INTEGER, `userIndex` INTEGER, `weightKg` REAL NOT NULL, `displayUnit` TEXT NOT NULL, `bodyFatPct` REAL, `bodyWaterPct` REAL, `musclePct` REAL, `boneMassKg` REAL, `bmi` REAL, `bmr` REAL, `amr` REAL, `impedanceOhms` REAL, `softLeanMassKg` REAL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `retryEpochMillis` INTEGER NOT NULL, `lastAttemptMillis` INTEGER, `lastError` TEXT, `lastErrorClass` TEXT, `deliveredFields` TEXT NOT NULL, `contractVersionAtDelivery` INTEGER, `remoteDuplicate` INTEGER NOT NULL, `source` TEXT NOT NULL, `scaleProfileId` TEXT, `nextAttemptMillis` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtMillis",
+            "columnName": "capturedAtMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scaleTimestampMillis",
+            "columnName": "scaleTimestampMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "userIndex",
+            "columnName": "userIndex",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "weightKg",
+            "columnName": "weightKg",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayUnit",
+            "columnName": "displayUnit",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bodyFatPct",
+            "columnName": "bodyFatPct",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "bodyWaterPct",
+            "columnName": "bodyWaterPct",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "musclePct",
+            "columnName": "musclePct",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "boneMassKg",
+            "columnName": "boneMassKg",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "bmi",
+            "columnName": "bmi",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "bmr",
+            "columnName": "bmr",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "amr",
+            "columnName": "amr",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "impedanceOhms",
+            "columnName": "impedanceOhms",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "softLeanMassKg",
+            "columnName": "softLeanMassKg",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retryEpochMillis",
+            "columnName": "retryEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastAttemptMillis",
+            "columnName": "lastAttemptMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastErrorClass",
+            "columnName": "lastErrorClass",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "deliveredFields",
+            "columnName": "deliveredFields",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contractVersionAtDelivery",
+            "columnName": "contractVersionAtDelivery",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "remoteDuplicate",
+            "columnName": "remoteDuplicate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scaleProfileId",
+            "columnName": "scaleProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "nextAttemptMillis",
+            "columnName": "nextAttemptMillis",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_readings_status",
+            "unique": false,
+            "columnNames": [
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_readings_status` ON `${TABLE_NAME}` (`status`)"
+          },
+          {
+            "name": "index_readings_source_capturedAtMillis",
+            "unique": false,
+            "columnNames": [
+              "source",
+              "capturedAtMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_readings_source_capturedAtMillis` ON `${TABLE_NAME}` (`source`, `capturedAtMillis`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd838c35dd28b23e9a0c242d8aed9bc05')"
+    ]
+  }
+}

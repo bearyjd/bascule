@@ -4,10 +4,12 @@ import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ble.RegistrationPhase
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
 import com.ventouxlabs.bascule.ble.ScaleRegistrationResult
+import com.ventouxlabs.bascule.ble.session.ConsentStore
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.data.BackupCredentialType
 import com.ventouxlabs.bascule.data.PortableSettings
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ConnectionTestResult
@@ -21,6 +23,8 @@ import com.ventouxlabs.bascule.ui.fake.FakeVitalForgeApi
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -37,26 +41,40 @@ class ConfigViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    private fun viewModel(
+    /**
+     * `uiState` shares with `WhileSubscribed`, so `stateIn` never starts the
+     * upstream until something collects it. Without the `backgroundScope`
+     * collector every assertion against `uiState.value` would read
+     * [ConfigUiState]'s defaults rather than the ViewModel's actual state.
+     */
+    private fun TestScope.viewModel(
         configStore: FakeConfigStore = FakeConfigStore(),
         authTokenStore: FakeAuthTokenStore = FakeAuthTokenStore(),
-        consentStore: InMemoryConsentStore = InMemoryConsentStore(),
+        consentStore: ConsentStore = InMemoryConsentStore(),
         sessionCookieStore: FakeSessionCookieStore = FakeSessionCookieStore(),
         deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
         dao: FakeReadingDao = FakeReadingDao(),
         vitalForgeApi: FakeVitalForgeApi = FakeVitalForgeApi(),
         scaleRegistrar: ScaleRegistrar? = null,
-    ) = ConfigViewModel(
-        configStore,
-        authTokenStore,
-        consentStore,
-        sessionCookieStore,
-        deliveryTrigger,
-        dao,
-        ioDispatcher = mainDispatcherRule.dispatcher,
-        scaleRegistrar = scaleRegistrar,
-        apiFactory = { vitalForgeApi },
-    )
+        scaleProfileStore: ScaleProfileStore? = null,
+        rearmScanner: (suspend () -> Unit)? = null,
+    ): ConfigViewModel {
+        val vm = ConfigViewModel(
+            configStore,
+            authTokenStore,
+            consentStore,
+            sessionCookieStore,
+            deliveryTrigger,
+            dao,
+            ioDispatcher = mainDispatcherRule.dispatcher,
+            scaleRegistrar = scaleRegistrar,
+            scaleProfileStore = scaleProfileStore,
+            rearmScanner = rearmScanner,
+            apiFactory = { vitalForgeApi },
+        )
+        backgroundScope.launch { vm.uiState.collect {} }
+        return vm
+    }
 
     @Test
     fun registeredUserIndexIsReadOnlyAndSourcedFromConsentStore() = runTest {
@@ -89,7 +107,7 @@ class ConfigViewModelTest {
         val vm = viewModel(consentStore = consentStore)
         advanceUntilIdle()
 
-        vm.reRegister("AA:BB:CC:DD:EE:FF")
+        vm.reRegister()
 
         assertNotNull(
             "do not burn the working mapping until a scale has actually been found",
@@ -114,7 +132,7 @@ class ConfigViewModelTest {
         advanceUntilIdle()
         assertEquals(4, vm.uiState.value.registeredUserIndex)
 
-        vm.reRegister("AA:BB:CC:DD:EE:FF")
+        vm.reRegister()
         advanceUntilIdle()
 
         assertEquals(4, vm.uiState.value.registeredUserIndex)
@@ -607,5 +625,55 @@ class ConfigViewModelTest {
         assertEquals(null, sessionStore.cookie())
         assertEquals(ScaleCredential(2, 1234), consentStore.credentialFor("E7:DB:51:F1:36:91"))
         assertEquals(2, vm.uiState.value.registeredUserIndex)
+    }
+
+    private fun backupPointingAt(baseUrl: String): ByteArray = SettingsBackupCodec.encrypt(
+        PortableSettings(
+            baseUrl = baseUrl,
+            displayUnit = WeightUnit.KILOGRAMS,
+            contractVersion = com.ventouxlabs.bascule.network.ContractVersion.V1_WEIGHT_ONLY,
+            alwaysOnBridging = false,
+            credentialType = BackupCredentialType.TOKEN,
+            credentialValue = "imported-token",
+            pairedDeviceAddress = null,
+            scaleCredential = null,
+        ),
+        "correct horse battery staple",
+    )
+
+    /**
+     * S2: a backup carries both the server and a matching credential, so an
+     * immediate drain would ship the whole local backlog to a host the user
+     * never chose.
+     */
+    @Test
+    fun importingABackupForADifferentHostDoesNotDrainTheBacklog() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(configStore = configStore, deliveryTrigger = deliveryTrigger)
+
+        vm.importSettings(backupPointingAt("https://attacker.example.com"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals("https://attacker.example.com", configStore.baseUrl.value)
+        assertEquals(
+            "a credential swap onto a new host must not flush the backlog to it",
+            0,
+            deliveryTrigger.triggerCount,
+        )
+    }
+
+    @Test
+    fun importingABackupForTheSameHostStillDrainsTheBacklog() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(configStore = configStore, deliveryTrigger = deliveryTrigger)
+
+        vm.importSettings(backupPointingAt("https://mine.example.com/api"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(1, deliveryTrigger.triggerCount)
     }
 }

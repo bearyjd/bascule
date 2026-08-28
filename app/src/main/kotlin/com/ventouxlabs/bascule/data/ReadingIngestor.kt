@@ -1,5 +1,3 @@
-@file:Suppress("MagicNumber")
-
 package com.ventouxlabs.bascule.data
 
 import com.ventouxlabs.bascule.ble.ScaleReading
@@ -21,7 +19,9 @@ class ReadingIngestor(
     private val idProvider: () -> String = { UUID.randomUUID().toString() },
 ) {
     suspend fun ingest(deviceAddress: String, measurement: ScaleReading): IngestResult {
-        if (!measurement.weightKg.isFinite() || measurement.weightKg !in 20.0..300.0) {
+        if (!measurement.weightKg.isFinite() ||
+            measurement.weightKg !in WeightUnit.PLAUSIBLE_WEIGHT_KG_RANGE
+        ) {
             return IngestResult.Rejected("implausible weight")
         }
         val active = profiles.activeProfile.value

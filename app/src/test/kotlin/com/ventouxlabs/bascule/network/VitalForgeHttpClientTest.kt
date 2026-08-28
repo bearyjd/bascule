@@ -1,6 +1,7 @@
 package com.ventouxlabs.bascule.network
 
 import com.ventouxlabs.bascule.data.WeightUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -8,10 +9,12 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -185,8 +188,16 @@ class VitalForgeHttpClientTest {
         attacker.close()
     }
 
+    /**
+     * Regression (correctness M7): a 2xx with an unreadably large body used to be
+     * downgraded to `TransientFailure` on the reasoning that "a success we could
+     * not read is not a success". But the server had already committed the write
+     * — only the *response* was unreadable — so the drain left the row PENDING and
+     * resubmitted it, duplicating the reading server-side. The status code is
+     * authoritative; the body cannot un-commit it.
+     */
     @Test
-    fun oversizedBodyIsTransientNotACrash() = runBlocking {
+    fun anOversizedBodyOnATwoHundredIsStillAccepted() = runBlocking {
         server.enqueue(
             MockResponse.Builder()
                 .code(200)
@@ -196,10 +207,70 @@ class VitalForgeHttpClientTest {
 
         val result = client().submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
 
-        assertEquals(
-            SubmitResult.TransientFailure(VitalForgeHttpClient.OVERSIZED_BODY_REASON, null),
-            result,
+        assertTrue(
+            "the server committed the write; resubmitting would duplicate it",
+            result is SubmitResult.Accepted,
         )
+    }
+
+    /**
+     * An oversized body must still not crash, and must still not override a
+     * non-2xx status — a 401 buried under 64 KiB is an auth rejection that has to
+     * pause the drain, not a transient failure that keeps hammering it.
+     */
+    @Test
+    fun anOversizedBodyNeverOverridesANonSuccessStatus() = runBlocking {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(401)
+                .body("x".repeat((VitalForgeHttpClient.MAX_BODY_BYTES + 1024).toInt()))
+                .build(),
+        )
+
+        val result = client().submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+
+        assertEquals(SubmitResult.AuthRejected(401), result)
+    }
+
+    /**
+     * Regression (correctness M8): `execute()` wraps the blocking call in
+     * `runCatching`, which catches everything — including `CancellationException`.
+     * A `DeliveryWorker` stopped by WorkManager mid-submit then surfaced as an
+     * ordinary `TransientFailure`, so the drainer burned an `attemptCount` and
+     * inflated §3.4's backoff exponent for an attempt the server never saw.
+     * Cancellation must propagate; the project's Kotlin style rule says so too.
+     */
+    @Test
+    fun cancellationPropagatesInsteadOfBecomingATransientFailure() {
+        val cancelling = OkHttpClient.Builder()
+            .addInterceptor { throw CancellationException("worker stopped mid-submit") }
+            .build()
+        val client = VitalForgeHttpClient(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            tokenProvider = { TOKEN },
+            contract = ContractVersion.V1_WEIGHT_ONLY,
+            shaper = V1Shaper,
+            client = cancelling,
+        )
+
+        assertThrows(CancellationException::class.java) {
+            runBlocking { client.submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS) }
+        }
+    }
+
+    /** C6: the base URL is empty until the user configures one — every call must fail closed, not throw. */
+    @Test
+    fun anUnconfiguredBaseUrlIsAPermanentRejectionOnSubmitAndUnavailableElsewhere() = runBlocking {
+        val unconfigured = client(baseUrl = "")
+
+        val submit = unconfigured.submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+        assertEquals(SubmitResult.PermanentRejection(0, "base URL is not a valid http(s) URL"), submit)
+
+        assertTrue(unconfigured.recentReadings(1.minutes) is RecentResult.Unavailable)
+        assertTrue(unconfigured.testConnection() is ConnectionTestResult.Unreachable)
+        assertTrue(unconfigured.login("user", "pw") is LoginResult.Unreachable)
+
+        assertEquals("nothing may reach the network without a configured base URL", 0, server.requestCount)
     }
 
     @Test

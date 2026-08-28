@@ -18,6 +18,7 @@ fun readingFixture(
     attemptCount: Int = 0,
     lastError: String? = null,
     lastErrorClass: ErrorClass? = null,
+    nextAttemptMillis: Long? = null,
 ): ReadingEntity = ReadingEntity(
     id = id,
     capturedAtMillis = capturedAtMillis,
@@ -44,4 +45,5 @@ fun readingFixture(
     contractVersionAtDelivery = null,
     remoteDuplicate = false,
     source = source,
+    nextAttemptMillis = nextAttemptMillis,
 )
