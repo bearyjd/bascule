@@ -2,6 +2,14 @@ package com.ventouxlabs.bascule.data
 
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.network.ContractVersion
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -87,6 +95,44 @@ class SettingsBackupCodecTest {
         }
     }
 
+    // --- The backup carries the bearer token in cleartext once decrypted, and
+    // MIN_PASSPHRASE_LENGTH is only 8, so the KDF cost is what stands between a
+    // stolen export file and the credential. The iteration count is not written
+    // into the file, so only re-deriving the key out-of-band can pin it down.
+
+    @Test
+    fun keyDerivationUsesTheOwaspIterationCountForItsSha256Prf() {
+        val encrypted = SettingsBackupCodec.encrypt(settings, PASSPHRASE)
+
+        val plaintext = decryptWith(encrypted, OWASP_SHA256_ITERATIONS).decodeToString()
+
+        assertTrue("re-deriving at $OWASP_SHA256_ITERATIONS must reproduce the backup", "base_url" in plaintext)
+        assertTrue("secret-session-cookie" in plaintext)
+    }
+
+    @Test
+    fun keyDerivationNoLongerUsesTheIterationCountMeantForSha512() {
+        val encrypted = SettingsBackupCodec.encrypt(settings, PASSPHRASE)
+
+        assertThrows(AEADBadTagException::class.java) { decryptWith(encrypted, OWASP_SHA512_ITERATIONS) }
+    }
+
+    /** Decrypts a backup with a key derived independently of the codec, at [iterations]. */
+    private fun decryptWith(encrypted: ByteArray, iterations: Int): ByteArray {
+        val magic = "BASCULE1".toByteArray(StandardCharsets.US_ASCII)
+        val buffer = ByteBuffer.wrap(encrypted)
+        assertTrue(ByteArray(magic.size).also(buffer::get).contentEquals(magic))
+        val salt = ByteArray(SALT_BYTES).also(buffer::get)
+        val iv = ByteArray(IV_BYTES).also(buffer::get)
+        val ciphertext = ByteArray(buffer.remaining()).also(buffer::get)
+        val spec = PBEKeySpec(PASSPHRASE.toCharArray(), salt, iterations, KEY_BITS)
+        val key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        return Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+            updateAAD(magic)
+        }.doFinal(ciphertext)
+    }
+
     // --- TS-H5: a corrupt `profiles` field must abort the import, not read as "no profiles".
 
     @Test
@@ -137,5 +183,15 @@ class SettingsBackupCodecTest {
 
         assertEquals(WeightUnit.KILOGRAMS, decoded.displayUnit)
         assertEquals(ContractVersion.V1_WEIGHT_ONLY, decoded.contractVersion)
+    }
+
+    private companion object {
+        const val PASSPHRASE = "correct horse battery staple"
+        const val OWASP_SHA256_ITERATIONS = 600_000
+        const val OWASP_SHA512_ITERATIONS = 210_000
+        const val SALT_BYTES = 16
+        const val IV_BYTES = 12
+        const val KEY_BITS = 256
+        const val GCM_TAG_BITS = 128
     }
 }

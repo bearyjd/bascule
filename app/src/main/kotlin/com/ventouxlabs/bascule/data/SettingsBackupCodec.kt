@@ -193,7 +193,8 @@ object SettingsBackupCodec {
     private const val IV_BYTES = 12
     private const val KEY_BITS = 256
     private const val GCM_TAG_BITS = 128
-    private const val PBKDF2_ITERATIONS = 210_000
+    /** OWASP's floor for PBKDF2-HMAC-SHA256; 210k is the SHA-512 figure and too low for this PRF. */
+    private const val PBKDF2_ITERATIONS = 600_000
     private val MAGIC = "BASCULE1".toByteArray(StandardCharsets.US_ASCII)
     private val secureRandom = SecureRandom()
 }

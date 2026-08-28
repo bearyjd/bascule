@@ -19,18 +19,54 @@ import java.security.KeyStore
  * unguarded throw here is an uncatchable crash at *every* launch, with no route
  * to a reset control in the UI.
  *
- * Recovery drops the unreadable state and rebuilds: the user re-authenticates
- * and re-registers the scale, which is a far better outcome than an app that
- * cannot start. A second failure is rethrown rather than falling back to plain
- * [SharedPreferences] — silently downgrading credential storage to plaintext
- * would be worse than the crash.
+ * Recovery therefore has to happen here, but it escalates rather than opening at
+ * its most destructive step — see [buildWithRecovery]. A failure that survives
+ * every rung is rethrown rather than falling back to plain [SharedPreferences]:
+ * silently downgrading credential storage to plaintext would be worse than the
+ * crash.
  */
 internal fun encryptedPreferences(context: Context, fileName: String): SharedPreferences =
-    runCatching { buildEncryptedPreferences(context, fileName) }
-        .getOrElse {
-            discardUnreadableState(context, fileName)
-            buildEncryptedPreferences(context, fileName)
-        }
+    buildWithRecovery(
+        build = { buildEncryptedPreferences(context, fileName) },
+        deleteFile = { context.deleteSharedPreferences(fileName) },
+        deleteMasterKey = {
+            KeyStore.getInstance(ANDROID_KEYSTORE)
+                .apply { load(null) }
+                .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+        },
+    )
+
+/**
+ * Retries [build] through escalating recovery, discarding at each rung the least
+ * state that could still plausibly be at fault.
+ *
+ * The failure modes cannot be told apart by exception type: Tink's
+ * `AndroidKeysetManager` catches the Keystore's `GeneralSecurityException` and
+ * `ProviderException` and re-reads the keyset in cleartext, so an invalidated
+ * master key and a corrupt keyset both surface as the same `IOException` or
+ * `GeneralSecurityException` that `EncryptedSharedPreferences.create` declares.
+ * Escalation stands in for a classification that cannot be made.
+ *
+ * [deleteMasterKey] is last because that key is shared by every store, so
+ * clearing it cascades — the other stores hit this same path on their next
+ * construction and reset themselves. That is the right answer to a rotated or
+ * invalidated Keystore entry and the wrong one to a single store's file going
+ * bad, which [deleteFile] already covers.
+ *
+ * Both discards are themselves best-effort: one that throws must not strand the
+ * caller on a rung short of the one that would have worked.
+ */
+internal fun <T> buildWithRecovery(build: () -> T, deleteFile: () -> Unit, deleteMasterKey: () -> Unit): T {
+    runCatching(build).onSuccess { return it }
+    // A locked device, direct-boot state, or a busy Keymaster fails the same
+    // call that permanent invalidation does. One retry separates the transient
+    // case out before anything is destroyed for it.
+    runCatching(build).onSuccess { return it }
+    runCatching(deleteFile)
+    runCatching(build).onSuccess { return it }
+    runCatching(deleteMasterKey)
+    return build()
+}
 
 private fun buildEncryptedPreferences(context: Context, fileName: String): SharedPreferences {
     val masterKey = MasterKey.Builder(context)
@@ -43,21 +79,6 @@ private fun buildEncryptedPreferences(context: Context, fileName: String): Share
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
-}
-
-/**
- * Deletes both halves of the unreadable pair. The master key is shared by every
- * store, so clearing it here cascades: the remaining stores hit this same path
- * on their next construction and reset themselves, which is what a rotated or
- * invalidated Keystore entry requires anyway.
- */
-private fun discardUnreadableState(context: Context, fileName: String) {
-    runCatching { context.deleteSharedPreferences(fileName) }
-    runCatching {
-        KeyStore.getInstance(ANDROID_KEYSTORE)
-            .apply { load(null) }
-            .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
-    }
 }
 
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
