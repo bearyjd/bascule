@@ -523,32 +523,38 @@ class ConfigViewModel(
                 "Backup has profiles but none of them is active"
             }
             val previousAddress = configStore.pairedDeviceAddress.first()
-            val keepsSameHost = hostOf(configStore.baseUrl.first()) == hostOf(imported.baseUrl)
-            configStore.saveBaseUrl(imported.baseUrl)
+            val currentHost = hostOf(configStore.baseUrl.first())
+            // No host configured yet means there is nothing to silently redirect
+            // *away from* — this is a fresh setup or a first restore, the most
+            // common legitimate use of this feature, and must not be penalized
+            // with the same friction a real host change gets. Once a real host
+            // IS on record, a blank or unparseable imported one must never
+            // compare equal to it (an unparseable host is not "no change").
+            // See pr-1-review-security.md HIGH-1 / MEDIUM-2.
+            val keepsSameHost = currentHost == null || currentHost == hostOf(imported.baseUrl)
+            // A backup pointing at an unfamiliar host is the one case this
+            // import flow cannot tell apart from a hostile one that silently
+            // repoints the app: the same-host check only ever gated the one
+            // unblockAuthRowsAndDrain() call below, but the PENDING backlog and
+            // every future capture were never gated by anything — a periodic
+            // drain re-reads the base URL and credential fresh on every run, so
+            // both would have reached the new host with zero user interaction.
+            // On a host change: park the existing backlog behind BLOCKED_AUTH
+            // (the same status a real auth rejection uses) and do NOT install
+            // the backup's own credential automatically — the user has to
+            // notice they're signed out and take an explicit Login/Save-token
+            // action before anything drains to the new host again.
+            if (!keepsSameHost) dao.blockAllPendingForAuth()
+            // Never overwrite a real URL with a blank one — a legacy or
+            // malformed backup carrying an empty base_url would otherwise wipe
+            // a working configuration for no benefit to the user.
+            if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
             configStore.saveContractVersion(imported.contractVersion)
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
             configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
             configStore.savePairedDeviceAddress(imported.pairedDeviceAddress)
-            if (imported.profiles.isNotEmpty() && scaleProfileStore != null) {
-                scaleProfileStore.replaceAll(imported.profiles)
-            } else {
-                // Only a pre-registry backup is evidence the device had no
-                // profiles. A registry-era backup that carried none says nothing
-                // about this device's, and clearing on that basis deletes consent
-                // codes that can only be recovered by re-registering with the scale.
-                if (previousAddress != null && !imported.supportsProfiles) consentStore.clear(previousAddress)
-                imported.pairedDeviceAddress?.let { address ->
-                    imported.scaleCredential?.let { consentStore.save(address, it) }
-                }
-            }
-            authTokenStore.clear()
-            sessionCookieStore.clear()
-            when (imported.credentialType) {
-                BackupCredentialType.NONE -> Unit
-                BackupCredentialType.TOKEN -> authTokenStore.save(requireNotNull(imported.credentialValue))
-                BackupCredentialType.SESSION -> sessionCookieStore.save(requireNotNull(imported.credentialValue))
-            }
+            applyImportedProfilesAndCredential(imported, previousAddress, keepsSameHost)
             _credentialVersion.value++
             _consentVersion.value++
             invalidateConnectionTest()
@@ -556,6 +562,45 @@ class ConfigViewModel(
             rearmScanner?.invoke()
             if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
                 unblockAuthRowsAndDrain()
+            }
+        }
+    }
+
+    /**
+     * The two writes `importSettings` gated on separate conditions (profiles on
+     * their own contents, the credential on [keepsSameHost]) — combined here
+     * only to keep `importSettings` itself under this file's complexity
+     * threshold; the two halves remain independent of each other.
+     */
+    private suspend fun applyImportedProfilesAndCredential(
+        imported: PortableSettings,
+        previousAddress: String?,
+        keepsSameHost: Boolean,
+    ) {
+        if (imported.profiles.isNotEmpty() && scaleProfileStore != null) {
+            scaleProfileStore.replaceAll(imported.profiles)
+        } else {
+            // Only a pre-registry backup is evidence the device had no
+            // profiles. A registry-era backup that carried none says nothing
+            // about this device's, and clearing on that basis deletes consent
+            // codes that can only be recovered by re-registering with the scale.
+            if (previousAddress != null && !imported.supportsProfiles) consentStore.clear(previousAddress)
+            imported.pairedDeviceAddress?.let { address ->
+                imported.scaleCredential?.let { consentStore.save(address, it) }
+            }
+        }
+        // Cleared before a same-host import is trusted with a new value: any
+        // throw between here and the end of this function must never leave a
+        // real, working credential pointed at whatever host this import is
+        // still in the middle of configuring. On a host change, deliberately
+        // left cleared — see importSettings's host-change handling.
+        authTokenStore.clear()
+        sessionCookieStore.clear()
+        if (keepsSameHost) {
+            when (imported.credentialType) {
+                BackupCredentialType.NONE -> Unit
+                BackupCredentialType.TOKEN -> authTokenStore.save(requireNotNull(imported.credentialValue))
+                BackupCredentialType.SESSION -> sessionCookieStore.save(requireNotNull(imported.credentialValue))
             }
         }
     }
@@ -599,6 +644,14 @@ class ConfigViewModel(
             // then fail at request time with no way for the user to tell why.
             if (uri.scheme != "https") return "URL must start with https://"
             if (uri.host.isNullOrBlank()) return "URL must include a host"
+            // VitalForgeHttpClient.resolve() builds request URLs by string
+            // concatenation (baseUrl + path), not URI resolution — a query or
+            // fragment here silently becomes part of the request path instead
+            // of being replaced by it, so every request would go to the host
+            // root rather than the intended API path.
+            if (!uri.query.isNullOrEmpty() || !uri.fragment.isNullOrEmpty()) {
+                return "URL must not include a query string or fragment"
+            }
             return null
         }
 

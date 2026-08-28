@@ -1,6 +1,7 @@
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
@@ -26,6 +27,7 @@ import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
 import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.RuntimeApiFactory
 import com.ventouxlabs.bascule.service.BridgeForegroundService
+import com.ventouxlabs.bascule.ui.BridgeServiceController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -90,8 +92,28 @@ class BasculeApplication : Application() {
 
     private val _alwaysOnBridgingStartFailed = MutableStateFlow(false)
 
-    /** True when [startBridgeService]'s last attempt was refused by the platform. */
+    /**
+     * True when the most recent [BridgeServiceController.start] attempt — from
+     * either the boot path below or a user toggling "Always-on foreground
+     * fallback" on the Scale screen — was refused by the platform.
+     */
     val alwaysOnBridgingStartFailed: StateFlow<Boolean> = _alwaysOnBridgingStartFailed.asStateFlow()
+
+    /**
+     * The one seam both the boot-time path here and [com.ventouxlabs.bascule.ui.ScaleViewModel]'s
+     * interactive toggle start the service through — sharing it is what makes
+     * the `ForegroundServiceStartNotAllowedException` guard apply to both call
+     * sites instead of just the one that was fixed first (devil's-advocate
+     * review, correctness round 1: the boot path had it, the interactive
+     * toggle didn't, and an uncaught throw on the latter crashes the process
+     * from a plain UI tap).
+     */
+    val bridgeServiceController: BridgeServiceController by lazy {
+        AndroidBridgeServiceController(
+            context = this,
+            onStartResult = { succeeded -> _alwaysOnBridgingStartFailed.value = !succeeded },
+        )
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -100,33 +122,49 @@ class BasculeApplication : Application() {
             // Lazy, non-destructive migration of the existing BF720 slot mapping.
             configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::migrateLegacyCredential)
             scaleScanner.arm()
-            if (configStore.alwaysOnBridging.first()) startBridgeService()
+            if (configStore.alwaysOnBridging.first()) bridgeServiceController.start()
         }
+    }
+}
+
+/**
+ * Android 12+ throws `ForegroundServiceStartNotAllowedException` when the
+ * process is not in a state permitted to start a foreground service. The boot
+ * path is the classic case, but a user's interactive toggle is not
+ * guaranteed-safe either — a rapid double-tap or the app losing foreground
+ * state between the tap and this coroutine dispatching can hit the same
+ * exception. Caught as its `IllegalStateException` supertype so no API-31
+ * reference is needed, and caught *narrowly*: a bare `runCatching` would also
+ * swallow `CancellationException` inside a coroutine.
+ *
+ * The failure is only recorded, never rethrown — the app is still usable
+ * without always-on bridging, and this codebase has no logging by design.
+ * [BasculeApplication.alwaysOnBridgingStartFailed] is the surface a future
+ * screen note would read; nothing renders it yet, so a start failure is still
+ * invisible to the user either way.
+ */
+internal class AndroidBridgeServiceController(
+    private val context: Context,
+    private val onStartResult: (succeeded: Boolean) -> Unit,
+    /**
+     * Injectable so the exception-handling in [start] is unit-testable without
+     * needing Robolectric to simulate `ForegroundServiceStartNotAllowedException`,
+     * which its shadow of `startForegroundService` does not throw.
+     */
+    private val starter: () -> Unit = {
+        ContextCompat.startForegroundService(context, Intent(context, BridgeForegroundService::class.java))
+    },
+) : BridgeServiceController {
+    override fun start() {
+        val succeeded = runCatching(starter)
+            .onFailure { if (it !is IllegalStateException) throw it }
+            .isSuccess
+        onStartResult(succeeded)
     }
 
-    /**
-     * Android 12+ throws `ForegroundServiceStartNotAllowedException` when the
-     * process is not in a state permitted to start a foreground service — at
-     * boot, exactly the state this call runs in. Caught as its
-     * `IllegalStateException` supertype so no API-31 reference is needed, and
-     * caught *narrowly*: the previous `runCatching` swallowed `Throwable`,
-     * which in a coroutine also swallows `CancellationException`.
-     *
-     * The failure is only recorded, never rethrown — the app is still usable
-     * without always-on bridging, and this codebase has no logging by design.
-     * [alwaysOnBridgingStartFailed] is the surface a future ConfigScreen note
-     * would read; nothing renders it yet, so a boot-time failure is still
-     * invisible to the user.
-     */
-    private fun startBridgeService() {
-        try {
-            ContextCompat.startForegroundService(
-                this,
-                Intent(this, BridgeForegroundService::class.java),
-            )
-            _alwaysOnBridgingStartFailed.value = false
-        } catch (_: IllegalStateException) {
-            _alwaysOnBridgingStartFailed.value = true
-        }
+    override fun stop() {
+        context.stopService(intent())
     }
+
+    private fun intent() = Intent(context, BridgeForegroundService::class.java)
 }

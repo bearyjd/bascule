@@ -28,6 +28,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -675,5 +676,149 @@ class ConfigViewModelTest {
         advanceUntilIdle()
 
         assertEquals(1, deliveryTrigger.triggerCount)
+    }
+
+    /**
+     * pr-1-review-quality (batch-4 review) HIGH-1: the port-aware `hostOf` fix
+     * had no test that would actually fail without it — both existing host
+     * tests above vary the hostname, never the port. A staging deployment on
+     * the same domain, distinguished only by port, must still count as a
+     * different server.
+     */
+    @Test
+    fun importingABackupWithADifferentPortIsTreatedAsADifferentHost() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(configStore = configStore, deliveryTrigger = deliveryTrigger)
+
+        vm.importSettings(backupPointingAt("https://mine.example.com:8443"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(
+            "same hostname, different port, must not count as the same server",
+            0,
+            deliveryTrigger.triggerCount,
+        )
+    }
+
+    @Test
+    fun importingABackupWithTheDefaultPortMadeExplicitIsStillTheSameHost() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(configStore = configStore, deliveryTrigger = deliveryTrigger)
+
+        vm.importSettings(backupPointingAt("https://mine.example.com:443"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(1, deliveryTrigger.triggerCount)
+    }
+
+    /**
+     * pr-1-review-security.md HIGH-1: the same-host gate only ever protected
+     * the one `unblockAuthRowsAndDrain()` call — a row already `PENDING` at
+     * import time, and every reading captured after it, reached the imported
+     * host through the ordinary periodic drain with zero user interaction,
+     * because that drain re-reads the base URL and credential fresh on every
+     * run. On a host change: park the existing backlog behind `BLOCKED_AUTH`
+     * and do not install the backup's own credential — the user must take an
+     * explicit, visible re-auth action before anything drains again.
+     */
+    @Test
+    fun importingABackupForADifferentHostBlocksTheExistingBacklogAndDoesNotInstallItsCredential() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val authTokenStore = FakeAuthTokenStore()
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "already-pending", status = ReadingStatus.PENDING))
+        val vm = viewModel(configStore = configStore, authTokenStore = authTokenStore, dao = dao)
+
+        vm.importSettings(backupPointingAt("https://attacker.example.com"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(
+            "the existing backlog must not be left drainable to an unfamiliar host",
+            ReadingStatus.BLOCKED_AUTH,
+            dao.rows.value.single { it.id == "already-pending" }.status,
+        )
+        assertFalse(
+            "the backup's own credential must not be installed silently for a host it wasn't verified against",
+            authTokenStore.isSet(),
+        )
+    }
+
+    /**
+     * pr-1-review-security.md MEDIUM-2: `hostOf` returning null for both a
+     * blank and an unparseable URL must never make an *existing, real* host
+     * compare equal to "no host" — a backup with a blank or unparseable URL is
+     * not evidence the device's current server is unchanged.
+     *
+     * The reverse case — no host configured on *either* side — is
+     * deliberately not gated here: with nothing configured yet, there is no
+     * previous host to silently redirect away from, and gating it would
+     * penalize the most common legitimate use of this feature (a first
+     * restore onto a fresh install). See [importingABackupOntoAFreshDeviceWithNoHostConfiguredYetIsNotGated].
+     */
+    @Test
+    fun anUnparseableImportedHostIsNeverTreatedAsTheSameAsARealConfiguredHost() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val vm = viewModel(configStore = configStore, deliveryTrigger = deliveryTrigger)
+
+        vm.importSettings(backupPointingAt(""), "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(
+            "a blank/unparseable imported host must not read as \"unchanged\" when a real host is already configured",
+            0,
+            deliveryTrigger.triggerCount,
+        )
+    }
+
+    @Test
+    fun importingABackupOntoAFreshDeviceWithNoHostConfiguredYetIsNotGated() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "")
+        val authTokenStore = FakeAuthTokenStore()
+        val vm = viewModel(configStore = configStore, authTokenStore = authTokenStore)
+
+        vm.importSettings(backupPointingAt("https://mine.example.com"), "correct horse battery staple")
+            .getOrThrow()
+        advanceUntilIdle()
+
+        assertTrue(
+            "a first restore onto a device with no host configured yet must not require a separate re-login",
+            authTokenStore.isSet(),
+        )
+    }
+
+    /**
+     * pr-1-review-quality (batch-4 review) LOW-7: a backup with a blank
+     * `base_url` (a legacy or malformed file) must not erase a working
+     * configuration — there is no benefit to the user in doing so, only lost
+     * configuration.
+     */
+    @Test
+    fun importingABackupWithABlankBaseUrlDoesNotWipeTheConfiguredServer() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val vm = viewModel(configStore = configStore)
+
+        vm.importSettings(backupPointingAt(""), "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals("https://mine.example.com", configStore.baseUrl.value)
+    }
+
+    /**
+     * pr-1-review-security.md LOW-2: `VitalForgeHttpClient.resolve()` builds
+     * request URLs by string concatenation, not URI resolution — a query
+     * string or fragment on the configured base URL would silently become
+     * part of every request's path instead of being replaced by it.
+     */
+    @Test
+    fun validateBaseUrlRejectsAQueryStringOrFragment() {
+        assertNotNull(ConfigViewModel.validateBaseUrl("https://mine.example.com/api?x=1"))
+        assertNotNull(ConfigViewModel.validateBaseUrl("https://mine.example.com/api#frag"))
+        assertNull(ConfigViewModel.validateBaseUrl("https://mine.example.com/api"))
     }
 }

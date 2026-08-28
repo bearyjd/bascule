@@ -258,13 +258,20 @@ class VitalForgeHttpClientTest {
         }
     }
 
-    /** C6: the base URL is empty until the user configures one — every call must fail closed, not throw. */
+    /**
+     * C6: the base URL is empty until the user configures one — every call must fail closed, not throw.
+     *
+     * Regression (pr-1-review-security.md MEDIUM-2): an unresolvable base URL is a local
+     * configuration problem, not a statement from the server — classifying it as
+     * PermanentRejection marked the row FAILED_PERMANENT on the very first attempt for a
+     * cause the server never weighed in on, with no path back once the URL was fixed.
+     */
     @Test
-    fun anUnconfiguredBaseUrlIsAPermanentRejectionOnSubmitAndUnavailableElsewhere() = runBlocking {
+    fun anUnconfiguredBaseUrlIsATransientFailureOnSubmitAndUnavailableElsewhere() = runBlocking {
         val unconfigured = client(baseUrl = "")
 
         val submit = unconfigured.submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
-        assertEquals(SubmitResult.PermanentRejection(0, "base URL is not a valid http(s) URL"), submit)
+        assertEquals(SubmitResult.TransientFailure("base URL is not a valid http(s) URL", null), submit)
 
         assertTrue(unconfigured.recentReadings(1.minutes) is RecentResult.Unavailable)
         assertTrue(unconfigured.testConnection() is ConnectionTestResult.Unreachable)

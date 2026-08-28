@@ -68,7 +68,13 @@ class VitalForgeHttpClient(
     override suspend fun submitReading(reading: ReadingEntity, unit: WeightUnit): SubmitResult {
         val payload = shaper.shape(reading, unit)
         val url = resolve(WEIGHT_PATH)
-            ?: return SubmitResult.PermanentRejection(0, "base URL is not a valid http(s) URL")
+            // Transient, not permanent: this is a local configuration problem,
+            // not a statement from the server about this reading. Classifying
+            // it as PermanentRejection marks the row FAILED_PERMANENT on the
+            // first attempt for a cause the server never weighed in on — the
+            // row is recoverable the moment the base URL is fixed, which a
+            // permanent failure does not communicate.
+            ?: return SubmitResult.TransientFailure("base URL is not a valid http(s) URL", null)
 
         val request = Request.Builder()
             .url(url)
@@ -174,6 +180,13 @@ class VitalForgeHttpClient(
             val obj = item as? JsonObject ?: return@mapNotNull null
             val weight = obj["weight_kg"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
             val at = obj["captured_at"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+            // captured_at is server-controlled input compared via DedupPolicy's
+            // abs(timeA - timeB): at exactly Long.MIN_VALUE, abs() overflows back
+            // to a negative number and the tolerance check passes unconditionally
+            // regardless of how far apart the two timestamps actually are.
+            // Bounding to a plausible epoch range here, at the trust boundary,
+            // keeps every downstream subtraction well inside Long's range.
+            if (at !in PLAUSIBLE_EPOCH_MILLIS_RANGE) return@mapNotNull null
             RemoteReading(weight, at)
         }
         return RecentResult.Readings(readings)
@@ -228,6 +241,12 @@ class VitalForgeHttpClient(
         const val SESSION_COOKIE_NAME = "vf_session"
 
         private const val HTTP_UNAUTHORIZED = 401
+
+        /**
+         * A remote `captured_at` outside this range cannot be a real weigh-in and
+         * is rejected rather than compared — see [parseRecent].
+         */
+        private val PLAUSIBLE_EPOCH_MILLIS_RANGE = 946_684_800_000L..4_102_444_800_000L // 2000-01-01 .. 2100-01-01
 
         /** Arbitrary and unused by callers — `testConnection()` only reads the status code, never the body. */
         private const val TEST_CONNECTION_WINDOW_SECONDS = "60"

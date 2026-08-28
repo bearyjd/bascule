@@ -9,12 +9,21 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 
 /** In-memory [ReadingDao] for JVM tests — no Room, no instrumented test needed. */
-class FakeReadingDao : ReadingDao {
+class FakeReadingDao(
+    /**
+     * Invoked before the row is added, and awaited — a real seam for a test
+     * that needs a genuine suspension point mid-`insert`, since every method
+     * here otherwise completes without ever yielding. Defaults to a no-op so
+     * every existing caller is unaffected.
+     */
+    private val onInsert: suspend () -> Unit = {},
+) : ReadingDao {
 
     private val _rows = MutableStateFlow<List<ReadingEntity>>(emptyList())
     val rows: StateFlow<List<ReadingEntity>> = _rows.asStateFlow()
 
     override suspend fun insert(reading: ReadingEntity) {
+        onInsert()
         _rows.value = _rows.value + reading
     }
 

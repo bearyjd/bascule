@@ -83,7 +83,7 @@ class AndroidGattTransportTest {
     }
 
     @Test
-    fun theMissingCharacteristicStatusIsDistinctFromAFailedWriteAttempt() {
+    fun bothNoOpPathsReportTheSameCause() {
         val transport = connectedTransport()
 
         transport.write(SigWeightProfile.USER_CONTROL_POINT, byteArrayOf(0x01))

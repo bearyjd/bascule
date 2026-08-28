@@ -76,8 +76,8 @@ class AndroidScaleRegistrar(
         forceNew: Boolean,
     ): ScaleRegistrationResult {
         val address = device.device.address
-        val forcedNewRegistration = ForceNewRegistrationConsentStore(consentStore)
-        val sessionConsentStore = if (forceNew) forcedNewRegistration else consentStore
+        val forcedNewRegistration = if (forceNew) ForceNewRegistrationConsentStore(consentStore) else null
+        val sessionConsentStore = forcedNewRegistration ?: consentStore
         val session = GattSession(
             transport = AndroidGattTransport(appContext, device.device, adapter),
             decoder = BeurerDecoder(),
@@ -92,12 +92,11 @@ class AndroidScaleRegistrar(
         } catch (_: SecurityException) {
             return ScaleRegistrationResult.Failure("Bluetooth permission was revoked during registration")
         }
-        // The outcome decides success; the credential only supplies the slot
-        // number. credentialFor matches on address alone, so a credential left
-        // over from an earlier registration is returned whether or not *this*
-        // session got anywhere — reading its presence as success would report a
-        // rejected scale as registered.
-        val credential = forcedNewRegistration.savedCredential ?: consentStore.credentialFor(address)
+        val credential = registrationCredential(
+            forceNew = forceNew,
+            savedThisSession = forcedNewRegistration?.savedCredential,
+            existing = consentStore.credentialFor(address),
+        )
         if (outcome is SessionOutcome.Completed && credential != null) {
             configStore.savePairedDeviceAddress(address)
             return ScaleRegistrationResult.Success(address, credential.scaleIndex)
@@ -172,3 +171,26 @@ class AndroidScaleRegistrar(
         val SCAN_TIMEOUT = 20.seconds
     }
 }
+
+/**
+ * The credential that decides a registration session's success, and the only
+ * part of that decision worth a name: `consentStore.credentialFor` matches on
+ * address alone, so [existing] is returned whether or not *this* session got
+ * anywhere. That's correct for `forceNew = false` — recovering a mapping this
+ * session didn't need to touch — but wrong for `forceNew = true`: a session
+ * that completes without registering (`BeurerDecoder`'s `Complete` carries a
+ * null credential whenever `registered` is false) must not report success
+ * carrying the *old* slot the fresh registration was supposed to replace.
+ * Only [savedThisSession] — what the `ForceNewRegistrationConsentStore`
+ * wrapper actually recorded — may answer for a forced re-registration.
+ *
+ * A pure top-level function rather than inline logic so this rule is
+ * unit-testable without a live GATT connection: `registerDevice` needs a real
+ * `ScanResult` and `AndroidGattTransport`, which the JVM test lane cannot
+ * provide.
+ */
+internal fun registrationCredential(
+    forceNew: Boolean,
+    savedThisSession: ScaleCredential?,
+    existing: ScaleCredential?,
+): ScaleCredential? = if (forceNew) savedThisSession else existing

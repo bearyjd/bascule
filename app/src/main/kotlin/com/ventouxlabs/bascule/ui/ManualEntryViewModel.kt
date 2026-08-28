@@ -122,7 +122,12 @@ class ManualEntryViewModel(
         viewModelScope.launch {
             dao.insert(reading)
             deliveryTrigger?.triggerImmediateDrain()
-            _uiState.value = ManualEntryUiState(unit = state.unit)
+            // The live unit, not the `state.unit` captured before the insert:
+            // the `init` block collects `configStore.displayUnit` continuously
+            // so a unit change while this screen is retained takes effect
+            // immediately, and a reset using the stale pre-save value would
+            // silently revert that change the moment this save completes.
+            _uiState.value = ManualEntryUiState(unit = _uiState.value.unit)
             _savedEvents.emit(Unit)
         }
     }

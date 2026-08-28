@@ -13,6 +13,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -445,6 +446,39 @@ class ManualEntryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(2, dao.rows.value.size)
+    }
+
+    /**
+     * Devil's-advocate review, correctness round 2: the post-save reset used
+     * to read `unit` from the `state` snapshot captured at the top of `save()`,
+     * not the live value — so a display-unit change landing while `dao.insert`
+     * is in flight was silently reverted the moment the save completed. Uses
+     * [FakeReadingDao]'s `onInsert` hook as the one real suspension point in
+     * this fake stack to land the config change exactly inside that window;
+     * `yield()` lets the ViewModel's own `configStore.displayUnit.collect`
+     * coroutine apply it before `save()`'s coroutine resumes.
+     */
+    @Test
+    fun aUnitChangeDuringAnInFlightSaveSurvivesThePostSaveReset() = runTest {
+        val configStore = FakeConfigStore(initialDisplayUnit = WeightUnit.KILOGRAMS)
+        val dao = FakeReadingDao(
+            onInsert = {
+                configStore.saveDisplayUnit(WeightUnit.POUNDS)
+                yield()
+            },
+        )
+        val vm = ManualEntryViewModel(dao, configStore, nowMillis = { FIXED_NOW_MILLIS })
+        advanceUntilIdle()
+
+        vm.onWeightTextChanged("70")
+        vm.save()
+        advanceUntilIdle()
+
+        assertEquals(
+            "a unit change that landed mid-save must not be silently reverted by the post-save reset",
+            WeightUnit.POUNDS,
+            vm.uiState.value.unit,
+        )
     }
 
     private companion object {

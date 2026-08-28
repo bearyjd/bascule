@@ -1,14 +1,10 @@
 package com.ventouxlabs.bascule.ui
 
-import android.content.Context
-import android.content.Intent
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
-import com.ventouxlabs.bascule.service.BridgeForegroundService
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ScaleProfile
@@ -78,7 +74,7 @@ class ScaleViewModel(
      * one-time notice — the next toggle interaction clears it like any other
      * diagnostic message.
      */
-    private val diagnostic = MutableStateFlow(profiles.readFailure?.let { REGISTRY_UNREADABLE_MESSAGE })
+    private val diagnostic = MutableStateFlow(if (profiles.readFailure != null) REGISTRY_UNREADABLE_MESSAGE else null)
 
     /** combine() tops out at 5 typed flows per call — this nests to fit the sixth. */
     private val captureState = combine(
@@ -158,21 +154,9 @@ class ScaleViewModel(
                 ScaleViewModel(
                     app.configStore, app.scaleProfileStore, app.database.readingDao(),
                     onArm = app.scaleScanner::arm, onDisarm = app.scaleScanner::disarm,
-                    bridgeService = AndroidBridgeServiceController(app),
+                    bridgeService = app.bridgeServiceController,
                 )
             }
         }
     }
-}
-
-private class AndroidBridgeServiceController(private val context: Context) : BridgeServiceController {
-    override fun start() {
-        ContextCompat.startForegroundService(context, intent())
-    }
-
-    override fun stop() {
-        context.stopService(intent())
-    }
-
-    private fun intent() = Intent(context, BridgeForegroundService::class.java)
 }

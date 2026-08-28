@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import androidx.test.core.app.ApplicationProvider
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
+import com.ventouxlabs.bascule.ble.session.ScaleCredential
 import com.ventouxlabs.bascule.ble.session.ScaleOperationCoordinator
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
@@ -87,5 +88,39 @@ class ScaleRegistrarTest {
             "nothing may be marked paired on a registration that never reached a device",
             configStore.pairedDeviceAddress.value,
         )
+    }
+
+    /**
+     * pr-1-review-quality (batch-4 review) MEDIUM-2: a forced re-registration
+     * whose handshake completed without actually registering (`BeurerDecoder`'s
+     * `Complete` carries a null credential whenever `registered` is false)
+     * must not report success carrying the old slot the fresh registration was
+     * supposed to replace. See [registrationCredential] — extracted because
+     * `registerDevice` itself needs a live GATT connection this test lane
+     * cannot provide.
+     */
+    @Test
+    fun aForcedRegistrationThatDidNotActuallyRegisterIgnoresTheOldCredential() {
+        val old = ScaleCredential(scaleIndex = 2, consentCode = 1234)
+
+        assertNull(
+            "nothing new was saved this session — the old slot must not be reported as success",
+            registrationCredential(forceNew = true, savedThisSession = null, existing = old),
+        )
+    }
+
+    @Test
+    fun aForcedRegistrationThatDidRegisterUsesTheNewCredentialNotTheOld() {
+        val old = ScaleCredential(scaleIndex = 2, consentCode = 1234)
+        val new = ScaleCredential(scaleIndex = 5, consentCode = 5678)
+
+        assertEquals(new, registrationCredential(forceNew = true, savedThisSession = new, existing = old))
+    }
+
+    @Test
+    fun aNonForcedRegistrationFallsBackToWhateverIsAlreadyOnRecord() {
+        val existing = ScaleCredential(scaleIndex = 2, consentCode = 1234)
+
+        assertEquals(existing, registrationCredential(forceNew = false, savedThisSession = null, existing = existing))
     }
 }
