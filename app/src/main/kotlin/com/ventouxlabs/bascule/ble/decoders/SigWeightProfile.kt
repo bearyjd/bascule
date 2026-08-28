@@ -48,7 +48,6 @@ internal object SigWeightProfile {
      */
     const val UCP_REGISTER_NEW_USER = 0x01
     const val UCP_CONSENT = 0x02
-    const val UCP_DELETE_USER_DATA = 0x03
 
     /** Op code of a User Control Point response indication. */
     const val UCP_RESPONSE_CODE = 0x20
@@ -86,7 +85,4 @@ internal object SigWeightProfile {
     const val BMI_PER_LSB = 0.1
     const val PERCENT_PER_LSB = 0.1
     const val IMPEDANCE_OHMS_PER_LSB = 0.1
-
-    /** Basal Metabolism is reported in kilojoules (Body Composition Service 1.0). */
-    const val KJ_PER_KCAL = 4.184
 }

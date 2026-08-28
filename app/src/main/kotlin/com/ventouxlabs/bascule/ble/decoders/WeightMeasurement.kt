@@ -17,6 +17,26 @@ internal data class WeightMeasurement(
 )
 
 /**
+ * Outcome of parsing a Weight Measurement frame.
+ *
+ * [Unsuccessful] is separate from [Malformed] because the SIG `0xFFFF` weight
+ * means the *scale* reported no successful measurement — the frame itself is
+ * well-formed. Collapsing the two would charge a working scale's "I couldn't
+ * weigh you" to the malformed-frame counter, and a session that saw only such
+ * frames would be diagnosed as a decode failure rather than as the
+ * no-measurement it is.
+ */
+internal sealed interface WeightParseResult {
+    data class Parsed(val measurement: WeightMeasurement) : WeightParseResult
+
+    /** SIG "measurement unsuccessful" sentinel in the mandatory weight field. */
+    data object Unsuccessful : WeightParseResult
+
+    /** Truncated for the fields its own flags declare present. */
+    data object Malformed : WeightParseResult
+}
+
+/**
  * Weight Measurement characteristic format, Bluetooth SIG Weight Scale Service
  * 1.0 §3.1: flags uint8, then the present fields in fixed order — weight
  * (mandatory), time stamp, user ID, BMI, height.
@@ -53,14 +73,15 @@ internal object WeightMeasurementParser {
      */
     const val VALUE_UNKNOWN = 0xFFFF
 
-    fun parse(bytes: ByteArray): WeightMeasurement? {
+    fun parse(bytes: ByteArray): WeightParseResult {
         val reader = FrameReader(bytes)
-        val flags = reader.u8() ?: return null
+        val flags = reader.u8() ?: return WeightParseResult.Malformed
         val imperial = flags.hasBit(FLAG_IMPERIAL)
 
         // The weight field is mandatory, so an unsuccessful measurement leaves
         // nothing to correlate — the whole frame is unusable, not just a field.
-        val rawWeight = reader.u16()?.takeIf { it != VALUE_UNKNOWN } ?: return null
+        val rawWeight = reader.u16() ?: return WeightParseResult.Malformed
+        if (rawWeight == VALUE_UNKNOWN) return WeightParseResult.Unsuccessful
         val weightKg = if (imperial) {
             rawWeight * SigWeightProfile.WEIGHT_LB_PER_LSB * KG_PER_LB
         } else {
@@ -85,15 +106,17 @@ internal object WeightMeasurementParser {
             }
         }
 
-        if (reader.underrun) return null
+        if (reader.underrun) return WeightParseResult.Malformed
 
-        return WeightMeasurement(
-            weightKg = weightKg,
-            rawWeight = rawWeight,
-            timestampMillis = timestamp,
-            userIndex = userIndex,
-            bmi = bmi,
-            heightM = heightM,
+        return WeightParseResult.Parsed(
+            WeightMeasurement(
+                weightKg = weightKg,
+                rawWeight = rawWeight,
+                timestampMillis = timestamp,
+                userIndex = userIndex,
+                bmi = bmi,
+                heightM = heightM,
+            ),
         )
     }
 }

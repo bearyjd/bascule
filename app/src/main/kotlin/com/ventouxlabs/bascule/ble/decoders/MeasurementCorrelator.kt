@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.ble.decoders
 
 import com.ventouxlabs.bascule.ble.ScaleReading
 import com.ventouxlabs.bascule.ble.session.DecodeEvent
+import com.ventouxlabs.bascule.ble.session.SessionBudget
 
 /**
  * Pairs a Weight Measurement with its Body Composition Measurement so one
@@ -26,7 +27,14 @@ import com.ventouxlabs.bascule.ble.session.DecodeEvent
  * more than one candidate weight — a second distinct weight frame, or any frame
  * arriving after an emission — no later pairing is provable and correlation
  * closes. Frames after that point are counted and dropped, never speculatively
- * attached. The cost is real and accepted: if a household member weighs first and
+ * attached. The same rule governs the reverse arrival order: a body-composition
+ * frame held for a weight frame that has not arrived yet pairs only inside
+ * [SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW] — the same window a
+ * pending weight gets — and only with a weight frame that does not name a
+ * different user. Past that it is dropped, not carried forward into whatever
+ * weigh-in happens next.
+ *
+ * The cost is real and accepted: if a household member weighs first and
  * JD second inside one session, JD's reading is lost where a speculative pairing
  * would have kept it. 00-design.md §8.4 states the asymmetry that decides it —
  * bad Garmin history is materially harder to clean up than a missed weigh-in is
@@ -38,6 +46,7 @@ internal class MeasurementCorrelator(
 ) {
     private var pendingWeight: WeightMeasurement? = null
     private var orphanBodyComposition: BodyCompositionMeasurement? = null
+    private var orphanReceivedAtMillis: Long = 0L
     private val emittedFrames = mutableSetOf<FrameIdentity>()
     private var emissions = 0
 
@@ -64,10 +73,14 @@ internal class MeasurementCorrelator(
             return DecodeEvent.Ignored
         }
 
+        expireStaleOrphan()
         val orphan = orphanBodyComposition
         if (orphan != null) {
             orphanBodyComposition = null
-            return emit(measurement, orphan)
+            if (namesTheSameUser(orphan, measurement)) return emit(measurement, orphan)
+            // The frame said, in the one field it carries that could, that it
+            // belongs to somebody else's weigh-in.
+            unpairableFramesDropped++
         }
 
         val superseded = pendingWeight
@@ -93,8 +106,14 @@ internal class MeasurementCorrelator(
                 unpairableFramesDropped++
                 return DecodeEvent.Ignored
             }
-            // Arrived before its weight frame; hold it until one shows up.
+            expireStaleOrphan()
+            // A second orphan means the first one's weight frame is not coming
+            // ahead of this one's; only the newer can still be paired.
+            if (orphanBodyComposition != null) unpairableFramesDropped++
+            // Arrived before its weight frame; hold it for the correlation
+            // window, then no longer.
             orphanBodyComposition = measurement
+            orphanReceivedAtMillis = clock()
             return DecodeEvent.Ignored
         }
         pendingWeight = null
@@ -107,6 +126,33 @@ internal class MeasurementCorrelator(
         pendingWeight = null
         orphanBodyComposition = null
         return weight?.let { emit(it, null) }
+    }
+
+    /**
+     * Drops a held body-composition frame once the correlation window it would
+     * have been paired inside has elapsed. Without this the frame survives for
+     * the whole 45 s first-indication budget and attaches to whatever weigh-in
+     * happens next — an unrelated user's, on a shared scale.
+     */
+    private fun expireStaleOrphan() {
+        if (orphanBodyComposition == null) return
+        if (clock() - orphanReceivedAtMillis <= CORRELATION_WINDOW_MILLIS) return
+        orphanBodyComposition = null
+        unpairableFramesDropped++
+    }
+
+    /**
+     * A body-composition frame usually carries no user ID at all (ADR-007), and
+     * an absent ID contradicts nothing. Only two *stated* and differing indices
+     * rule a pairing out.
+     */
+    private fun namesTheSameUser(
+        body: BodyCompositionMeasurement,
+        weight: WeightMeasurement,
+    ): Boolean {
+        val bodyUser = body.userIndex ?: return true
+        val weightUser = weight.userIndex ?: return true
+        return bodyUser == weightUser
     }
 
     private fun emit(
@@ -167,5 +213,13 @@ internal class MeasurementCorrelator(
          * unattributed. The latch is one emission per session.
          */
         const val MAX_EMISSIONS_PER_SESSION = 1
+
+        /**
+         * E17's window, in the units [clock] reports. A body-composition frame
+         * held for a weight frame gets exactly the window a weight frame held
+         * for its body composition gets — the pairing is the same pairing.
+         */
+        val CORRELATION_WINDOW_MILLIS =
+            SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW.inWholeMilliseconds
     }
 }

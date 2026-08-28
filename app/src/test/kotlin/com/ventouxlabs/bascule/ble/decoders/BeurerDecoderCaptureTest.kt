@@ -271,23 +271,31 @@ class BeurerDecoderCaptureTest {
     fun anUnknownBmiIsNullAndLeavesHeightIntact() {
         val parsed = WeightMeasurementParser.parse(
             withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, BMI_OFFSET),
-        )
+        ) as WeightParseResult.Parsed
 
-        assertNotNull(parsed)
-        assertNull(parsed?.bmi)
-        assertEquals(Bf720Capture.EXPECTED_HEIGHT_M, parsed?.heightM ?: 0.0, TOLERANCE)
+        assertNull(parsed.measurement.bmi)
+        assertEquals(Bf720Capture.EXPECTED_HEIGHT_M, parsed.measurement.heightM ?: 0.0, TOLERANCE)
     }
 
-    /** Weight is the one mandatory field, so an unknown value voids the whole frame. */
+    /**
+     * Weight is the one mandatory field, so an unknown value voids the whole
+     * frame — but as "the scale reported no successful measurement", not as a
+     * corrupt frame. Only the latter makes a session a `DecodeFailure`.
+     */
     @Test
     fun anUnknownWeightIsRejectedRatherThanDecodedAsThreeHundredKilos() {
-        assertNull(WeightMeasurementParser.parse(withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, WEIGHT_OFFSET)))
+        assertEquals(
+            WeightParseResult.Unsuccessful,
+            WeightMeasurementParser.parse(withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, WEIGHT_OFFSET)),
+        )
 
         val event = decoder.onNotification(
             SigWeightProfile.WEIGHT_MEASUREMENT,
             withSentinelAt(Bf720Capture.WEIGHT_MEASUREMENT, WEIGHT_OFFSET),
         )
-        assertTrue("expected Malformed, got $event", event is DecodeEvent.Malformed)
+        assertEquals("a well-formed frame reporting no weight is not malformed", DecodeEvent.Ignored, event)
+        assertEquals(0, decoder.malformedCount)
+        assertEquals(1, decoder.unsuccessfulMeasurements)
         assertNull("nothing may be buffered from a voided frame", decoder.flush())
     }
 

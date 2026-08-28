@@ -42,6 +42,11 @@ class ReadingIngestor(
             profileId = matched?.id,
             id = idProvider(),
         )
+        // Checked after mapping because two of the five fields — bmr and
+        // bodyWaterPct — only exist in the mapped row's units.
+        BodyCompositionPlausibility.implausibleField(candidate)?.let { field ->
+            return IngestResult.Rejected("implausible $field")
+        }
         val corpus = dao.dedupCandidates(
             ReadingSource.SCALE.name,
             candidate.capturedAtMillis - DedupPolicy.TIME_WINDOW_MILLIS,
