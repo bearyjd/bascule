@@ -16,7 +16,6 @@ android {
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -102,9 +101,4 @@ dependencies {
     // .claude/PRPs/plans/scale-admin-testing-completeness.plan.md Task 2.
     testImplementation(libs.androidx.test.junit)
     testImplementation(libs.androidx.work.testing)
-
-    androidTestImplementation(libs.androidx.test.junit)
-    androidTestImplementation(libs.androidx.test.runner)
-    androidTestImplementation(libs.androidx.room.testing)
-    androidTestImplementation(libs.androidx.work.testing)
 }
