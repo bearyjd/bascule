@@ -13,8 +13,11 @@ import org.junit.Test
  * The [ScaleProfileStore] behaviours that do not depend on encryption. The
  * production store wraps these same pure rules
  * ([ScaleProfileCodec.legacyMigrationProfile], [ScaleProfileCodec.requireWithinBounds])
- * around EncryptedSharedPreferences, which needs a real keystore and is covered
- * by an instrumented test instead.
+ * around EncryptedSharedPreferences, which needs a real keystore — these
+ * tests deliberately avoid that dependency rather than requiring one.
+ * NOTE: this project has no `app/src/androidTest` tree, so the real
+ * EncryptedSharedPreferences-backed path is not covered by any instrumented
+ * test either; that is a known coverage gap, not something these tests substitute for.
  */
 class ScaleProfileStoreContractTest {
 
@@ -194,13 +197,31 @@ class ScaleProfileStoreContractTest {
         )
     }
 
-    @Test
-    fun replaceAllDropsDuplicateIdsRatherThanStoringBoth() {
-        val store = FakeScaleProfileStore()
-        store.replaceAll(
+    @Test(expected = IllegalArgumentException::class)
+    fun replaceAllRejectsDuplicateIdsRatherThanChoosingWhichOneSurvives() {
+        FakeScaleProfileStore().replaceAll(
             listOf(profile(id = "same", scaleIndex = 1), profile(id = "same", scaleIndex = 2, active = false)),
         )
-        assertEquals(1, store.profiles.value.size)
+    }
+
+    /**
+     * Deduping by first id would drop the active element here, so a list that
+     * passes the single-active guard would still persist a registry with no
+     * active profile at all — nothing to build a scan filter from, and no error
+     * anywhere to say why capture stopped.
+     */
+    @Test
+    fun replaceAllWithADuplicateIdWhoseSecondCopyIsActiveNeverLeavesZeroActiveProfiles() {
+        val store = FakeScaleProfileStore(listOf(profile(id = "existing")))
+
+        val result = runCatching {
+            store.replaceAll(
+                listOf(profile(id = "same", scaleIndex = 1, active = false), profile(id = "same", scaleIndex = 2)),
+            )
+        }
+
+        assertTrue("the ambiguous list must be refused, not silently deduped", result.isFailure)
+        assertEquals("the refusal must land before any write", "existing", store.activeProfile.value?.id)
     }
 
     /** Activating an id that is not in the registry would deactivate every profile and leave none armed. */

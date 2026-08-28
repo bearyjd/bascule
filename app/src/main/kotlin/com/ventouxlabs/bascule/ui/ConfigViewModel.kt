@@ -76,6 +76,23 @@ sealed interface ScaleRegistrationUiState {
     data class Failure(val message: String) : ScaleRegistrationUiState
 }
 
+/**
+ * What a successful import leaves behind, which is not the same in both cases:
+ * on a host change [importSettings] parks the backlog behind `BLOCKED_AUTH` and
+ * deliberately does not install the backup's credential, so the screen must not
+ * report a plain success — the user is signed out of the new host until they
+ * log in or save a token. Carried out of [importSettings] because the screen
+ * cannot re-derive it: comparing hosts needs the base URL as it was *before*
+ * the import overwrote it.
+ */
+enum class ImportOutcome {
+    /** Settings and credential both applied; nothing further is required. */
+    APPLIED,
+
+    /** Applied, but the backup pointed at a different host, so no credential was installed. */
+    APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE,
+}
+
 private data class StoredConfig(
     val baseUrl: String?,
     val displayUnit: WeightUnit,
@@ -413,12 +430,20 @@ class ConfigViewModel(
                     RegistrationPhase.CONNECTING -> ScaleRegistrationUiState.Connecting
                 }
             }
-            _scaleRegistration.value = when (result) {
+            when (result) {
                 is ScaleRegistrationResult.Success -> {
+                    // The registrar persists the credential but cannot decide
+                    // which profile the user meant to capture from, so the
+                    // registry stores the new one inactive whenever another
+                    // profile already holds the flag. Same two calls
+                    // linkExistingScale makes, for the same reason.
+                    activateLinkedProfile(result.address, result.scaleIndex)
+                    rearmScanner?.invoke()
                     _consentVersion.value++
-                    ScaleRegistrationUiState.Success(result.address, result.scaleIndex)
+                    _scaleRegistration.value = ScaleRegistrationUiState.Success(result.address, result.scaleIndex)
                 }
-                is ScaleRegistrationResult.Failure -> ScaleRegistrationUiState.Failure(result.message)
+                is ScaleRegistrationResult.Failure ->
+                    _scaleRegistration.value = ScaleRegistrationUiState.Failure(result.message)
             }
         }
     }
@@ -457,9 +482,9 @@ class ConfigViewModel(
     /**
      * A profile the registry creates for an already-active device is stored
      * inactive, and only the active profile is scanned and captured for — so
-     * without this, linking a second scale reports success and then silently
-     * never captures. The user hand-entered this mapping just now; that is the
-     * one they mean to use.
+     * without this, establishing a second scale reports success and then
+     * silently never captures. The user hand-entered — or just registered —
+     * this mapping; that is the one they mean to use.
      */
     private suspend fun activateLinkedProfile(address: String, scaleIndex: Int) {
         val store = scaleProfileStore ?: return
@@ -510,7 +535,7 @@ class ConfigViewModel(
      * the user does something deliberate ([saveToken] or [login], both of which
      * unblock and drain on their own).
      */
-    suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<Unit> = runCatching {
+    suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<ImportOutcome> = runCatching {
         withContext(ioDispatcher) {
             val imported = SettingsBackupCodec.decrypt(bytes, passphrase)
             require(imported.baseUrl.isBlank() || validateBaseUrl(imported.baseUrl) == null) {
@@ -521,6 +546,12 @@ class ConfigViewModel(
             // nothing said about it. Aborting here keeps the import atomic.
             require(imported.profiles.isEmpty() || imported.profiles.any { it.active }) {
                 "Backup has profiles but none of them is active"
+            }
+            // Front-loaded for the same reason: replaceAll refuses duplicate
+            // ids, and letting it throw would leave the URL, unit, and
+            // contract version already written.
+            require(imported.profiles.distinctBy { it.id }.size == imported.profiles.size) {
+                "Backup contains duplicate profile ids"
             }
             val previousAddress = configStore.pairedDeviceAddress.first()
             val currentHost = hostOf(configStore.baseUrl.first())
@@ -550,7 +581,14 @@ class ConfigViewModel(
             // a working configuration for no benefit to the user.
             if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
-            configStore.saveContractVersion(imported.contractVersion)
+            // Same gate the dropdown applies: V2Shaper's field names are
+            // placeholders (00-design.md §4.2), so an import must not be able to
+            // put the app into a contract the screen offers no way back out of.
+            // The existing value is kept rather than forced to a default — this
+            // skips one field, it does not half-apply the import.
+            if (imported.contractVersion in selectableContractVersions) {
+                configStore.saveContractVersion(imported.contractVersion)
+            }
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
             configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
             configStore.savePairedDeviceAddress(imported.pairedDeviceAddress)
@@ -562,6 +600,11 @@ class ConfigViewModel(
             rearmScanner?.invoke()
             if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
                 unblockAuthRowsAndDrain()
+            }
+            if (keepsSameHost) {
+                ImportOutcome.APPLIED
+            } else {
+                ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE
             }
         }
     }

@@ -300,6 +300,20 @@ private fun ConnectionTestResultText(result: ConnectionTestUiState) {
     }
 }
 
+/**
+ * `V2_BODY_COMP` is withheld because `V2Shaper`'s body-composition field names
+ * are placeholders: 00-design.md §4.2 requires them to come from VitalForge's
+ * Track A contract doc, which has not landed. The shaper's own KDoc claims it
+ * "is not selectable until that document lands" — this dropdown and
+ * [com.ventouxlabs.bascule.ui.ConfigViewModel.importSettings]'s matching
+ * field-skip gate are what make that true together; a settings import is a
+ * second path into this same state and is gated identically. Delete both
+ * filters when the doc lands and the names are pinned, alongside the
+ * shaper's KDoc caveat.
+ */
+internal val selectableContractVersions: List<ContractVersion> =
+    ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP }
+
 @Composable
 private fun UnitAndContractSection(
     state: ConfigUiState,
@@ -316,7 +330,7 @@ private fun UnitAndContractSection(
         )
         LabeledDropdown(
             label = "VitalForge contract version",
-            options = ContractVersion.entries,
+            options = selectableContractVersions,
             optionLabel = { "v${it.wire}" },
             selected = state.contractVersion,
             onSelected = onContractChanged,
@@ -521,14 +535,14 @@ private fun LoginEditForm(
 @Suppress("LongMethod") // Document launchers must retain the same remembered transfer state.
 private fun SettingsTransferSection(
     onExport: suspend (String) -> Result<ByteArray>,
-    onImport: suspend (ByteArray, String) -> Result<Unit>,
+    onImport: suspend (ByteArray, String) -> Result<ImportOutcome>,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var pendingExport by remember { mutableStateOf<ByteArray?>(null) }
     var pendingImport by remember { mutableStateOf<ByteArray?>(null) }
     var dialogMode by remember { mutableStateOf<SettingsDialogMode?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<TransferMessage?>(null) }
 
     val createDocument = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
@@ -542,7 +556,8 @@ private fun SettingsTransferSection(
                         context.contentResolver.openOutputStream(uri, "w")!!.use { it.write(bytes) }
                     }
                 }
-                message = if (written.isSuccess) "Settings backup exported." else "Could not write the backup file."
+                val text = if (written.isSuccess) "Settings backup exported." else "Could not write the backup file."
+                message = TransferMessage.Fixed(text)
             }
         }
     }
@@ -554,7 +569,7 @@ private fun SettingsTransferSection(
                         context.contentResolver.openInputStream(uri)!!.use(InputStream::readSettingsBackup)
                     }
                 }.getOrElse {
-                    message = "Could not read the selected file."
+                    message = TransferMessage.Fixed("Could not read the selected file.")
                     null
                 }
                 if (pendingImport != null) dialogMode = SettingsDialogMode.IMPORT
@@ -575,7 +590,9 @@ private fun SettingsTransferSection(
                 modifier = Modifier.padding(start = 8.dp),
             ) { Text("Import") }
         }
-        message?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+        message?.resolve()?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        }
     }
 
     dialogMode?.let { mode ->
@@ -591,15 +608,20 @@ private fun SettingsTransferSection(
                                 pendingExport = it
                                 createDocument.launch("bascule-settings.bascule")
                             },
-                            onFailure = { message = it.message ?: "Could not create settings backup." },
+                            onFailure = {
+                                val text = it.message ?: "Could not create settings backup."
+                                message = TransferMessage.Fixed(text)
+                            },
                         )
                     } else {
                         val bytes = pendingImport
                         pendingImport = null
                         if (bytes != null) {
                             onImport(bytes, passphrase).fold(
-                                onSuccess = { message = "Settings restored." },
-                                onFailure = { message = "Import failed. Check the file and passphrase." },
+                                onSuccess = { message = TransferMessage.ImportSucceeded(it) },
+                                onFailure = {
+                                    message = TransferMessage.Fixed("Import failed. Check the file and passphrase.")
+                                },
                             )
                         }
                     }
@@ -610,6 +632,37 @@ private fun SettingsTransferSection(
 }
 
 private enum class SettingsDialogMode { EXPORT, IMPORT }
+
+/**
+ * A successful import is the one message whose wording depends on what the
+ * import actually did, so it carries its [ImportOutcome] rather than a
+ * pre-rendered string. Modelling it as a case rather than a second flag beside
+ * the string makes "only one message can be showing" structural.
+ */
+private sealed interface TransferMessage {
+    data class Fixed(val text: String) : TransferMessage
+    data class ImportSucceeded(val outcome: ImportOutcome) : TransferMessage
+}
+
+private fun TransferMessage.resolve(): String = when (this) {
+    is TransferMessage.Fixed -> text
+    is TransferMessage.ImportSucceeded -> importSuccessMessage(outcome)
+}
+
+/**
+ * A host-changing import parks the whole pending queue behind `BLOCKED_AUTH`
+ * and deliberately declines to install the backup's own credential (see
+ * [ImportOutcome]). Reporting only "Settings restored." left both facts
+ * invisible: the user assumed delivery was healthy while every queued reading
+ * was held, and would only find out by noticing the credentials card had gone
+ * back to "Not signed in".
+ */
+internal fun importSuccessMessage(outcome: ImportOutcome): String = when (outcome) {
+    ImportOutcome.APPLIED -> "Settings restored."
+    ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE ->
+        "Settings restored, but the backup uses a different server — your credentials were cleared " +
+            "and readings are on hold. Sign in again to resume delivery."
+}
 
 @Composable
 private fun PassphraseDialog(

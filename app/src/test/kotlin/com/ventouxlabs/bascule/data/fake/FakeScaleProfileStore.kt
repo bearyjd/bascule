@@ -83,8 +83,9 @@ class FakeScaleProfileStore(
 
     override fun replaceAll(profiles: List<ScaleProfile>) {
         require(profiles.count { it.active } <= 1) { "At most one profile may be active" }
+        require(profiles.distinctBy { it.id }.size == profiles.size) { "Profile ids must be unique" }
         profiles.forEach(ScaleProfileCodec::requireWithinBounds)
-        persist(profiles.distinctBy { it.id })
+        persist(profiles)
     }
 
     private fun persist(next: List<ScaleProfile>) {

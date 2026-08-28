@@ -23,7 +23,6 @@ class ScaleProfileCodecTest {
         registeredAtMillis = 1_000L,
         active = active,
         lastVerifiedAtMillis = 2_000L,
-        initializationIncomplete = false,
     )
 
     // --- TS-H3: an unreadable stored blob must never be mistaken for an empty registry.
@@ -173,7 +172,6 @@ class ScaleProfileCodecTest {
             """"label":"Profile 1","registered":1000,"active":true}]"""
         val decoded = ScaleProfileCodec.decodeFromString(json)
         assertNull(decoded.single().lastVerifiedAtMillis)
-        assertEquals(false, decoded.single().initializationIncomplete)
     }
 
     @Test

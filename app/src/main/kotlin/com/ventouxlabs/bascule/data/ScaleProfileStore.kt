@@ -20,7 +20,6 @@ data class ScaleProfile(
     val registeredAtMillis: Long,
     val active: Boolean,
     val lastVerifiedAtMillis: Long? = null,
-    val initializationIncomplete: Boolean = false,
 ) {
     val credential: ScaleCredential get() = ScaleCredential(scaleIndex, consentCode)
 
@@ -163,11 +162,16 @@ class EncryptedScaleProfileStore(
 
     override fun replaceAll(profiles: List<ScaleProfile>) {
         require(profiles.count { it.active } <= 1) { "At most one profile may be active" }
+        // Deduping instead would let the dropped duplicate be the active one,
+        // producing zero active profiles from a list that passed the guard
+        // above — a registry that arms nothing, silently. Which duplicate wins
+        // is not a choice this store can make on the user's behalf.
+        require(profiles.distinctBy { it.id }.size == profiles.size) { "Profile ids must be unique" }
         // The gate saveProfile enforces, applied to the path an imported backup
         // takes. Deliberately not in persist(): deleteProfile routes through
         // there too, and must stay able to remove an already-stored bad row.
         profiles.forEach(ScaleProfileCodec::requireWithinBounds)
-        persist(profiles.distinctBy { it.id })
+        persist(profiles)
     }
 
     private fun persist(next: List<ScaleProfile>) {

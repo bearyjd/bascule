@@ -4,6 +4,7 @@ import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -139,5 +140,48 @@ class SettingsBackupInputTest {
             "a typo in the confirm field would otherwise encrypt the backup with an unrecoverable passphrase",
             isPassphraseValid("correct horse battery", "correct horse batttery", confirmRequired = true),
         )
+    }
+
+    // --- importSuccessMessage: round-3 MEDIUM #10, a host-changing import must say so.
+
+    @Test
+    fun reportsAPlainSuccessWhenTheImportKeptTheSameServer() {
+        assertEquals("Settings restored.", importSuccessMessage(ImportOutcome.APPLIED))
+    }
+
+    /**
+     * On a host change `ConfigViewModel.importSettings` clears both credential
+     * stores, calls `dao.blockAllPendingForAuth()`, and deliberately declines
+     * to install the backup's own credential. "Settings restored." alone read
+     * as "everything is fine" while every queued reading sat at `BLOCKED_AUTH`
+     * — the user's only clue was the credentials card reverting to "Not signed
+     * in", which they had no reason to look at.
+     */
+    @Test
+    fun namesAllThreeConsequencesOfAHostChangingImport() {
+        val message = importSuccessMessage(ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE)
+
+        assertTrue("the server change is the cause the user cannot otherwise see", message.contains("server"))
+        assertTrue("credentials being cleared is why nothing delivers", message.contains("credentials were cleared"))
+        assertTrue("the held backlog is the consequence", message.contains("readings are on hold"))
+        assertTrue("the message must name the action that resumes delivery", message.contains("Sign in again"))
+    }
+
+    @Test
+    fun distinguishesTheTwoImportOutcomes() {
+        assertNotEquals(
+            importSuccessMessage(ImportOutcome.APPLIED),
+            importSuccessMessage(ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE),
+        )
+    }
+
+    /**
+     * `importSuccessMessage` is an exhaustive `when`, so a third outcome added
+     * later fails to compile rather than silently falling back to a message
+     * that understates what the import did.
+     */
+    @Test
+    fun coversEveryImportOutcome() {
+        ImportOutcome.entries.forEach { assertTrue(importSuccessMessage(it).isNotBlank()) }
     }
 }

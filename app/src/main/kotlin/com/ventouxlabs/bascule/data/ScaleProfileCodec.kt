@@ -18,10 +18,13 @@ import kotlinx.serialization.json.jsonPrimitive
  * [EncryptedScaleProfileStore]'s registry and [SettingsBackupCodec]'s
  * portable export, and the single-active-profile upsert invariant every
  * write path in this codebase relies on. Kept free of encryption/Android
- * dependencies so it is unit-testable without a Keystore — the encrypted
- * stores that wrap it are covered by instrumented tests instead (same
- * split as [com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore]'s own
- * KDoc explains for [com.ventouxlabs.bascule.ble.session.ConsentStore]).
+ * dependencies so it is unit-testable without a Keystore. The encrypted
+ * stores that wrap it are NOT currently covered by any instrumented test —
+ * this project declares no `app/src/androidTest` tree — and are exercised
+ * in the unit-test suite only via hand-written fakes
+ * ([com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore] and similar),
+ * which do not exercise the real Keystore/EncryptedSharedPreferences path.
+ * That gap is tracked as a known limitation, not a deliberate split.
  */
 object ScaleProfileCodec {
     fun encode(items: List<ScaleProfile>): JsonArray = buildJsonArray {
@@ -124,7 +127,6 @@ object ScaleProfileCodec {
         put("registered", JsonPrimitive(profile.registeredAtMillis))
         put("active", JsonPrimitive(profile.active))
         profile.lastVerifiedAtMillis?.let { put("verified", JsonPrimitive(it)) }
-        put("incomplete", JsonPrimitive(profile.initializationIncomplete))
     }
 
     /**
@@ -150,7 +152,6 @@ object ScaleProfileCodec {
             registeredAtMillis = obj.getValue("registered").jsonPrimitive.content.toLong(),
             active = obj.getValue("active").jsonPrimitive.boolean,
             lastVerifiedAtMillis = obj["verified"]?.jsonPrimitive?.content?.toLongOrNull(),
-            initializationIncomplete = obj["incomplete"]?.jsonPrimitive?.boolean ?: false,
         )
     }
 

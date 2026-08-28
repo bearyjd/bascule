@@ -172,6 +172,99 @@ class ConfigViewModelProfileRegistryTest {
         assertEquals(listOf(profile("existing")), registry.profiles.value)
     }
 
+    /**
+     * `replaceAll` refuses duplicate ids rather than deduping — dedup would drop
+     * whichever copy came second, active flag and all. That refusal has to be
+     * front-loaded here or it throws after the URL and unit are already written.
+     */
+    @Test
+    fun importingABackupWithDuplicateProfileIdsIsRejectedBeforeAnythingIsWritten() = runTest {
+        val registry = FakeScaleProfileStore(listOf(profile("existing")))
+        val configStore = FakeConfigStore(initialBaseUrl = "https://original.example.com")
+        val vm = viewModelWithRegistry(registry, configStore)
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings(
+                profiles = listOf(
+                    profile("same", scaleIndex = 1, active = false),
+                    profile("same", scaleIndex = 2),
+                ),
+            ),
+            "correct horse battery staple",
+        )
+
+        val result = vm.importSettings(bytes, "correct horse battery staple")
+        advanceUntilIdle()
+
+        assertTrue(result.isFailure)
+        assertEquals("https://original.example.com", configStore.baseUrl.value)
+        assertEquals(listOf(profile("existing")), registry.profiles.value)
+    }
+
+    // --- M10: the screen cannot re-derive the host comparison after the import overwrote the URL.
+
+    @Test
+    fun aSameHostImportReportsThatTheCredentialWasApplied() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://mine.example.com")
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore)
+        val bytes = SettingsBackupCodec.encrypt(backupSettings(), "correct horse battery staple")
+
+        val outcome = vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(ImportOutcome.APPLIED, outcome)
+    }
+
+    @Test
+    fun aHostChangingImportReportsThatNoCredentialWasInstalled() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://original.example.com")
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore)
+        val bytes = SettingsBackupCodec.encrypt(backupSettings(), "correct horse battery staple")
+
+        val outcome = vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(
+            "reporting a plain success here would tell the user they are signed in when they are not",
+            ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE,
+            outcome,
+        )
+    }
+
+    /**
+     * M11: `V2Shaper`'s body-composition field names are placeholders, so the
+     * dropdown withholds `V2_BODY_COMP`. An ungated import would still reach it,
+     * leaving the app posting invented field names to the user's server with no
+     * way back out of the setting. The rest of the backup must still apply —
+     * one unusable field is not grounds for refusing a valid restore.
+     */
+    @Test
+    fun importingABackupPinnedToTheWithheldV2ContractSkipsThatFieldAndAppliesTheRest() = runTest {
+        val configStore = FakeConfigStore(initialBaseUrl = "https://original.example.com")
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore)
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings().copy(
+                contractVersion = ContractVersion.V2_BODY_COMP,
+                displayUnit = WeightUnit.POUNDS,
+            ),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(
+            "a contract the screen cannot select must not be reachable by import",
+            ContractVersion.V1_WEIGHT_ONLY,
+            configStore.contractVersion.value,
+        )
+        assertEquals(
+            "skipping one field must not turn into refusing the whole restore",
+            WeightUnit.POUNDS,
+            configStore.displayUnit.value,
+        )
+        assertEquals("https://mine.example.com", configStore.baseUrl.value)
+    }
+
     // --- M12: the scan registration reflects what the screen just changed.
 
     @Test
