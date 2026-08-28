@@ -19,12 +19,25 @@ class DeliveryWorker(
         val app = applicationContext as BasculeApplication
         val dao = app.database.readingDao()
         val runtime = app.runtimeApiFactory.create()
-        val retryNeeded = DeliveryDrainer(dao, runtime).drain()
-        return if (retryNeeded) Result.retry() else Result.success()
+        val outcome = DeliveryDrainer(dao, runtime).drain()
+        if (outcome == DrainOutcome.MORE_PAGES) app.deliveryScheduler.enqueueContinuation()
+        return resultFor(outcome)
     }
 
     companion object {
         const val UNIQUE_WORK_NAME = "delivery-drain"
-        const val PERIODIC_WORK_NAME = "delivery-periodic"
+
+        /**
+         * Only a real failure earns WorkManager's ladder. [DrainOutcome.MORE_PAGES]
+         * succeeds and re-enqueues instead, so pagination runs at full speed.
+         *
+         * Pure, and separated from [doWork] because a real `WorkManager` is not
+         * constructible in this project's JUnit lane — see
+         * [com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer].
+         */
+        fun resultFor(outcome: DrainOutcome): Result = when (outcome) {
+            DrainOutcome.DONE, DrainOutcome.MORE_PAGES -> Result.success()
+            DrainOutcome.FAILED -> Result.retry()
+        }
     }
 }

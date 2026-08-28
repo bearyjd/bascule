@@ -55,7 +55,7 @@ object V2Shaper : ReadingPayloadShaper {
             putOptional("bmr", reading.bmr, ReadingField.BMR, fields)
             putOptional("amr", reading.amr, ReadingField.AMR, fields)
         }
-        return ShapedPayload(json, fields)
+        return ShapedPayload(json, fields.toSet())
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.putOptional(

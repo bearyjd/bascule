@@ -10,6 +10,25 @@ import com.ventouxlabs.bascule.network.SubmitResult
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
+ * What a [DeliveryDrainer.drain] pass wants to happen next.
+ *
+ * Splitting [MORE_PAGES] out of "retry" is what keeps WorkManager's exponential
+ * ladder off healthy pagination: a `BLOCKED_AUTH` recovery of several hundred
+ * rows is many consecutive full batches, none of them a failure, and running
+ * them on the failure ladder stretched a minute of work across hours.
+ */
+enum class DrainOutcome {
+    /** Nothing left to do until something new is captured or the periodic drain fires. */
+    DONE,
+
+    /** The batch filled up; rows remain. Re-run immediately, with no backoff. */
+    MORE_PAGES,
+
+    /** Something failed transiently, or a server asked us to slow down. Back off. */
+    FAILED,
+}
+
+/**
  * Drains PENDING rows. Plain and worker-independent so it is unit-testable
  * without WorkManager/CoroutineWorker; [DeliveryWorker] is a thin adapter.
  *
@@ -44,34 +63,39 @@ class DeliveryDrainer(
     }
 
     /**
-     * Returns true if the caller should retry the drain — either a transient
-     * failure occurred, or the batch filled up and rows remain to be drained.
+     * Drains one batch and reports what should happen next.
      *
      * Only rows whose §3.4 backoff has elapsed are selected, so an unrelated
      * trigger (a manual entry saved, a token saved, a scale capture, a History
      * retry tap) no longer resubmits the whole pending set on top of a backoff
      * that has not run out.
      */
-    suspend fun drain(): Boolean {
+    suspend fun drain(): DrainOutcome {
         val batchLimit = DeliveryCoordinator.DRAIN_BATCH_LIMIT
         val pending = dao.pending(clock(), batchLimit)
         // Nothing due: returns before `recentReadings`, so a drain triggered while
         // every row is still backing off costs one indexed query and no network.
-        if (pending.isEmpty()) return false
+        if (pending.isEmpty()) return DrainOutcome.DONE
         val remote = runtime.api.recentReadings(DedupPolicy.TIME_WINDOW_MILLIS.milliseconds)
-        var retryNeeded = false
+        var failed = false
         for (row in pending) {
             when (processRow(row, remote, clock())) {
-                RowOutcome.StopDrain -> return false
-                RowOutcome.BackOffDrain -> return true
-                RowOutcome.RequestRetry -> retryNeeded = true
+                RowOutcome.StopDrain -> return DrainOutcome.DONE
+                RowOutcome.BackOffDrain -> return DrainOutcome.FAILED
+                RowOutcome.RequestRetry -> failed = true
                 RowOutcome.Continue -> Unit
             }
         }
         // A full batch means the query hit its LIMIT, not that the queue is
         // empty. Ask to be run again rather than letting the 10-minute
-        // WorkManager ceiling be what decides where this drain stopped.
-        return retryNeeded || pending.size == batchLimit
+        // WorkManager ceiling be what decides where this drain stopped. A
+        // failure anywhere in the batch outranks that: whatever went wrong
+        // would meet the next page too, so back off rather than paginate into it.
+        return when {
+            failed -> DrainOutcome.FAILED
+            pending.size == batchLimit -> DrainOutcome.MORE_PAGES
+            else -> DrainOutcome.DONE
+        }
     }
 
     private suspend fun processRow(row: ReadingEntity, remote: RecentResult, now: Long): RowOutcome {

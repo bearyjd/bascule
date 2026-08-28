@@ -461,9 +461,9 @@ stateDiagram-v2
     HELD_CONFIRM --> DECLINED: user taps "Not me"<br/>terminal, no Retry offered
     HELD_CONFIRM --> HELD_CONFIRM: never drained, never expires
     PENDING --> SENT: 2xx
-    PENDING --> PENDING: 5xx / 429 / timeout / IO → attemptCount++
+    PENDING --> PENDING: 5xx / 429 / 3xx / timeout / IO → attemptCount++
     PENDING --> BLOCKED_AUTH: 401 / 403
-    PENDING --> FAILED_PERMANENT: 400/404/409/413/422/3xx,<br/>or now - retryEpochMillis > 14 d<br/>with TRANSIENT failures
+    PENDING --> FAILED_PERMANENT: 400/404/409/413/422,<br/>or now - retryEpochMillis > 14 d<br/>with TRANSIENT failures
     BLOCKED_AUTH --> PENDING: user saves a new token<br/>(retryEpochMillis = now)
     FAILED_PERMANENT --> PENDING: user taps "Retry"<br/>(retryEpochMillis = now)
     SENT --> PENDING: replay eligible (contract v2, §4.4)<br/>(retryEpochMillis = now)
@@ -730,7 +730,7 @@ reopening of it.
 | 401, 403 | `AuthRejected` | `BLOCKED_AUTH`, drain pauses globally |
 | 408, 429, 5xx, IO/timeout/DNS | `TransientFailure` | `attemptCount++`, stays `PENDING`; honours `Retry-After` if ≤ 1 h |
 | 400, 404, 409, 413, 422 | `PermanentRejection` | `FAILED_PERMANENT` immediately — retrying a malformed or rejected body never succeeds |
-| 3xx | `PermanentRejection` | redirects are **not followed** (`followRedirects = false`, `followSslRedirects = false`); a moved endpoint is a config error, and following a redirect can leak the bearer token to another host |
+| 3xx | `TransientFailure` | redirects are **not followed** (`followRedirects = false`, `followSslRedirects = false`) — following one can leak the bearer token to another host. Retryable, not permanent (round-3 C2): a server-side redirect rule is a config change, so failing it permanently marked the *entire* pending queue `FAILED_PERMANENT` on its first attempt, unrecoverably |
 | 2xx with non-JSON or unparseable body | `Accepted` | the POST succeeded; the body is not needed. Never crash on it |
 | Response body > 64 KiB | `TransientFailure` | body read is capped; never buffered whole |
 

@@ -184,7 +184,10 @@ class VitalForgeHttpClientTest {
             0,
             attacker.requestCount,
         )
-        assertTrue(result is SubmitResult.PermanentRejection)
+        // Not followed, but not fatal either (round-3 C2): a redirect is a
+        // server-side configuration change, and failing it permanently marked
+        // the whole pending queue FAILED_PERMANENT on its first attempt.
+        assertTrue(result is SubmitResult.TransientFailure)
         attacker.close()
     }
 

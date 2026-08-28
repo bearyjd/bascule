@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.delivery
 
+import com.ventouxlabs.bascule.network.ResponseClassifier
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import kotlin.time.Duration.Companion.days
@@ -49,9 +50,28 @@ class DeliveryCoordinatorTest {
         )
     }
 
-    /** §4.5: a hostile `Retry-After` must not be able to park a reading indefinitely. */
+    /**
+     * §4.5: a hostile `Retry-After` must not be able to park a reading
+     * indefinitely. Driven through the real [ResponseClassifier] so this asserts
+     * against a header a server can actually send, not a `Duration` only a test
+     * could construct (round-3 LOW, test-integrity).
+     */
     @Test
-    fun anAbsurdRetryAfterIsClampedToOneHour() {
+    fun anAbsurdRetryAfterHeaderIsClampedToOneHour() {
+        val retryAfter = ResponseClassifier.parseRetryAfter("2592000")
+
+        assertEquals(
+            DeliveryCoordinator.MAX_RETRY_AFTER_MILLIS,
+            DeliveryCoordinator.nextAttemptMillis(now = 0L, attemptCount = 1, retryAfter = retryAfter),
+        )
+    }
+
+    /**
+     * The classifier already clamps, so this bound is a second line of defense
+     * against a `Duration` reaching here from anywhere else.
+     */
+    @Test
+    fun anAbsurdRetryAfterDurationIsClampedEvenIfItBypassesTheClassifier() {
         assertEquals(
             DeliveryCoordinator.MAX_RETRY_AFTER_MILLIS,
             DeliveryCoordinator.nextAttemptMillis(now = 0L, attemptCount = 1, retryAfter = 30.days),

@@ -4,24 +4,35 @@ import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.fake.FakeDeliveryApi
+import com.ventouxlabs.bascule.network.ReadingField
 import com.ventouxlabs.bascule.network.RecentResult
 import com.ventouxlabs.bascule.network.RemoteReading
+import com.ventouxlabs.bascule.network.ResponseClassifier
 import com.ventouxlabs.bascule.network.RuntimeApi
 import com.ventouxlabs.bascule.network.SubmitResult
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.time.Duration.Companion.days
-import kotlin.time.Duration.Companion.seconds
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 class DeliveryDrainerTest {
 
     private fun drainer(dao: FakeReadingDao, api: FakeDeliveryApi, now: Long = 10_000L) =
         DeliveryDrainer(dao, RuntimeApi(api, WeightUnit.KILOGRAMS), clock = { now })
+
+    /**
+     * Builds the [SubmitResult] the real [ResponseClassifier] would build for a
+     * response, so the `Retry-After` tests below exercise the actual parse path
+     * instead of asserting against a hand-made `Duration` production could never
+     * produce (round-3 LOW, test-integrity).
+     */
+    private fun serverResponse(httpCode: Int, retryAfter: String? = null) =
+        ResponseClassifier.classify(httpCode, setOf(ReadingField.WEIGHT), retryAfter)
 
     @Test
     fun fetchesRemoteRecentReadingsExactlyOncePerDrainRegardlessOfPendingRowCount() = runTest {
@@ -37,9 +48,9 @@ class DeliveryDrainerTest {
     fun anEmptyPendingQueueNeverCallsTheRemoteApiAtAll() = runTest {
         val dao = FakeReadingDao()
         val api = FakeDeliveryApi()
-        val retryNeeded = drainer(dao, api).drain()
+        val outcome = drainer(dao, api).drain()
         assertEquals(0, api.recentReadingsCallCount)
-        assertFalse(retryNeeded)
+        assertEquals(DrainOutcome.DONE, outcome)
     }
 
     @Test
@@ -71,8 +82,8 @@ class DeliveryDrainerTest {
         dao.insert(readingFixture(id = "row-2"))
         val api = FakeDeliveryApi()
         api.enqueueSubmitResult(SubmitResult.AuthRejected(401))
-        val retryNeeded = drainer(dao, api).drain()
-        assertFalse(retryNeeded)
+        val outcome = drainer(dao, api).drain()
+        assertEquals(DrainOutcome.DONE, outcome)
         assertTrue(dao.rows.value.all { it.status == ReadingStatus.BLOCKED_AUTH })
         // AuthRejected short-circuits the whole drain — the second row is never submitted.
         assertEquals(1, api.submittedReadingIds.size)
@@ -84,8 +95,8 @@ class DeliveryDrainerTest {
         dao.insert(readingFixture(id = "row-1"))
         val api = FakeDeliveryApi()
         api.enqueueSubmitResult(SubmitResult.PermanentRejection(422, "bad payload"))
-        val retryNeeded = drainer(dao, api).drain()
-        assertFalse(retryNeeded)
+        val outcome = drainer(dao, api).drain()
+        assertEquals(DrainOutcome.DONE, outcome)
         val row = dao.rows.value.single()
         assertEquals(ReadingStatus.FAILED_PERMANENT, row.status)
         assertEquals(ErrorClass.PERMANENT, row.lastErrorClass)
@@ -97,8 +108,8 @@ class DeliveryDrainerTest {
         dao.insert(readingFixture(id = "row-1"))
         val api = FakeDeliveryApi()
         api.enqueueSubmitResult(SubmitResult.TransientFailure("socket hang up", retryAfter = null))
-        val retryNeeded = drainer(dao, api).drain()
-        assertTrue(retryNeeded)
+        val outcome = drainer(dao, api).drain()
+        assertEquals(DrainOutcome.FAILED, outcome)
         val row = dao.rows.value.single()
         assertEquals(ReadingStatus.PENDING, row.status)
         assertEquals(1, row.attemptCount)
@@ -182,11 +193,11 @@ class DeliveryDrainerTest {
         dao.insert(readingFixture(id = "rate-limited", capturedAtMillis = 1L))
         dao.insert(readingFixture(id = "behind-it", capturedAtMillis = 2L))
         val api = FakeDeliveryApi()
-        api.enqueueSubmitResult(SubmitResult.TransientFailure("server returned 429", retryAfter = 60.seconds))
+        api.enqueueSubmitResult(serverResponse(429, retryAfter = "60"))
 
-        val retryNeeded = drainer(dao, api, now = 10_000L).drain()
+        val outcome = drainer(dao, api, now = 10_000L).drain()
 
-        assertTrue(retryNeeded)
+        assertEquals(DrainOutcome.FAILED, outcome)
         assertEquals(
             "submitting the rest of the batch would walk into the same rate limit",
             listOf("rate-limited"),
@@ -198,20 +209,108 @@ class DeliveryDrainerTest {
         )
     }
 
-    /** §4.5: a hostile `Retry-After` must not be able to park a reading indefinitely. */
+    /**
+     * §4.5: a hostile `Retry-After` must not be able to park a reading
+     * indefinitely — and it must not be discarded either, which is what used to
+     * turn "park the batch" into "burst the rest of it".
+     */
     @Test
-    fun anAbsurdRetryAfterIsClampedToTheOneHourCeiling() = runTest {
+    fun anAbsurdRetryAfterIsClampedToTheOneHourCeilingRatherThanBurstingTheBatch() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "rate-limited", capturedAtMillis = 1L))
+        dao.insert(readingFixture(id = "behind-it", capturedAtMillis = 2L))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(serverResponse(429, retryAfter = "2592000"))
+
+        val outcome = drainer(dao, api, now = 0L).drain()
+
+        assertEquals(DrainOutcome.FAILED, outcome)
+        assertEquals(listOf("rate-limited"), api.submittedReadingIds)
+        assertEquals(
+            DeliveryCoordinator.MAX_RETRY_AFTER_MILLIS,
+            dao.rows.value.single { it.id == "rate-limited" }.nextAttemptMillis,
+        )
+    }
+
+    /**
+     * Regression (round-3 HIGH #2). An HTTP-date `Retry-After` used to parse to
+     * null, which the drainer read as "no backoff asked for" and answered by
+     * submitting the rest of the batch into the same rate limiter.
+     */
+    @Test
+    fun anHttpDateRetryAfterParksTheBatchInsteadOfBurstingIt() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "rate-limited", capturedAtMillis = 1L))
+        dao.insert(readingFixture(id = "behind-it", capturedAtMillis = 2L))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(serverResponse(429, retryAfter = HTTP_DATE_TWO_MINUTES_OUT))
+
+        val outcome = drainer(dao, api, now = 10_000L).drain()
+
+        assertEquals(DrainOutcome.FAILED, outcome)
+        assertEquals(listOf("rate-limited"), api.submittedReadingIds)
+        val nextAttempt = dao.rows.value.single { it.id == "rate-limited" }.nextAttemptMillis
+        assertTrue(
+            "the server's own deadline must move the row, not the 30 s ladder",
+            (nextAttempt ?: 0L) > 10_000L + 60_000L,
+        )
+    }
+
+    /**
+     * Regression (round-3 HIGH #2). The last resort: even a `Retry-After` that
+     * cannot be read at all must park the batch, never resume it.
+     */
+    @Test
+    fun aRateLimitWithAnUnreadableRetryAfterStillParksTheBatch() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "rate-limited", capturedAtMillis = 1L))
+        dao.insert(readingFixture(id = "behind-it", capturedAtMillis = 2L))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(serverResponse(429, retryAfter = "whenever you like"))
+
+        val outcome = drainer(dao, api, now = 10_000L).drain()
+
+        assertEquals(DrainOutcome.FAILED, outcome)
+        assertEquals(
+            "a rate limit with no readable deadline is still a rate limit",
+            listOf("rate-limited"),
+            api.submittedReadingIds,
+        )
+    }
+
+    /** The same, for the case the server sent no `Retry-After` header at all. */
+    @Test
+    fun aRateLimitWithNoRetryAfterHeaderStillParksTheBatch() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "rate-limited", capturedAtMillis = 1L))
+        dao.insert(readingFixture(id = "behind-it", capturedAtMillis = 2L))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(serverResponse(429))
+
+        val outcome = drainer(dao, api, now = 10_000L).drain()
+
+        assertEquals(DrainOutcome.FAILED, outcome)
+        assertEquals(listOf("rate-limited"), api.submittedReadingIds)
+    }
+
+    /**
+     * Regression (round-3 C2). A redirect is a server-side configuration change;
+     * classifying it permanently marked the entire pending queue FAILED_PERMANENT
+     * on its first attempt, unrecoverably.
+     */
+    @Test
+    fun aRedirectLeavesTheRowPendingRatherThanFailingItPermanently() = runTest {
         val dao = FakeReadingDao()
         dao.insert(readingFixture(id = "row-1"))
         val api = FakeDeliveryApi()
-        api.enqueueSubmitResult(SubmitResult.TransientFailure("server returned 429", retryAfter = 30.days))
+        api.enqueueSubmitResult(serverResponse(308))
 
-        drainer(dao, api, now = 0L).drain()
+        val outcome = drainer(dao, api, now = 10_000L).drain()
 
-        assertEquals(
-            DeliveryCoordinator.MAX_RETRY_AFTER_MILLIS,
-            dao.rows.value.single().nextAttemptMillis,
-        )
+        assertEquals(DrainOutcome.FAILED, outcome)
+        val row = dao.rows.value.single()
+        assertEquals(ReadingStatus.PENDING, row.status)
+        assertEquals(ErrorClass.TRANSIENT, row.lastErrorClass)
     }
 
     /**
@@ -228,10 +327,43 @@ class DeliveryDrainerTest {
         }
         val api = FakeDeliveryApi()
 
-        val retryNeeded = drainer(dao, api).drain()
+        val outcome = drainer(dao, api).drain()
 
         assertEquals(DeliveryCoordinator.DRAIN_BATCH_LIMIT, api.submittedReadingIds.size)
-        assertTrue("rows remain beyond the batch — the worker must be asked to run again", retryNeeded)
+        assertEquals(
+            "rows remain beyond the batch — that is pagination, not a failure to back off from",
+            DrainOutcome.MORE_PAGES,
+            outcome,
+        )
+    }
+
+    /**
+     * Regression (round-3 HIGH #3). A full batch that also hit a transient
+     * failure must back off rather than paginate: whatever failed would meet the
+     * next page too.
+     */
+    @Test
+    fun aFullBatchThatAlsoFailedBacksOffRatherThanPaginating() = runTest {
+        val dao = FakeReadingDao()
+        repeat(DeliveryCoordinator.DRAIN_BATCH_LIMIT + 5) { index ->
+            dao.insert(readingFixture(id = "row-$index", capturedAtMillis = index.toLong()))
+        }
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(SubmitResult.TransientFailure("socket hang up", retryAfter = null))
+
+        val outcome = drainer(dao, api).drain()
+
+        assertEquals(DrainOutcome.FAILED, outcome)
+    }
+
+    /** A batch that empties the queue is finished; nothing should be re-enqueued. */
+    @Test
+    fun aBatchThatDrainsEverythingIsDone() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "row-1"))
+        val api = FakeDeliveryApi()
+
+        assertEquals(DrainOutcome.DONE, drainer(dao, api).drain())
     }
 
     @Test
@@ -245,5 +377,15 @@ class DeliveryDrainerTest {
         drainer(dao, api, now = now).drain()
         assertTrue(api.submittedReadingIds.isEmpty())
         assertEquals(ReadingStatus.FAILED_PERMANENT, dao.rows.value.single().status)
+    }
+
+    private companion object {
+        /**
+         * Built against the wall clock because [ResponseClassifier] resolves an
+         * HTTP-date against `Instant.now()` — the drainer's injected clock only
+         * governs row bookkeeping, not header parsing.
+         */
+        val HTTP_DATE_TWO_MINUTES_OUT: String = DateTimeFormatter.RFC_1123_DATE_TIME
+            .format(ZonedDateTime.now(ZoneOffset.UTC).plusMinutes(2))
     }
 }
