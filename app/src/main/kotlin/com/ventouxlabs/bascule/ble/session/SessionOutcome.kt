@@ -35,4 +35,12 @@ enum class MissReason {
 
     /** `onServicesDiscovered` reported a non-zero status — a transport failure, not "wrong device". */
     DISCOVERY_FAILED,
+
+    /**
+     * A connect attempt ended in a disconnect carrying `GATT_SUCCESS`: the peer
+     * hung up cleanly rather than the link never completing. Distinct from
+     * [CONNECT_TIMEOUT] because the two need different diagnoses — one is a
+     * radio/range problem, the other a scale that answered and then refused.
+     */
+    GRACEFUL_DISCONNECT,
 }

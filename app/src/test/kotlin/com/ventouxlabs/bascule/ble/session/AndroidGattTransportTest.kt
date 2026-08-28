@@ -8,6 +8,7 @@ import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -97,6 +98,32 @@ class AndroidGattTransportTest {
             subscription.status,
         )
         assertEquals(SubscriptionKind.NOTIFY, subscription.kind)
+    }
+
+    /**
+     * pr-1-review-round3 HIGH #1. Every `GattSession` retry branch is supposed
+     * to `close()` before looping back to `connect()`, and the contention
+     * branch did not — which orphaned the previous `BluetoothGatt` client
+     * registration. The per-app client table is finite, so repeated leaks
+     * surface much later as permanent status-133 until the process is killed,
+     * pointing at nothing. This guard makes that class of bug unreachable from
+     * here regardless of which branch calls in.
+     */
+    @Test
+    fun connectingAgainClosesThePriorGattClient() {
+        shadowOf(adapter).setEnabled(true)
+        val device = adapter.getRemoteDevice(DEVICE_ADDRESS)
+        val transport = AndroidGattTransport(context, device, adapter)
+
+        transport.connect()
+        val first = shadowOf(device).bluetoothGatts.single()
+        transport.connect()
+
+        assertTrue(
+            "the previous BluetoothGatt client must be closed, not orphaned",
+            shadowOf(first).isClosed,
+        )
+        assertEquals("the retry must still get a fresh client", 2, shadowOf(device).bluetoothGatts.size)
     }
 
     private companion object {

@@ -87,6 +87,10 @@ class FakeGattTransport(
                 emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
                 emit(TransportEvent.ConnectionStateChanged(connected = false, status = outcome.status))
             }
+            ConnectOutcome.ConnectThenAdapterOff -> {
+                emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
+                emit(TransportEvent.AdapterOff)
+            }
             ConnectOutcome.Timeout -> Unit // deliberately silent — the session's own timer must fire
         }
     }
@@ -179,6 +183,14 @@ sealed interface ConnectOutcome {
      * 8/19/22"), and `01-plan.md` §3.6b's `device_busy.scale` fixture.
      */
     data class ConnectThenDrop(val status: Int) : ConnectOutcome
+
+    /**
+     * `CONNECTED` immediately followed by the adapter being switched off — the
+     * shape that reaches `GattSession.connectedOrImmediateDrop`'s peek as
+     * something that is neither a disconnect nor this step's answer, and that
+     * must not be discarded (E12).
+     */
+    data object ConnectThenAdapterOff : ConnectOutcome
 }
 
 /** Scripted outcome of `discoverServices()`. */

@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** `00-design.md` §8.10 and §2.3 E12/E15 — teardown discipline. */
@@ -55,10 +56,11 @@ class GattSessionTeardownTest {
 
     /**
      * Parameterised across the terminal paths that involve **no** mid-retry
-     * close: E1 and E2 are excluded here because `gatt.close()` before a retry
-     * is mandatory and additional for those two edges (§2.3, §8.10) — covered by
-     * `GattSessionConnectTest.status133ClosesGattBeforeRetrying` instead, which
-     * asserts ordering rather than a total of one.
+     * close: E1, E2 and E3 are all excluded here because `gatt.close()` before
+     * a retry is mandatory and additional for those edges (§2.3, §8.10) —
+     * covered by `GattSessionConnectTest.status133ClosesGattBeforeRetrying` and
+     * [contentionClosesBeforeItsRetry] instead, which assert ordering
+     * rather than a total of one.
      */
     @Test
     fun everyTerminalPathClosesGattExactlyOnce() = runTest {
@@ -67,9 +69,6 @@ class GattSessionTeardownTest {
                 discovered = DiscoveredServices(emptyMap()),
             ),
             "discovery timeout" to FakeGattTransport(discoverOutcome = DiscoverOutcome.Timeout),
-            "contention exhausted (E3, no mid-retry close)" to FakeGattTransport(
-                connectOutcomes = listOf(ConnectOutcome.Failure(STATUS_BUSY), ConnectOutcome.Failure(STATUS_BUSY)),
-            ),
         )
 
         for ((label, transport) in scenarios) {
@@ -116,6 +115,30 @@ class GattSessionTeardownTest {
 
         assertEquals(4, transport.connectCallCount)
         assertEquals(5, transport.closeCallCount)
+    }
+
+    /**
+     * E3 closes before its retry too — without that, the retry's `connect()`
+     * orphaned the previous `BluetoothGatt` client registration, and the
+     * per-app client table is finite. Its close sits *after* the exhaustion
+     * check rather than before it (unlike E1/E2), because the close exists to
+     * stop a retry leaking and the attempt that ends the phase makes no retry:
+     * one close for the one retry, plus the terminal close.
+     */
+    @Test
+    fun contentionClosesBeforeItsRetry() = runTest {
+        val transport = FakeGattTransport(
+            connectOutcomes = listOf(ConnectOutcome.Failure(STATUS_BUSY), ConnectOutcome.Failure(STATUS_BUSY)),
+        )
+
+        session(transport).run()
+
+        assertEquals(2, transport.connectCallCount)
+        assertEquals(2, transport.closeCallCount)
+        assertTrue(
+            "close() must happen before the retrying connect(), got ${transport.callOrder}",
+            transport.callOrder.indexOf("close") < transport.callOrder.lastIndexOf("connect"),
+        )
     }
 
     private companion object {

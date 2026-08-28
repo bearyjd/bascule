@@ -236,9 +236,46 @@ class GattSessionConnectTest {
         )
     }
 
+    /**
+     * `connectedOrImmediateDrop` peeks one queued event to catch E3's
+     * connect-then-drop shape. An adapter-off queued behind `CONNECTED` used to
+     * be consumed by that peek and thrown away: the session reported
+     * `Connected`, discovery then ran its full 5 s against a dead adapter, and
+     * the outcome came back `Incompatible` — a statement about the *device*
+     * that also feeds `INCOMPATIBLE_STREAK` and can suspend scan arming (E4).
+     */
+    @Test
+    fun anAdapterOffQueuedBehindConnectedIsNotSwallowedByThePeek() = runTest {
+        val transport = FakeGattTransport(connectOutcomes = listOf(ConnectOutcome.ConnectThenAdapterOff))
+
+        val outcome = session(transport).run()
+
+        assertEquals(SessionOutcome.Missed(MissReason.ADAPTER_OFF), outcome)
+        assertEquals("no retry after adapter-off", 1, transport.connectCallCount)
+    }
+
+    /**
+     * A disconnect carrying `GATT_SUCCESS` means the peer hung up cleanly — the
+     * scale accepted the connection and then refused it, which is a different
+     * diagnosis from a link that never came up. Recovery is E1's ladder either
+     * way; only the reported reason differs.
+     */
+    @Test
+    fun aGracefulDisconnectIsNotReportedAsAConnectTimeout() = runTest {
+        val transport = FakeGattTransport(
+            connectOutcomes = List(2) { ConnectOutcome.Failure(GATT_SUCCESS) },
+        )
+
+        val outcome = session(transport).run()
+
+        assertEquals(SessionOutcome.Missed(MissReason.GRACEFUL_DISCONNECT), outcome)
+        assertEquals("same E1 ladder — one retry", 2, transport.connectCallCount)
+    }
+
     private companion object {
         const val DEVICE_ADDRESS = "E7:DB:51:F1:36:91"
         const val GATT_ERROR = 133
+        const val GATT_SUCCESS = 0
         const val STATUS_BUSY = 8
     }
 }

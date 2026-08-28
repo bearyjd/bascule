@@ -79,10 +79,14 @@ class SessionBudgetTest {
      * case, not just one ack ladder: `BeurerDecoder`'s handshake can chain up
      * to three independently-ack'd UCP writes — a stale stored credential's
      * Consent (refused) → Register → Consent again — each with its own E6
-     * ladder, plus the Current Time opening write. `HARD_SESSION_CEILING` is
-     * not enforced anywhere in `GattSession` yet (that lands with WP-08's
-     * worker), so exceeding it here is not a regression to silently fix — it
-     * is the number WP-08 needs before adding that enforcement.
+     * ladder, plus the Current Time opening write.
+     *
+     * `GattSession.run` now enforces `HARD_SESSION_CEILING`, so the second
+     * assertion below is a statement about live behaviour rather than a number
+     * held for later: this worst case *is* cut off by the ceiling mid-wait,
+     * and the session reports whatever it holds at that point. What it must
+     * never do there is discard a reading it already emitted — see
+     * `GattSessionMeasureTest.anEmittedReadingSurvivesTheCeilingFiringDuringPostEmissionIdle`.
      */
     @Test
     fun handshakeLadderFitsWithinHardCeilingAfterConnectPhase() {
@@ -103,8 +107,8 @@ class SessionBudgetTest {
             beforeFirstIndication < SessionBudget.HARD_SESSION_CEILING,
         )
         assertTrue(
-            "the full worst case ($withFirstIndication) exceeds the 90s hard ceiling — expected " +
-                "today since nothing enforces it yet; WP-08 needs this number when it does",
+            "the full worst case ($withFirstIndication) exceeds the 90s hard ceiling, which is " +
+                "what makes GattSession.run's ceiling wrapper load-bearing rather than decorative",
             withFirstIndication >= SessionBudget.HARD_SESSION_CEILING,
         )
     }

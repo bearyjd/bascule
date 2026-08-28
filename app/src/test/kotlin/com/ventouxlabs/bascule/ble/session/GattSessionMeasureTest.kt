@@ -6,12 +6,12 @@ import com.ventouxlabs.bascule.ble.fake.Bf720Capture
 import com.ventouxlabs.bascule.ble.fake.ConnectOutcome
 import com.ventouxlabs.bascule.ble.fake.FakeGattTransport
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
-import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -36,26 +36,19 @@ import org.junit.Test
  * `aFailedReconnectGivesUpWithDropped`.
  *
  * Also discovered while writing these tests: `MeasurementCorrelator`'s
- * `MAX_EMISSIONS_PER_SESSION = 1` latch means `finishEmission`'s
- * `DUPLICATE_STABLE_SUPPRESSED` counter (added for a prior review finding)
- * can never actually fire — a second `Stable` decode is structurally
- * impossible once one has been emitted this session. See
- * `aSecondIndependentPairDuringPostEmissionIdleIsDroppedNotEmittedTwice`'s
- * own KDoc for detail. The correlator's own `unpairableFramesDropped`/
- * `duplicateFramesSuppressed` counters are what actually track this and
- * are not currently wired to `DiagnosticsCounters` at all — a real,
- * separate gap, out of scope for this test-only pass.
+ * `MAX_EMISSIONS_PER_SESSION = 1` latch means a second `Stable` decode is
+ * structurally impossible once one has been emitted this session, which made
+ * `finishEmission`'s `DUPLICATE_STABLE_SUPPRESSED` counter unreachable. That
+ * branch has since been deleted. The correlator's own
+ * `unpairableFramesDropped`/`duplicateFramesSuppressed` counters are what
+ * actually track this and are still not wired to `DiagnosticsCounters` — a
+ * real, separate gap.
  *
- * Not covered here: a *live* test of [SessionBudget.HARD_SESSION_CEILING]
- * actually cutting a session off at 90s. Every individual phase (connect,
- * discovery, handshake ack ladder, measurement wait, correlation window) is
- * independently bounded well under 90s and returns a terminal outcome on its
- * own; constructing a live scenario that reaches the outer 90s wrapper
- * without terminating earlier via one of those bounded paths — short of
- * spinning a synchronous fake transport in a real, wall-clock infinite loop
- * with no virtual-time advancement — was not safely constructible in this
- * pass. The static arithmetic guarantee (every phase's worst case still fits
- * under the ceiling) is already covered by
+ * [SessionBudget.HARD_SESSION_CEILING] *is* covered live, by
+ * [anEmittedReadingSurvivesTheCeilingFiringDuringPostEmissionIdle]: no single
+ * phase can reach 90s alone, but a drop late in the first measurement window
+ * plus the one permitted reconnect's own 45s window does. The static
+ * arithmetic guarantee is covered separately by
  * [SessionBudgetTest.hardCeilingExceedsSumOfNonBondTimers].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -128,20 +121,21 @@ class GattSessionMeasureTest {
 
     /**
      * `MeasurementCorrelator.MAX_EMISSIONS_PER_SESSION = 1` is a permanent
-     * one-shot latch (`MeasurementCorrelator.kt:166`): once a session emits
-     * one `Stable` reading, a later frame can never decode as `Stable` again
-     * — it becomes `Ignored`, and the correlator's own `unpairableFramesDropped`
-     * counts it. `GattSession.finishEmission`'s `DUPLICATE_STABLE_SUPPRESSED`
-     * check is therefore unreachable in this exact scenario, by design — this
-     * test documents that (a genuinely independent second weigh-in landing in
-     * the post-emission idle window is dropped, not double-counted or
-     * double-emitted), not a gap in `finishEmission` itself.
+     * one-shot latch: once a session emits one `Stable` reading, no later frame
+     * can decode as `Stable` again — every emit path clears the buffered weight
+     * first and the closed correlation blocks a new one from being buffered, so
+     * a later frame becomes `Ignored` and the correlator's own
+     * `unpairableFramesDropped` counts it. That is what made
+     * `finishEmission`'s `DUPLICATE_STABLE_SUPPRESSED` branch unreachable in
+     * *every* scenario rather than only this one, and why it is now deleted.
+     * This test pins the observable behaviour that remains: a genuinely
+     * independent second weigh-in landing in the post-emission idle window is
+     * dropped, not double-emitted.
      */
     @Test
     fun aSecondIndependentPairDuringPostEmissionIdleIsDroppedNotEmittedTwice() = runTest {
         val transport = consentedTransport()
-        val diagnostics = InMemoryDiagnosticsCounters()
-        val deferred = async { session(transport, diagnostics).run() }
+        val deferred = async { session(transport).run() }
 
         runCurrent()
         transport.indicate(SigWeightProfile.WEIGHT_MEASUREMENT, Bf720Capture.WEIGHT_MEASUREMENT)
@@ -157,11 +151,6 @@ class GattSessionMeasureTest {
         assertNotNull(
             "exactly one reading per session, per MeasurementCorrelator's one-shot latch",
             (outcome as SessionOutcome.Completed).reading,
-        )
-        assertEquals(
-            "the correlator's own latch prevents a second Stable decode, so this path never fires",
-            0,
-            diagnostics.value(DiagnosticsCounterKey.DUPLICATE_STABLE_SUPPRESSED),
         )
     }
 
@@ -344,6 +333,65 @@ class GattSessionMeasureTest {
         )
     }
 
+    /**
+     * C3. [SessionBudget.HARD_SESSION_CEILING] wraps the whole session including
+     * [SessionBudget.POST_EMISSION_IDLE], so it can fire *after* a reading has
+     * already been decoded, attributed and emitted. `flush()` cannot recover it
+     * at that point — [com.ventouxlabs.bascule.ble.decoders.MeasurementCorrelator]
+     * consumed `pendingWeight` during the emission — so before the fix the
+     * ceiling silently turned a successful weigh-in into
+     * `Missed(NO_MEASUREMENT)`.
+     *
+     * Reaching past 80 s takes two measurement windows: the weight lands late in
+     * the first, the link drops, and the one permitted reconnect opens a second
+     * 45 s window in which the body-composition frame completes the pair.
+     */
+    @Test
+    fun anEmittedReadingSurvivesTheCeilingFiringDuringPostEmissionIdle() = runTest {
+        // Late inside the first window, so the reconnected leg's own window still
+        // reaches past the ceiling minus the post-emission idle timer.
+        val dropAtMillis = SessionBudget.FIRST_INDICATION_TIMEOUT.inWholeMilliseconds - LATE_IN_WINDOW_MARGIN_MILLIS
+        val emitAtMillis =
+            (SessionBudget.HARD_SESSION_CEILING - SessionBudget.POST_EMISSION_IDLE / 2).inWholeMilliseconds
+        assertTrue(
+            "precondition: the reconnected leg's window must still be open at ${emitAtMillis}ms",
+            dropAtMillis + SessionBudget.FIRST_INDICATION_TIMEOUT.inWholeMilliseconds > emitAtMillis,
+        )
+
+        val transport = consentedTransport()
+        val deferred = async { session(transport).run() }
+
+        runCurrent()
+        advanceTimeBy(dropAtMillis)
+        transport.indicate(SigWeightProfile.WEIGHT_MEASUREMENT, Bf720Capture.WEIGHT_MEASUREMENT)
+        transport.dropConnection()
+        runCurrent()
+        assertEquals("the drop must be recovered by the one permitted reconnect", 2, transport.connectCallCount)
+
+        advanceTimeBy(emitAtMillis - currentTime)
+        transport.indicate(SigWeightProfile.BODY_COMPOSITION_MEASUREMENT, Bf720Capture.BODY_COMPOSITION_MEASUREMENT)
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+        assertEquals(
+            "the ceiling, not the measurement window, must be what ended the session",
+            SessionBudget.HARD_SESSION_CEILING.inWholeMilliseconds,
+            currentTime,
+        )
+        assertTrue(
+            "an already-emitted reading must survive the ceiling, got $outcome",
+            outcome is SessionOutcome.Completed,
+        )
+        val reading = requireNotNull((outcome as SessionOutcome.Completed).reading)
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+        assertEquals(
+            "the paired body-composition data must survive with it",
+            Bf720Capture.EXPECTED_BODY_FAT_PCT,
+            reading.bodyFatPct ?: 0.0,
+            TOLERANCE,
+        )
+    }
+
     @Test
     fun sessionTearsDownWithinPostEmissionIdleAfterASuccessfulReading() = runTest {
         val transport = consentedTransport()
@@ -369,5 +417,8 @@ class GattSessionMeasureTest {
          * the assertion is specifically that the *first* window is still open.
          */
         const val ORPHAN_TO_WEIGHT_GAP_MILLIS = 10_000L
+
+        /** How far short of a measurement window's end a frame counts as "late inside it". */
+        const val LATE_IN_WINDOW_MARGIN_MILLIS = 2_000L
     }
 }

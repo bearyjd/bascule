@@ -57,6 +57,14 @@ class GattSession(
      */
     private var reconnectAttempts = 0
 
+    /**
+     * Set the moment [MeasurementCorrelator][com.ventouxlabs.bascule.ble.decoders.MeasurementCorrelator]
+     * produces a reading, before [finishEmission]'s idle wait. Once that has
+     * happened the decoder has nothing left to flush, so the reading exists
+     * only here — see [outcomeAtCeiling].
+     */
+    private var emittedReading: com.ventouxlabs.bascule.ble.ScaleReading? = null
+
     init {
         // The two are independent parameters kept consistent by hand, and only
         // registration has a reason to stop once the handshake lands — a
@@ -101,11 +109,8 @@ class GattSession(
         val events = Channel<TransportEvent>(Channel.UNLIMITED)
         val forwarder = launch { transport.events.collect { events.trySend(it) } }
         try {
-            // E17: the ceiling can fire mid-correlation-window, so it flushes
-            // too. Returns the fallback untouched for every earlier phase,
-            // where the decoder is holding nothing.
             withTimeoutOrNull(SessionBudget.HARD_SESSION_CEILING) { connectAndDiscover(events) }
-                ?: flushOrElse(SessionOutcome.Missed(MissReason.NO_MEASUREMENT))
+                ?: outcomeAtCeiling()
         } finally {
             forwarder.cancel()
             // 00-design.md §8.10: every terminal path calls close() exactly
@@ -171,13 +176,21 @@ class GattSession(
                 }
 
                 outcome is ConnectAttempt.Failed && outcome.status in CONTENTION_STATUSES -> {
-                    // E3: deliberately non-aggressive — one retry, no close() first (ADR-003).
+                    // E3: deliberately non-aggressive — one retry (ADR-003 fixes
+                    // the retry *count*, not the teardown).
                     onLadderEntered(MissReason.CONTENTION)
                     if (contentionRetries >= SessionBudget.CONTENTION_MAX_RETRIES) {
                         return ConnectPhaseResult.Failed(MissReason.CONTENTION)
                     }
                     contentionRetries++
+                    // Same teardown-before-retry discipline as E1/E2 (§2.3,
+                    // §8.10). Looping back to connect() without it leaves the
+                    // previous BluetoothGatt client registered — the per-app
+                    // client table is finite, and exhausting it produces
+                    // permanent status-133 until the process is killed.
+                    transport.close()
                     delay(SessionBudget.CONTENTION_RETRY_DELAY)
+                    drainStaleEvents(events)
                 }
 
                 else -> {
@@ -187,10 +200,11 @@ class GattSession(
                     //  _ENCRYPTION) falls here today and reports as a connect
                     //  timeout; once bonding lands it must route to BONDING (E5)
                     //  instead.
-                    onLadderEntered(MissReason.CONNECT_TIMEOUT)
+                    val reason = disconnectReason(outcome)
+                    onLadderEntered(reason)
                     transport.close()
                     if (timeoutRetries >= SessionBudget.CONNECT_TIMEOUT_MAX_RETRIES) {
-                        return ConnectPhaseResult.Failed(MissReason.CONNECT_TIMEOUT)
+                        return ConnectPhaseResult.Failed(reason)
                     }
                     timeoutRetries++
                     delay(SessionBudget.CONNECT_TIMEOUT_RETRY_DELAY)
@@ -199,6 +213,20 @@ class GattSession(
             }
         }
     }
+
+    /**
+     * A disconnect carrying `GATT_SUCCESS` is the peer closing the link
+     * deliberately, not a radio failure that never completed — reporting it as
+     * `CONNECT_TIMEOUT` hides a scale that accepted the connection and then
+     * hung up. The recovery is the same (E1's close-wait-retry-once ladder);
+     * only the reason it is reported under differs.
+     */
+    private fun disconnectReason(outcome: ConnectAttempt?): MissReason =
+        if (outcome is ConnectAttempt.Failed && outcome.status == STATUS_GATT_SUCCESS) {
+            MissReason.GRACEFUL_DISCONNECT
+        } else {
+            MissReason.CONNECT_TIMEOUT
+        }
 
     private suspend fun receiveConnectOutcome(events: Channel<TransportEvent>): ConnectAttempt {
         while (true) {
@@ -236,14 +264,22 @@ class GattSession(
      * runs; treat that queued drop as the whole attempt's outcome rather than
      * reporting `Connected` and letting discovery misclassify it as E4
      * (`01-plan.md`'s `device_busy.scale` fixture is exactly this shape).
+     *
+     * [TransportEvent.AdapterOff] has to be classified here too, not just the
+     * drop: the peek consumes whatever is queued, so discarding an adapter-off
+     * left the session reporting `Connected` and then running discovery's full
+     * 5 s against a dead adapter, ending as `Incompatible` — a statement about
+     * the *device*, which also feeds `INCOMPATIBLE_STREAK` — instead of
+     * `Missed(ADAPTER_OFF)`. Anything else is stale by construction at an
+     * attempt boundary and discarded, as in [drainStaleEvents].
      */
-    private fun connectedOrImmediateDrop(events: Channel<TransportEvent>): ConnectAttempt {
+    private fun connectedOrImmediateDrop(events: Channel<TransportEvent>): ConnectAttempt = when (
         val queued = events.tryReceive().getOrNull()
-        return if (queued is TransportEvent.ConnectionStateChanged && !queued.connected) {
-            ConnectAttempt.Failed(queued.status)
-        } else {
-            ConnectAttempt.Connected
-        }
+    ) {
+        is TransportEvent.AdapterOff -> ConnectAttempt.AdapterOff
+        is TransportEvent.ConnectionStateChanged ->
+            if (queued.connected) ConnectAttempt.Connected else ConnectAttempt.Failed(queued.status)
+        else -> ConnectAttempt.Connected
     }
 
     /**
@@ -626,6 +662,28 @@ class GattSession(
     private fun flushOrElse(fallback: SessionOutcome): SessionOutcome =
         readingFromFlush()?.let { SessionOutcome.Completed(it) } ?: fallback
 
+    /**
+     * [SessionBudget.HARD_SESSION_CEILING] wraps the *whole* session, teardown
+     * included, so it can fire after a reading has already been emitted — the
+     * post-emission idle timer is 10 s and the ceiling does not stop for it.
+     * [readingFromFlush] cannot recover that reading: the correlator consumed
+     * its buffered weight during the emission and has nothing left to release,
+     * so the ceiling would report `NO_MEASUREMENT` for a weigh-in that
+     * succeeded. [emittedReading] is where it survives.
+     *
+     * The ceiling itself deliberately still applies once a reading exists: it
+     * is an unconditional teardown bound, and cutting the idle wait short costs
+     * nothing now that the result cannot be lost with it.
+     *
+     * Falling back to [flushOrElse] keeps E17 intact for the earlier case — the
+     * ceiling firing mid-correlation-window, where the decoder *is* still
+     * holding a weight. Every phase before that holds nothing, and the fallback
+     * passes through untouched.
+     */
+    private fun outcomeAtCeiling(): SessionOutcome =
+        emittedReading?.let { SessionOutcome.Completed(it) }
+            ?: flushOrElse(SessionOutcome.Missed(MissReason.NO_MEASUREMENT))
+
     private fun readingFromFlush(): com.ventouxlabs.bascule.ble.ScaleReading? =
         (decoder.flush() as? DecodeEvent.Stable)?.reading
 
@@ -686,15 +744,22 @@ class GattSession(
         events: Channel<TransportEvent>,
         reading: com.ventouxlabs.bascule.ble.ScaleReading,
     ): SessionOutcome {
+        // Recorded before the idle wait, not after it: HARD_SESSION_CEILING can
+        // fire inside that wait, and by then the decoder has nothing left to
+        // flush. See [outcomeAtCeiling].
+        emittedReading = reading
         withTimeoutOrNull(SessionBudget.POST_EMISSION_IDLE) {
             while (true) {
                 when (val event = events.receive()) {
                     is TransportEvent.AdapterOff -> return@withTimeoutOrNull
                     is TransportEvent.ConnectionStateChanged -> if (!event.connected) return@withTimeoutOrNull
                     is TransportEvent.CharacteristicChanged -> {
-                        if (decoder.onNotification(event.char, event.value) is DecodeEvent.Stable) {
-                            diagnostics.increment(DiagnosticsCounterKey.DUPLICATE_STABLE_SUPPRESSED)
-                        }
+                        // Still fed to the decoder so the correlator's own
+                        // drop/duplicate counters stay accurate. It can never
+                        // decode `Stable` again — `MAX_EMISSIONS_PER_SESSION`
+                        // is a permanent one-shot latch and every emit path
+                        // clears the buffered weight first.
+                        decoder.onNotification(event.char, event.value)
                     }
                     is TransportEvent.ServicesDiscovered,
                     is TransportEvent.WriteComplete,
@@ -842,6 +907,9 @@ class GattSession(
     private companion object {
         /** Android's catch-all `GATT_ERROR` (E2). */
         const val STATUS_GATT_ERROR = 133
+
+        /** `BluetoothGatt.GATT_SUCCESS` — on a *disconnect*, a graceful close. */
+        const val STATUS_GATT_SUCCESS = 0
 
         /** Busy / already-connected / contention statuses (E3, `00-design.md` §2.3). */
         val CONTENTION_STATUSES = setOf(8, 19, 22)

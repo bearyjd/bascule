@@ -23,7 +23,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 /**
  * Thin Android callback adapter for [GattSession]. A fresh [BluetoothGatt] is
  * created for every [connect] call because the session deliberately closes a
- * failed instance before retrying status 133/timeouts.
+ * failed instance before retrying status 133/timeouts; [connect] closes any
+ * surviving instance itself so a retry branch that forgets cannot leak one.
  */
 @SuppressLint("MissingPermission")
 class AndroidGattTransport(
@@ -54,6 +55,14 @@ class AndroidGattTransport(
             return
         }
         registerAdapterReceiver()
+        // Defence in depth for 00-design.md §8.10: every retry branch in
+        // GattSession is supposed to close() before looping back here, but a
+        // branch that forgets would otherwise orphan the previous client
+        // registration — and the per-app GATT client table is finite, so the
+        // leak surfaces later as permanent status-133 rather than as anything
+        // pointing at the branch that caused it.
+        gatt?.close()
+        pendingSubscriptions.clear()
         gatt = device.connectGatt(appContext, false, callback, BluetoothDevice.TRANSPORT_LE)
     }
 
