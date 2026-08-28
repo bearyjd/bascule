@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -115,14 +116,58 @@ class BasculeApplication : Application() {
         )
     }
 
+    private val _startupFailure = MutableStateFlow<Throwable?>(null)
+
+    /**
+     * The most recent throwable from a startup step (this class's [onCreate] or
+     * [com.ventouxlabs.bascule.service.BootReceiver]'s re-arm) that was
+     * contained rather than allowed to reach the default uncaught-exception
+     * handler. Same shape and same limitation as [alwaysOnBridgingStartFailed]:
+     * a surface a future screen note reads, unrendered for now — but a startup
+     * fault that leaves the app degraded beats one that kills the process on
+     * every launch.
+     */
+    val startupFailure: StateFlow<Throwable?> = _startupFailure.asStateFlow()
+
+    fun recordBootArmFailure(error: Throwable) {
+        _startupFailure.value = error
+    }
+
     override fun onCreate() {
         super.onCreate()
-        deliveryScheduler.ensurePeriodicDrain()
+        // Guarded like the steps below: this is the first touch of the
+        // WorkManager lazy, and getInstance() throws when WorkManager failed to
+        // initialize — on the main thread, on every launch.
+        guarded { deliveryScheduler.ensurePeriodicDrain() }
         applicationScope.launch {
-            // Lazy, non-destructive migration of the existing BF720 slot mapping.
-            configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::migrateLegacyCredential)
-            scaleScanner.arm()
-            if (configStore.alwaysOnBridging.first()) bridgeServiceController.start()
+            // First, not last: the BOOT_COMPLETED foreground-service exemption
+            // window is short, and the migration below plus arm() are both
+            // DataStore/keystore reads that can outlast it. Nothing here depends
+            // on their results.
+            guarded { if (configStore.alwaysOnBridging.first()) bridgeServiceController.start() }
+            // Separately guarded so a fault in one startup step does not skip
+            // the others — a DataStore read that throws here is exactly the
+            // failure mode that used to crash the process on every launch.
+            guarded {
+                // Lazy, non-destructive migration of the existing BF720 slot mapping.
+                configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::migrateLegacyCredential)
+            }
+            guarded { scaleScanner.arm() }
+        }
+    }
+
+    /**
+     * `SupervisorJob()` only stops sibling cancellation; it installs no
+     * exception handler, so without this every throwable from a startup step
+     * reached the default uncaught-exception handler and killed the process.
+     */
+    private inline fun guarded(block: () -> Unit) {
+        try {
+            block()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            _startupFailure.value = error
         }
     }
 }
@@ -142,6 +187,13 @@ class BasculeApplication : Application() {
  * [BasculeApplication.alwaysOnBridgingStartFailed] is the surface a future
  * screen note would read; nothing renders it yet, so a start failure is still
  * invisible to the user either way.
+ *
+ * Known limitation: `startForegroundService` returning without throwing only
+ * means the *start request* was accepted, so a success reported here can still
+ * be followed by [BridgeForegroundService.onCreate] immediately calling
+ * `stopSelf()` (a revoked `BLUETOOTH_SCAN` permission does exactly that).
+ * Distinguishing the two needs the service to signal its own running state
+ * back through shared state, which is a broader change than this seam.
  */
 internal class AndroidBridgeServiceController(
     private val context: Context,

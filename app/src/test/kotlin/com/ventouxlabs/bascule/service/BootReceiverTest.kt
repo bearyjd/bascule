@@ -6,8 +6,11 @@ import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.awaitCancellation
 import org.junit.After
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -51,37 +54,78 @@ class BootReceiverTest {
     }
 
     /**
-     * C11: a scan permission revoked across a reboot makes the real `arm()`
-     * throw. `onReceive` launches on a bare `CoroutineScope(Dispatchers.IO)`
-     * with no `CoroutineExceptionHandler` and catches nothing, so the throwable
-     * reaches the thread's default uncaught handler — from a `BOOT_COMPLETED`
-     * broadcast. Pinned as current behaviour: neither swallowed nor handled.
-     *
-     * What this pins is that the failure escapes at all. Its *identity* is not
-     * assertable in this lane: `goAsync()` returns a `PendingResult` only when
-     * the framework put one there, and neither a direct `onReceive` nor
-     * Robolectric's own `sendBroadcast` does, so the `finally`'s
-     * `pending.finish()` raises a `NullPointerException` that replaces the
-     * `SecurityException` before it reaches the handler. Asserting the type
-     * would pin that harness artifact rather than the production path, and
-     * needs the instrumented lane (Task 6) instead.
+     * C11: a scan permission revoked across a reboot — or a corrupt DataStore
+     * file, or a keystore fault behind the real `arm()` — makes it throw. The
+     * throwable must be recorded and contained: reaching the thread's default
+     * uncaught handler from a `BOOT_COMPLETED` broadcast kills the process on
+     * *every* boot, and an unarmed scan is the far cheaper failure.
      */
     @Test
-    fun anArmThatThrowsIsNotSwallowedAndReachesTheUncaughtExceptionHandler() {
-        val thrown = AtomicReference<Throwable?>()
+    fun anArmThatThrowsIsRecordedAndDoesNotReachTheUncaughtExceptionHandler() {
+        val escaped = AtomicReference<Throwable?>()
+        Thread.setDefaultUncaughtExceptionHandler { _, error -> escaped.set(error) }
+        val recorded = AtomicReference<Throwable?>()
         val latch = CountDownLatch(1)
-        Thread.setDefaultUncaughtExceptionHandler { _, error ->
-            thrown.set(error)
-            latch.countDown()
-        }
-        val receiver = BootReceiver(arm = { throw SecurityException("scan permission revoked") })
+        val receiver = BootReceiver(
+            arm = { throw SecurityException("scan permission revoked") },
+            onFailure = { _, error -> recorded.set(error); latch.countDown() },
+        )
 
         receiver.onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
-        assertTrue(
-            "a failed arm at boot must not be silently swallowed inside the receiver's coroutine",
-            latch.await(5, TimeUnit.SECONDS),
+        assertTrue("a failed arm at boot must be recorded", latch.await(5, TimeUnit.SECONDS))
+        // Not assertSame: kotlinx-coroutines' stack-trace recovery hands the
+        // handler a copy of the original across the suspension boundary.
+        assertTrue(recorded.get() is SecurityException)
+        assertEquals("scan permission revoked", recorded.get()?.message)
+        assertNull("a failed arm at boot must not crash the process", escaped.get())
+    }
+
+    /**
+     * The receiver is exported (`BOOT_COMPLETED` requires it), so any installed
+     * app can send it an explicit intent with an arbitrary action. Only the
+     * declared boot action may trigger a re-arm.
+     */
+    @Test
+    fun anIntentWithAnotherActionDoesNotArm() {
+        val armed = CountDownLatch(1)
+        val receiver = BootReceiver(arm = { armed.countDown(); true })
+
+        receiver.onReceive(context, Intent("com.attacker.FORCE_REARM"))
+
+        assertFalse(
+            "only ACTION_BOOT_COMPLETED may re-arm the scan",
+            armed.await(1, TimeUnit.SECONDS),
         )
-        assertNotNull(thrown.get())
+    }
+
+    /**
+     * A DataStore read that never returns must not hold the `goAsync()` window
+     * open until the broadcast ANR limit; the timeout cancels `arm()` and the
+     * receiver finishes normally rather than crashing.
+     */
+    @Test
+    fun anArmThatNeverReturnsIsBoundedByTheTimeout() {
+        val escaped = AtomicReference<Throwable?>()
+        Thread.setDefaultUncaughtExceptionHandler { _, error -> escaped.set(error) }
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val receiver = BootReceiver(
+            arm = {
+                started.countDown()
+                try {
+                    awaitCancellation()
+                } finally {
+                    cancelled.countDown()
+                }
+            },
+            armTimeoutMillis = 50,
+        )
+
+        receiver.onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+
+        assertTrue("arm() was never called", started.await(5, TimeUnit.SECONDS))
+        assertTrue("a stuck arm() must be cancelled by the timeout", cancelled.await(15, TimeUnit.SECONDS))
+        assertNull("the timeout must not surface as a crash", escaped.get())
     }
 }
