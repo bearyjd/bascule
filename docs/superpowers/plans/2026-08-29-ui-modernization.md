@@ -36,7 +36,7 @@
 - Consumes: nothing.
 - Produces: `@mipmap/ic_launcher`, `@mipmap/ic_launcher_round`. No Kotlin surface.
 
-All geometry is on a 108×108 viewport. The adaptive-icon safe zone is the central 72×72 (coordinates 18–90); every path below stays inside x 27–81, y 26–82.
+All geometry is on a 108×108 viewport. The adaptive-icon safe zone is the central 72×72 (coordinates 18–90). Every **foreground and monochrome** path stays inside x 27–81, y 26–82. The **background is deliberately full-bleed** (`M0,0h108v108h-108z`) — it must extend past the safe zone, or masking to a launcher's shape leaves gaps at the edges.
 
 - [ ] **Step 1: Create the background**
 
