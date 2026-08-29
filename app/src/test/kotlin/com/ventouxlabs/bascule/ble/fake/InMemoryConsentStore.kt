@@ -5,9 +5,12 @@ import com.ventouxlabs.bascule.ble.session.ScaleCredential
 
 /**
  * In-memory [ConsentStore] for JVM tests. The production store is backed by
- * EncryptedSharedPreferences, which needs a real Android keystore and is
- * therefore covered by an instrumented test instead — a keystore failure in a
- * contract test would be red for the wrong reason.
+ * EncryptedSharedPreferences, which needs a real Android keystore, so a
+ * keystore failure in a contract test would be red for the wrong reason —
+ * this fake exists to keep contract tests keystore-independent. NOTE: this
+ * project has no `app/src/androidTest` tree, so the real EncryptedSharedPreferences
+ * path is not covered by any instrumented test either; that is a known gap,
+ * not something this fake substitutes for.
  */
 class InMemoryConsentStore(
     private val fixedConsentCode: Int = 0x1234,

@@ -16,7 +16,6 @@ android {
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -62,27 +61,6 @@ kotlin {
     }
 }
 
-/**
- * Phase 2 ships contract tests that are deliberately red against an
- * unimplemented session layer (bascule-agent-prompt.md §Phase 2 item 2). They
- * are held in a separate lane so an expected failure cannot be confused with a
- * regression: `testDebugUnitTest` excludes them and must be green, while
- * `-Pbascule.contractTests=true` runs only them. See docs/prp/02-ci-notes.md.
- */
-val contractTestPattern = "*ContractTest"
-val runContractTests = providers.gradleProperty("bascule.contractTests").orNull == "true"
-
-tasks.withType<Test>().configureEach {
-    filter {
-        if (runContractTests) {
-            includeTestsMatching(contractTestPattern)
-        } else {
-            excludeTestsMatching(contractTestPattern)
-        }
-        isFailOnNoMatchingTests = false
-    }
-}
-
 // Room schema export from the first commit so migrations are diffable
 // (00-design.md §3.1, §8.12).
 ksp {
@@ -93,11 +71,14 @@ ksp {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.androidx.navigation.compose)
 
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
@@ -105,6 +86,7 @@ dependencies {
 
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
@@ -114,9 +96,9 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.robolectric)
     testImplementation(libs.turbine)
-
-    androidTestImplementation(libs.androidx.test.junit)
-    androidTestImplementation(libs.androidx.test.runner)
-    androidTestImplementation(libs.androidx.room.testing)
-    androidTestImplementation(libs.androidx.work.testing)
+    // Robolectric-based JVM tests for Android-framework-coupled classes
+    // (BroadcastReceiver/Service/CoroutineWorker) — see
+    // .claude/PRPs/plans/scale-admin-testing-completeness.plan.md Task 2.
+    testImplementation(libs.androidx.test.junit)
+    testImplementation(libs.androidx.work.testing)
 }

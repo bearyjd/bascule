@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.data
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.ventouxlabs.bascule.network.ReadingField
 
@@ -33,7 +34,20 @@ enum class ErrorClass { TRANSIENT, AUTH, PERMANENT }
  * conversions and the resulting nulls happen at the persistence boundary, not in
  * the decoder (docs/prp/02-interface-revision.md §3).
  */
-@Entity(tableName = "readings")
+/**
+ * Every column here is filtered or sorted on by a hot query and none of them had
+ * an index, so each drain and each History emission was a full table scan:
+ * `status` gates the drain and three History banners, and `(source,
+ * capturedAtMillis)` is exactly the shape of `dedupCandidates`' lookup, which
+ * runs on the capture path where latency is user-visible.
+ */
+@Entity(
+    tableName = "readings",
+    indices = [
+        Index(value = ["status"]),
+        Index(value = ["source", "capturedAtMillis"]),
+    ],
+)
 data class ReadingEntity(
     @PrimaryKey val id: String,
     val capturedAtMillis: Long,
@@ -74,4 +88,19 @@ data class ReadingEntity(
     val contractVersionAtDelivery: Int?,
     val remoteDuplicate: Boolean,
     val source: ReadingSource,
+    /** Stable local profile association. Null for manual and schema-v1 rows. */
+    val scaleProfileId: String? = null,
+    /**
+     * Absolute time this row may next be submitted — 00-design.md §3.4's ladder
+     * (`min(30 s * 2^(attemptCount - 1), 15 min)`) or the server's own
+     * `Retry-After` when it sent one, whichever the last outcome called for.
+     *
+     * Materialised rather than derived from `lastAttemptMillis + ladder`, because
+     * the drain query is now `LIMIT`ed: SQLite has no `pow()`, so a gate that
+     * lives only in Kotlin would let a batch of not-yet-due rows at the head of
+     * the capture-time ordering starve everything behind them indefinitely.
+     *
+     * Null means "due now" — a fresh row, or one that just re-entered PENDING.
+     */
+    val nextAttemptMillis: Long? = null,
 )

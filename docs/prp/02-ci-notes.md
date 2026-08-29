@@ -4,6 +4,14 @@ Companion to `02-interface-revision.md`. Records how the Phase 2 exit gate's two
 conflicting requirements — "CI green on skeleton" and "contract tests exist and
 are red" — are satisfied at the same time.
 
+> **Phase 3 update:** WP-08/WP-10 landed and all four `ScaleSessionContractTest`
+> cases pass. The split lane described below (the `bascule.contractTests`
+> Gradle property, the `-Pbascule.contractTests=true` filter, the separate
+> `continue-on-error` CI step) has been removed — `ScaleSessionContractTest`
+> now runs as part of the ordinary `testDebugUnitTest` task and CI's single
+> `Unit tests` step, which must be green like everything else. The rest of
+> this document is a historical record of the Phase 2 reasoning.
+
 ## Two lanes, one suite
 
 The contract tests are red on purpose. Left in the main test task they would make

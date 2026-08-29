@@ -87,6 +87,10 @@ class FakeGattTransport(
                 emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
                 emit(TransportEvent.ConnectionStateChanged(connected = false, status = outcome.status))
             }
+            ConnectOutcome.ConnectThenAdapterOff -> {
+                emit(TransportEvent.ConnectionStateChanged(connected = true, status = 0))
+                emit(TransportEvent.AdapterOff)
+            }
             ConnectOutcome.Timeout -> Unit // deliberately silent — the session's own timer must fire
         }
     }
@@ -103,6 +107,11 @@ class FakeGattTransport(
     /** Pushes an unsolicited adapter-off event, as `ACTION_STATE_CHANGED` does (E12). */
     fun emitAdapterOff() {
         emit(TransportEvent.AdapterOff)
+    }
+
+    /** Pushes an unsolicited disconnect, as the scale dropping mid-session does (E8) — distinct from [disconnect]. */
+    fun dropConnection(status: Int = STATUS_GATT_CONN_TERMINATE_LOCAL_HOST) {
+        emit(TransportEvent.ConnectionStateChanged(connected = false, status = status))
     }
 
     override fun write(char: UUID, bytes: ByteArray) {
@@ -156,6 +165,7 @@ class FakeGattTransport(
     private companion object {
         const val BOND_BONDED = 12
         const val REPLAY_CAPACITY = 128
+        const val STATUS_GATT_CONN_TERMINATE_LOCAL_HOST = 19
     }
 }
 
@@ -173,6 +183,14 @@ sealed interface ConnectOutcome {
      * 8/19/22"), and `01-plan.md` §3.6b's `device_busy.scale` fixture.
      */
     data class ConnectThenDrop(val status: Int) : ConnectOutcome
+
+    /**
+     * `CONNECTED` immediately followed by the adapter being switched off — the
+     * shape that reaches `GattSession.connectedOrImmediateDrop`'s peek as
+     * something that is neither a disconnect nor this step's answer, and that
+     * must not be discarded (E12).
+     */
+    data object ConnectThenAdapterOff : ConnectOutcome
 }
 
 /** Scripted outcome of `discoverServices()`. */

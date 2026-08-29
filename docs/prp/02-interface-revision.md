@@ -35,15 +35,33 @@ fun onHandshakeEvent(event: DecodeEvent): HandshakeDirective
 data class HandshakeContext(
     val storedCredential: ScaleCredential?,
     val freshConsentCode: Int,
+    val permitsRegistration: Boolean = true,
 )
 
 sealed interface HandshakeDirective {
     data class Send(val op: GattOp, val expectAckWithin: Duration) : HandshakeDirective
     data object Wait : HandshakeDirective
     data class Complete(val credential: ScaleCredential?) : HandshakeDirective
-    data class Abort(val reason: String) : HandshakeDirective
+    data class Abort(val reason: String, val registrationRejected: Boolean = false) : HandshakeDirective
 }
 ```
+
+**Both defaulted fields were added after this section was first written**
+(reconciled against `ScaleDecoder.kt` per P15) and both exist so the *session*
+does not have to infer a decoder decision from prose:
+
+- `HandshakeContext.permitsRegistration` lets the session offer a handshake that
+  may consent with a stored credential but must not burn one of the scale's eight
+  user slots on a new registration. Defaulted `true` so the ordinary
+  register-if-unknown path is unchanged.
+- `HandshakeDirective.Abort.registrationRejected` is a structured flag rather
+  than string-matching `reason`, so the `registrationRejected` counter (E19,
+  `01-plan.md` §2.1) does not depend on parsing decoder prose. It is `true` for
+  every refused Register — including a refused re-registration after a stale
+  stored credential was rejected — and `false` for everything else: E6
+  exhaustion, a missing User Control Point, and a refused *consent* for a
+  just-registered user, which is the abort most easily confused with it since
+  both follow a successful Register write.
 
 **Rationale.** A `List<GattOp>` returned once, before any reply is seen, can only
 express a fixed sequence. The real BF720 handshake has three branch points and
@@ -100,6 +118,14 @@ decoder*. `ScaleDecoder` is a pluggable interface per PRP §2's explicit v2 goal
 and a broadcast-ish scale that streams live weight needs the case. See §5 for
 what this means for the stabilization work package.
 
+**`SessionComplete` is on the same footing as `Live`, and this was not previously
+recorded (P15).** No decoder in the tree emits it — `BeurerDecoder` never
+constructs it, and the SIG path has no end-of-session frame to decode it from.
+The case is reserved for a decoder whose protocol announces its own end; a reader
+consulting this list to understand session event handling should not expect to
+handle it for the BF720. What ends a session today is the session's own timers
+and teardown (§3's E17 and the E7/90 s ceiling), not an inbound event.
+
 ---
 
 ## 3. Correlation: one weigh-in, one `Stable`
@@ -110,6 +136,45 @@ what this means for the stabilization work package.
 fun flush(): DecodeEvent?          // on ScaleDecoder
 internal class MeasurementCorrelator(decoderId: String, clock: () -> Long)
 ```
+
+### Also on `ScaleDecoder`, reconciled against the code (P15)
+
+§1 and the block above describe the handshake and correlation changes, which is
+what this document was written to decide. They are not the whole interface. Six
+further members are on the shipped `ScaleDecoder` and were absent here, so this
+listing was a partial description of the interface it defines — recorded now so
+the "Status: complete" banner is true of the whole type:
+
+| Member | What it is |
+|---|---|
+| `val id: String` | Decoder identity, used by `MeasurementCorrelator` and diagnostics |
+| `val requiredServices: Set<UUID>` | Dispatch and discovery check |
+| `val measurementCharacteristics: Set<UUID>` | What the session subscribes to once the handshake completes |
+| `fun openingSequence(discovered, nowMillis): List<GattOp>` | Ops run after discovery, **before** the handshake — the SIG Current Time write, so the scale's own frame timestamps are trustworthy. Best-effort: the session waits for each write's transport-level completion but never aborts over it, since an unset RTC yields a garbage `scaleTimestampMillis`, not a failed weigh-in. `nowMillis` is passed in because reading the wall clock is I/O the decoder is otherwise free of |
+| `val handshakeSawUnverifiableResponse: Boolean` | True once the decoder has returned `Wait` *specifically* because a response could not be ruled out as a stale answer to a superseded write — never merely because an event was irrelevant. Read-only observation with no effect on control flow: the session reads it only when its E6 ack ladder is about to exhaust, so the abort can say "a response arrived but couldn't be attributed" rather than the misleading "no ack at all" |
+| `fun teardownSequence(): List<GattOp>` | Best-effort clean shutdown ops; failures here never fail a session |
+
+Two more members carry over from `00-design.md` §2.6 unchanged by this revision,
+listed so the enumeration is exhaustive rather than implicitly inherited from a
+document this one supersedes: `fun matches(advertisedName, serviceUuids): Boolean`
+(advertisement-level dispatch only — matching, never decoding) and
+`fun onNotification(characteristic, value): DecodeEvent` (called for every inbound
+frame; never throws, per `00-design.md` §8.9).
+
+> **`teardownSequence` has no caller.** `BeurerDecoder` implements it as
+> `emptyList()` and `GattSession` never invokes it, so no decoder's shutdown ops
+> can currently run. Unlike `Live` and `SessionComplete` — which are *unused by
+> this decoder* but wired for the next one — this is an unwired seam on the
+> session side, and a future decoder that returns real ops from it would find
+> them silently ignored. Recorded as an observation; wiring a caller is a session
+> change, not an interface one.
+
+`val hasPendingCorrelation: Boolean` is also on the interface. It belongs to this
+section rather than the table: it exists because `DecodeEvent.Ignored` is
+returned both for "buffered, awaiting its pair" and for "nothing to see here", and
+without the distinction the session cannot tell whether opening its short
+correlation window is warranted — opening it on every ignored frame collapses the
+first-measurement budget to the correlation budget.
 
 **Rationale.** The captured Body Composition frame declares, in its own flags
 word, that it carries neither a timestamp nor a user ID — only the paired Weight
@@ -337,10 +402,32 @@ Stubbed, each with the work package that implements it:
 | Stub | Reason |
 |---|---|
 | `GattSession.run()` | The state machine is WP-06/07/10. Returns `Missed(NO_MEASUREMENT)` — a legitimate outcome, not a new sentinel — so the contract tests fail on an assertion rather than a crash |
-| `ReadingMapper` | WP-13. The `ScaleReading` → `ReadingEntity` boundary where §3's two unit conversions (kJ→kcal, water mass→pct) belong, alongside the dedup and attribution gates that decide whether a row is written at all |
+| `ReadingMapper` | WP-13. The `ScaleReading` → `ReadingEntity` boundary where §3's two unit conversions (kJ→kcal, water mass→pct) belong. **The gates named here moved — see below** |
 | `ScaleScanner`, `ScanBroadcastReceiver`, `ScaleSessionWorker` | WP-08. The scan-registration half is PHONE-bucket: an AVD has no BLE stack at all |
 | `AndroidGattTransport` | WP-04 |
 | `BridgeForegroundService`, `BootReceiver` | WP-25, WP-27 |
 | `DeliveryCoordinator`, `DeliveryWorker` | WP-21, WP-22 |
 | `ui/` composables | UI is not this phase's focus; WP-23, WP-24, WP-28 |
 | `V2Shaper` key strings | Pinned from VitalForge's Track A contract doc when it arrives (`00-design.md` §4.2) — deliberately not invented |
+
+### `ReadingIngestor` owns the persistence-boundary gates (P21)
+
+This document and `00-design.md` both name `ReadingMapper` as the owner of the
+dedup gate (§3.3) and the user-attribution gate (§7). It is not, and no design
+document named the component that is — so the code enforcing the design's most
+safety-critical rule was absent from the architecture record.
+
+**`data/ReadingIngestor.kt` owns both gates**, plus plausibility rejection and
+the insert itself, in one synchronous boundary — `ingest(deviceAddress,
+measurement)` returning `Inserted | Held | Duplicate | Rejected`. It resolves the
+reading's `userIndex` against the registered profiles for that device, derives
+the `ReadingStatus` (see ADR-006's superseded-by note for the `PENDING` vs
+`HELD_CONFIRM` rule), calls `DedupPolicy.isDuplicateOfAny` against the §3.3
+corpus, and inserts.
+
+`ReadingMapper` is now a **pure field mapper**: it still owns §3's two unit
+conversions, which is why they are documented there and here, but it takes the
+status as a parameter, never consults the DAO, and cannot reject a reading. The
+split is deliberate — the conversions stay verifiable field-for-field against the
+SIG specification without dragging the gates' dependencies (profile store, DAO,
+display unit) into that test.

@@ -75,6 +75,20 @@ interface ScaleDecoder {
     fun onNotification(characteristic: UUID, value: ByteArray): DecodeEvent
 
     /**
+     * True while the decoder holds a decoded measurement that only needs a
+     * further frame to become complete — i.e. exactly when a [flush] right now
+     * would yield a reading.
+     *
+     * The session needs this because [DecodeEvent.Ignored] is returned both for
+     * "buffered, awaiting its pair" and for "nothing to see here" (an unknown
+     * characteristic, a frame held as an orphan). Without the distinction the
+     * session cannot tell whether opening its short correlation window is
+     * warranted, and opening it on every ignored frame collapses the
+     * first-measurement budget to the correlation budget.
+     */
+    val hasPendingCorrelation: Boolean
+
+    /**
      * Releases anything the decoder is still holding for correlation, at
      * end-of-session or post-emission idle. Returns null when nothing is held.
      *
@@ -102,6 +116,7 @@ interface ScaleDecoder {
 data class HandshakeContext(
     val storedCredential: ScaleCredential?,
     val freshConsentCode: Int,
+    val permitsRegistration: Boolean = true,
 )
 
 sealed interface HandshakeDirective {

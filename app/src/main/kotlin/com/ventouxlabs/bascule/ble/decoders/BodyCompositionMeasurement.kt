@@ -8,7 +8,12 @@ package com.ventouxlabs.bascule.ble.decoders
  * kind is not a complete reading on its own (ADR-007).
  */
 internal data class BodyCompositionMeasurement(
-    val bodyFatPct: Double,
+    /**
+     * Null when the scale reported the SIG "value unknown" sentinel — the BIA
+     * impedance pass failed (socks, poor foot contact, too short a stand). The
+     * frame is still structurally valid and its other fields still usable.
+     */
+    val bodyFatPct: Double?,
     val timestampMillis: Long?,
     val userIndex: Int?,
     val basalMetabolismKj: Double?,
@@ -51,12 +56,21 @@ internal object BodyCompositionMeasurementParser {
     private const val FLAG_WEIGHT = 10
     private const val FLAG_HEIGHT = 11
 
+    /**
+     * Body Composition Service 1.0 §3.2 bit 12: this indication is one segment
+     * of a measurement split across several packets. This decoder has no
+     * reassembly buffer, so a segment parsed on its own would yield plausible
+     * but wrong values with no underrun to catch it — it is rejected instead.
+     */
+    private const val FLAG_MULTIPLE_PACKET_MEASUREMENT = 12
+
     /** Flags word plus the mandatory body-fat field. */
     const val MIN_LENGTH = 4
 
     fun parse(bytes: ByteArray): BodyCompositionMeasurement? {
         val reader = FrameReader(bytes)
         val flags = reader.u16() ?: return null
+        if (flags.hasBit(FLAG_MULTIPLE_PACKET_MEASUREMENT)) return null
         val imperial = flags.hasBit(FLAG_IMPERIAL)
         val massPerLsb = if (imperial) {
             SigWeightProfile.MASS_LB_PER_LSB
@@ -70,35 +84,55 @@ internal object BodyCompositionMeasurementParser {
         }
         val massToKg = if (imperial) WeightMeasurementParser.KG_PER_LB else 1.0
 
-        val bodyFat = reader.u16()
+        val bodyFat = reader.u16()?.takeIf { it != WeightMeasurementParser.VALUE_UNKNOWN }
         val timestamp = if (flags.hasBit(FLAG_TIMESTAMP)) reader.dateTimeMillis() else null
         val userIndex = if (flags.hasBit(FLAG_USER_ID)) reader.u8() else null
 
-        val measurement = BodyCompositionMeasurement(
-            bodyFatPct = (bodyFat ?: 0) * SigWeightProfile.PERCENT_PER_LSB,
+        // Read into locals in wire order and construct afterwards: every call
+        // below advances the cursor, so as constructor arguments their order on
+        // the wire would rest on Kotlin's left-to-right argument evaluation
+        // matching the order the named arguments happen to be written in.
+        val basalMetabolismKj = reader.field(flags, FLAG_BASAL_METABOLISM) { it.toDouble() }
+        val musclePct = reader.field(flags, FLAG_MUSCLE_PERCENTAGE) {
+            it * SigWeightProfile.PERCENT_PER_LSB
+        }
+        val muscleMassKg = reader.field(flags, FLAG_MUSCLE_MASS) { it * massPerLsb * massToKg }
+        val fatFreeMassKg = reader.field(flags, FLAG_FAT_FREE_MASS) { it * massPerLsb * massToKg }
+        val softLeanMassKg = reader.field(flags, FLAG_SOFT_LEAN_MASS) { it * massPerLsb * massToKg }
+        val bodyWaterMassKg = reader.field(flags, FLAG_BODY_WATER_MASS) { it * massPerLsb * massToKg }
+        val impedanceOhms = reader.field(flags, FLAG_IMPEDANCE) {
+            it * SigWeightProfile.IMPEDANCE_OHMS_PER_LSB
+        }
+        val weightKg = reader.field(flags, FLAG_WEIGHT) { it * massPerLsb * massToKg }
+        val heightM = reader.field(flags, FLAG_HEIGHT) { it * heightPerLsb }
+
+        if (reader.underrun) return null
+
+        return BodyCompositionMeasurement(
+            bodyFatPct = bodyFat?.times(SigWeightProfile.PERCENT_PER_LSB),
             timestampMillis = timestamp,
             userIndex = userIndex,
-            basalMetabolismKj = reader.field(flags, FLAG_BASAL_METABOLISM) { it.toDouble() },
-            musclePct = reader.field(flags, FLAG_MUSCLE_PERCENTAGE) {
-                it * SigWeightProfile.PERCENT_PER_LSB
-            },
-            muscleMassKg = reader.field(flags, FLAG_MUSCLE_MASS) { it * massPerLsb * massToKg },
-            fatFreeMassKg = reader.field(flags, FLAG_FAT_FREE_MASS) { it * massPerLsb * massToKg },
-            softLeanMassKg = reader.field(flags, FLAG_SOFT_LEAN_MASS) { it * massPerLsb * massToKg },
-            bodyWaterMassKg = reader.field(flags, FLAG_BODY_WATER_MASS) { it * massPerLsb * massToKg },
-            impedanceOhms = reader.field(flags, FLAG_IMPEDANCE) {
-                it * SigWeightProfile.IMPEDANCE_OHMS_PER_LSB
-            },
-            weightKg = reader.field(flags, FLAG_WEIGHT) { it * massPerLsb * massToKg },
-            heightM = reader.field(flags, FLAG_HEIGHT) { it * heightPerLsb },
+            basalMetabolismKj = basalMetabolismKj,
+            musclePct = musclePct,
+            muscleMassKg = muscleMassKg,
+            fatFreeMassKg = fatFreeMassKg,
+            softLeanMassKg = softLeanMassKg,
+            bodyWaterMassKg = bodyWaterMassKg,
+            impedanceOhms = impedanceOhms,
+            weightKg = weightKg,
+            heightM = heightM,
         )
-
-        return if (reader.underrun) null else measurement
     }
 
+    /**
+     * A flagged-but-unknown field must still be *read* — the sentinel occupies
+     * its two bytes on the wire, and skipping the read would shift every
+     * following field's offset and misparse the rest of the frame silently.
+     */
     private inline fun FrameReader.field(flags: Int, bit: Int, scale: (Int) -> Double): Double? {
         if (!flags.hasBit(bit)) return null
         val raw = u16() ?: return null
+        if (raw == WeightMeasurementParser.VALUE_UNKNOWN) return null
         return scale(raw)
     }
 }

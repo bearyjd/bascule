@@ -98,4 +98,55 @@ class DedupPolicyTest {
             ),
         )
     }
+
+    /**
+     * P18. `DeliveryDrainer.isRemoteDuplicate` compares a `RemoteReading` and so
+     * cannot call [DedupPolicy.isDuplicate]; before this, it hand-copied the
+     * comparison. This asserts [DedupPolicy.isDuplicate] is a *delegation* to
+     * [DedupPolicy.withinTolerance] rather than a second copy of it — if either
+     * side reintroduces its own arithmetic, the two disagree on some cell of
+     * this grid and the test fails.
+     */
+    @Test
+    fun isDuplicateDelegatesItsNumericHalfToWithinTolerance() {
+        val tolerance = DedupPolicy.WEIGHT_TOLERANCE_KG
+        val window = DedupPolicy.TIME_WINDOW_MILLIS
+        val base = ReadingFixtures.CAPTURED_AT_MILLIS
+        val weightDeltas = listOf(0.0, tolerance / 2, tolerance * 2, -tolerance / 2, -tolerance * 2)
+        val timeDeltas = listOf(0L, window / 2, window + 1, -(window / 2), -(window + 1))
+
+        for (weightDelta in weightDeltas) {
+            for (timeDelta in timeDeltas) {
+                val existing = ReadingFixtures.captured(id = "existing", weightKg = 90.00)
+                val candidate = ReadingFixtures.captured(
+                    weightKg = 90.00 + weightDelta,
+                    capturedAtMillis = base + timeDelta,
+                )
+                assertEquals(
+                    "weightDelta=$weightDelta timeDelta=$timeDelta",
+                    DedupPolicy.withinTolerance(
+                        candidate.weightKg,
+                        existing.weightKg,
+                        candidate.capturedAtMillis,
+                        existing.capturedAtMillis,
+                    ),
+                    DedupPolicy.isDuplicate(candidate, existing),
+                )
+            }
+        }
+    }
+
+    /** Both tolerance boundaries are inclusive, and the comparison is symmetric in its arguments. */
+    @Test
+    fun withinToleranceIsInclusiveAtBothBoundariesAndSymmetric() {
+        val window = DedupPolicy.TIME_WINDOW_MILLIS
+
+        assertEquals(true, DedupPolicy.withinTolerance(90.0, 90.0, 0L, window))
+        assertEquals(false, DedupPolicy.withinTolerance(90.0, 90.0, 0L, window + 1))
+        assertEquals(true, DedupPolicy.withinTolerance(90.0, 90.0, window, 0L))
+        assertEquals(false, DedupPolicy.withinTolerance(90.0, 90.0, window + 1, 0L))
+        // Outside the weight tolerance, an identical timestamp is not enough.
+        assertEquals(false, DedupPolicy.withinTolerance(90.0, 90.5, 0L, 0L))
+        assertEquals(false, DedupPolicy.withinTolerance(90.5, 90.0, 0L, 0L))
+    }
 }

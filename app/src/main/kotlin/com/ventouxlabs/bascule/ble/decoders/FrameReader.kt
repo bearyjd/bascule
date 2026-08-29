@@ -46,7 +46,8 @@ internal class FrameReader(private val bytes: ByteArray) {
     /**
      * SIG `org.bluetooth.characteristic.date_time`: year uint16, then month,
      * day, hours, minutes, seconds as uint8. Returns epoch millis in the
-     * device's default zone, or null on underrun or an unset (zero) date.
+     * device's default zone, or null on underrun, an unset (zero) date, or a
+     * field outside the range the characteristic defines.
      */
     fun dateTimeMillis(): Long? {
         if (remaining < DATE_TIME_BYTES) {
@@ -54,15 +55,18 @@ internal class FrameReader(private val bytes: ByteArray) {
             return null
         }
         // The bounds check above guarantees all seven reads succeed.
-        val year = u16() ?: return null
-        val month = u8() ?: return null
-        val day = u8() ?: return null
+        val year = u16() ?: 0
+        val month = u8() ?: 0
+        val day = u8() ?: 0
         val hour = u8() ?: 0
         val minute = u8() ?: 0
         val second = u8() ?: 0
 
         // A zero year, month or day is the SIG "unknown" encoding, not a date.
-        if (year == 0 || month == 0 || day == 0) return null
+        // Every other out-of-range field is a scale whose RTC was never set:
+        // Calendar is lenient by default, so 0xFFFF/0xFF/0xFF would roll over
+        // into an arbitrary far-future instant rather than being caught.
+        if (!isInRange(year, month, day, hour, minute, second)) return null
 
         return Calendar.getInstance(TimeZone.getDefault()).apply {
             clear()
@@ -70,10 +74,23 @@ internal class FrameReader(private val bytes: ByteArray) {
         }.timeInMillis
     }
 
+    private fun isInRange(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int): Boolean =
+        year in YEAR_RANGE && month in MONTH_RANGE && day in DAY_RANGE &&
+            hour in HOUR_RANGE && minute in MINUTE_RANGE && second in SECOND_RANGE
+
     private companion object {
         const val BYTE_MASK = 0xFF
         const val BYTE_BITS = 8
         const val DATE_TIME_BYTES = 7
+
+        // Bounds wide enough that no scale with a working clock is rejected,
+        // narrow enough that an unset or corrupt RTC cannot become a date.
+        val YEAR_RANGE = 2000..2100
+        val MONTH_RANGE = 1..12
+        val DAY_RANGE = 1..31
+        val HOUR_RANGE = 0..23
+        val MINUTE_RANGE = 0..59
+        val SECOND_RANGE = 0..59
     }
 }
 

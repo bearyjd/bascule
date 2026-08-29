@@ -1,5 +1,7 @@
 package com.ventouxlabs.bascule.diagnostics
 
+import kotlinx.coroutines.flow.StateFlow
+
 /**
  * Registry keys, one per row of `01-plan.md` §2.1's counter table. Each key has
  * exactly one owning package; `PersistentDiagnosticsCountersTest` (WP-26) checks
@@ -32,4 +34,14 @@ interface DiagnosticsCounters {
     fun increment(key: DiagnosticsCounterKey): Int
     fun reset(key: DiagnosticsCounterKey)
     fun value(key: DiagnosticsCounterKey): Int
+
+    /**
+     * A full snapshot, updated on every [increment]/[reset] — HistoryScreen's
+     * diagnostics section needs this rather than [value] alone, since a
+     * counter can change (E7's `NO_MEASUREMENT`, most notably: a session that
+     * produced no reading inserts no `ReadingEntity` row by definition) with
+     * no corresponding row change for `HistoryViewModel`'s own
+     * `ReadingDao.observeAll()` collection to notice.
+     */
+    fun observeAll(): StateFlow<Map<DiagnosticsCounterKey, Int>>
 }

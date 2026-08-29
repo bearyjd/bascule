@@ -38,6 +38,23 @@ interface VitalForgeApi {
 
     /** ADR-003 contention check. Absent on servers that do not expose it. */
     suspend fun recentReadings(within: Duration): RecentResult
+
+    /**
+     * Read-only probe of both reachability and the configured token — never
+     * submits a reading. Unlike [recentReadings], which must stay permissive
+     * (ADR-003 step 3: a failed dedup check must never block a delivery),
+     * this exists specifically to distinguish "bad token" from "unreachable"
+     * for a user-initiated "Test connection" action.
+     */
+    suspend fun testConnection(): ConnectionTestResult
+
+    /**
+     * Exchanges credentials for a session cookie. This is not a token-minting
+     * call — VitalForge's bearer token is a single static server secret,
+     * unrelated to any individual login — so a caller stores the resulting
+     * cookie as an alternative credential, not as a token.
+     */
+    suspend fun login(username: String, password: String): LoginResult
 }
 
 sealed interface SubmitResult {
@@ -56,3 +73,21 @@ sealed interface RecentResult {
 }
 
 data class RemoteReading(val weightKg: Double, val capturedAtMillis: Long)
+
+sealed interface ConnectionTestResult {
+    /** Reachable and the configured token was accepted. */
+    data object Authorized : ConnectionTestResult
+
+    /** Reachable, but the server rejected the token (HTTP 401/403). */
+    data class Unauthorized(val httpCode: Int) : ConnectionTestResult
+
+    /** Unreachable, or reachable but returned something other than success/auth-rejection. */
+    data class Unreachable(val reason: String) : ConnectionTestResult
+}
+
+sealed interface LoginResult {
+    /** The session cookie's value, ready to send as `Cookie: vf_session=<sessionCookie>`. */
+    data class Success(val sessionCookie: String) : LoginResult
+    data object InvalidCredentials : LoginResult
+    data class Unreachable(val reason: String) : LoginResult
+}

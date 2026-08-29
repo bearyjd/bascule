@@ -48,7 +48,6 @@ internal object SigWeightProfile {
      */
     const val UCP_REGISTER_NEW_USER = 0x01
     const val UCP_CONSENT = 0x02
-    const val UCP_DELETE_USER_DATA = 0x03
 
     /** Op code of a User Control Point response indication. */
     const val UCP_RESPONSE_CODE = 0x20
@@ -56,8 +55,16 @@ internal object SigWeightProfile {
     /** Response value meaning the request succeeded. */
     const val UCP_RESPONSE_SUCCESS = 0x01
 
+    /** User indices are 8-bit (User Data Service 1.0 §4.9). */
+    const val SCALE_INDEX_MIN = 0
+    const val SCALE_INDEX_MAX = 255
+
     /** Consent codes are 16-bit (User Data Service 1.0 §4.10.2). */
+    const val CONSENT_CODE_MIN = 0
     const val CONSENT_CODE_MAX = 0xFFFF
+
+    val SCALE_INDEX_RANGE = SCALE_INDEX_MIN..SCALE_INDEX_MAX
+    val CONSENT_CODE_RANGE = CONSENT_CODE_MIN..CONSENT_CODE_MAX
 
     /**
      * Weight Measurement resolution. The SIG format fixes these per unit system:
@@ -78,7 +85,4 @@ internal object SigWeightProfile {
     const val BMI_PER_LSB = 0.1
     const val PERCENT_PER_LSB = 0.1
     const val IMPEDANCE_OHMS_PER_LSB = 0.1
-
-    /** Basal Metabolism is reported in kilojoules (Body Composition Service 1.0). */
-    const val KJ_PER_KCAL = 4.184
 }

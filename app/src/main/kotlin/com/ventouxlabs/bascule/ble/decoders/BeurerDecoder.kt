@@ -49,6 +49,14 @@ class BeurerDecoder(
         private set
 
     /**
+     * Weight frames carrying the SIG "measurement unsuccessful" sentinel. The
+     * scale is working and the frame is well-formed; it simply has no weight to
+     * report, so this must not inflate [malformedCount].
+     */
+    var unsuccessfulMeasurements: Int = 0
+        private set
+
+    /**
      * The advertised service UUID is the primary signal; the name only
      * disqualifies a device when one is actually advertised. Requiring both
      * would be stricter than 00-design.md §10 A2 assumes — a scan record often
@@ -88,6 +96,9 @@ class BeurerDecoder(
 
         val stored = context.storedCredential
         return if (stored == null) {
+            if (!context.permitsRegistration) {
+                return HandshakeDirective.Abort("no existing scale profile is available")
+            }
             handshake = HandshakeState.AwaitingRegistration(context.freshConsentCode)
             HandshakeDirective.Send(registerWrite(context.freshConsentCode), ACK_TIMEOUT)
         } else {
@@ -108,10 +119,15 @@ class BeurerDecoder(
         event: DecodeEvent,
     ): HandshakeDirective {
         if (event !is DecodeEvent.RegistrationResult) return HandshakeDirective.Wait
-        val index = event.scaleIndex
-        if (!event.success || index == null) {
+        if (!event.success) {
             return HandshakeDirective.Abort("scale refused Register New User", registrationRejected = true)
         }
+        // A success with no user index is unusable — there is nothing to consent
+        // with — but the scale did not refuse anything, and charging it to the
+        // refused-registration counter would misreport a truncated response as
+        // a rejection to both diagnostics and the user-facing message.
+        val index = event.scaleIndex
+            ?: return HandshakeDirective.Abort("scale accepted Register New User without a user index")
         val credential = ScaleCredential(index, state.consentCode)
         handshake = HandshakeState.AwaitingConsent(
             credential,
@@ -121,6 +137,8 @@ class BeurerDecoder(
         return HandshakeDirective.Send(consentWrite(credential), ACK_TIMEOUT)
     }
 
+    // One exit per distinct UDS consent response the scale can send.
+    @Suppress("ReturnCount")
     private fun onConsentEvent(
         state: HandshakeState.AwaitingConsent,
         event: DecodeEvent,
@@ -141,6 +159,9 @@ class BeurerDecoder(
         // A stored credential the scale no longer honours — its user slot was
         // deleted or reassigned. Registering again is the only recovery, and it
         // is the branch a fixed initSequence could not express (ADR-007).
+        if (context?.permitsRegistration != true) {
+            return HandshakeDirective.Abort("stored scale consent was rejected")
+        }
         val freshCode = context?.freshConsentCode
             ?: return HandshakeDirective.Abort("no consent code available to re-register")
         // Up to HANDSHAKE_ACK_MAX_RETRIES consent writes for the *stale*
@@ -197,9 +218,20 @@ class BeurerDecoder(
         if (value.size < WeightMeasurementParser.MIN_LENGTH) {
             return malformed("weight frame too short", null, value.size)
         }
-        val parsed = WeightMeasurementParser.parse(value)
-            ?: return malformed("weight frame truncated for its flags", null, value.size)
-        return correlator.onWeight(parsed)
+        return when (val parsed = WeightMeasurementParser.parse(value)) {
+            is WeightParseResult.Parsed -> correlator.onWeight(parsed.measurement)
+
+            // A well-formed frame saying the weigh-in failed. Counted apart from
+            // malformed frames so a session of nothing but these is reported as
+            // the no-measurement it is, not as a decode failure.
+            WeightParseResult.Unsuccessful -> {
+                unsuccessfulMeasurements++
+                DecodeEvent.Ignored
+            }
+
+            WeightParseResult.Malformed ->
+                malformed("weight frame truncated for its flags", null, value.size)
+        }
     }
 
     private fun decodeBodyComposition(value: ByteArray): DecodeEvent {
@@ -210,6 +242,8 @@ class BeurerDecoder(
             ?: return malformed("body composition frame truncated for its flags", null, value.size)
         return correlator.onBodyComposition(parsed)
     }
+
+    override val hasPendingCorrelation: Boolean get() = correlator.hasPendingCorrelation
 
     override fun flush(): DecodeEvent? = correlator.flush()
 

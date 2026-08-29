@@ -39,15 +39,6 @@ jobs:
       - name: detekt
         run: ./gradlew detekt
 
-      # Phase 2 ships contract tests that are red on purpose: they hold open the
-      # behaviour the session layer does not implement yet (WP-06/07/10). They
-      # run in their own step, non-blocking, so an expected failure is visible
-      # without masking a regression in the step above.
-      # See docs/prp/02-ci-notes.md. Phase 3 flips this step to blocking.
-      - name: Phase 2 contract tests (expected red until WP-10)
-        continue-on-error: true
-        run: ./gradlew testDebugUnitTest -Pbascule.contractTests=true
-
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

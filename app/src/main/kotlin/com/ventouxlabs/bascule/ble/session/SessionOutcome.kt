@@ -4,7 +4,17 @@ import com.ventouxlabs.bascule.ble.ScaleReading
 
 /** Terminal result of one GATT session (00-design.md §2.1, §2.3). */
 sealed interface SessionOutcome {
-    data class Completed(val readings: List<ScaleReading>) : SessionOutcome
+    /**
+     * [reading] is null when the session completed without a measurement —
+     * today only the registration path (`stopAfterHandshake = true`).
+     *
+     * A single nullable reading rather than a list because
+     * `MAX_EMISSIONS_PER_SESSION = 1` (`02-interface-revision.md` §3) allows
+     * exactly one emission per session: a list left "two readings from one
+     * session" representable, so a caller iterating it would have silently
+     * ingested both — the misattribution O-03 exists to prevent.
+     */
+    data class Completed(val reading: ScaleReading?) : SessionOutcome
     data class Missed(val reason: MissReason) : SessionOutcome
     data object Incompatible : SessionOutcome
     data class HandshakeFailed(val detail: String) : SessionOutcome
@@ -25,4 +35,12 @@ enum class MissReason {
 
     /** `onServicesDiscovered` reported a non-zero status — a transport failure, not "wrong device". */
     DISCOVERY_FAILED,
+
+    /**
+     * A connect attempt ended in a disconnect carrying `GATT_SUCCESS`: the peer
+     * hung up cleanly rather than the link never completing. Distinct from
+     * [CONNECT_TIMEOUT] because the two need different diagnoses — one is a
+     * radio/range problem, the other a scale that answered and then refused.
+     */
+    GRACEFUL_DISCONNECT,
 }

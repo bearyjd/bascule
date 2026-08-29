@@ -522,6 +522,30 @@ persistence boundary on an unambiguous index mismatch and no row ever enters thi
 status — the status remains defined and unused, which costs nothing and keeps the
 two branches on one schema.
 
+**Superseded by `04-scale-admin-and-automation-plan.md` (P19).** The paragraph
+above is the one part of this ADR that no longer describes the code, and a reader
+trusting it will conclude `HELD_CONFIRM` is dead and that `HistoryViewModel`'s
+confirm/decline path is unreachable UI. It is not: ADR-007 did resolve §8.5 in
+favour of Branch A, but the multi-profile admin work then made holding — rather
+than dropping — the Branch A behaviour too. `04-…` §1 states it directly:
+"Readings from another slot are stored as `HELD_CONFIRM`; confirming uploads that
+reading once without changing the active profile", and its §3 names
+"`PENDING` versus `HELD_CONFIRM` routing" as delivered scope.
+
+The actual predicate is in `ReadingIngestor.ingest`, and it is **wider** than
+"another registered profile": a reading is `PENDING` only when it matches a
+registered profile for this device *and* that profile is the active one.
+Everything else is `HELD_CONFIRM` — including a reading whose `userIndex` is null
+or matches no profile at all. So the status covers three cases, not one: another
+registered profile, an unrecognised slot, and an unattributable reading.
+
+What survives unchanged is the reasoning this ADR exists for. Held rows are still
+excluded from the drain by an allowlist predicate, decline is still terminal
+`DECLINED` and still outside the dedup corpus, and holding is still the strict
+side of `00-design.md` §8.4's asymmetry — dropping an unattributable reading
+loses a real weigh-in, where holding it costs one confirmation tap. Branch A
+narrowed what needs holding; it did not remove the need.
+
 #### Reversal cost
 
 **Low before v1 ships, migration-gated after.** The status is added pre-v1, so

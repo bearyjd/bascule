@@ -9,8 +9,11 @@ import kotlin.math.abs
  * matches (two nulls count as equal), the weights are within [WEIGHT_TOLERANCE_KG]
  * and the capture times are within [TIME_WINDOW_MILLIS].
  *
- * The same two constants also drive the ADR-003 remote-duplicate check, so the
- * local and remote rules cannot drift.
+ * The ADR-003 remote-duplicate check in [DeliveryDrainer] compares a
+ * `RemoteReading`, not a [ReadingEntity], so it cannot call [isDuplicate]. Both
+ * sites call [withinTolerance] instead, which is what actually stops the local
+ * and remote rules from drifting — sharing the two constants alone left the
+ * comparison itself to be kept in step by hand.
  */
 object DedupPolicy {
 
@@ -34,14 +37,29 @@ object DedupPolicy {
      */
     const val TIME_WINDOW_MILLIS = 300_000L
 
+    /**
+     * The numeric half of §3.3, over primitives so both the local
+     * ([ReadingEntity] vs [ReadingEntity]) and remote (`RemoteReading` vs
+     * [ReadingEntity]) checks can call it despite having no common type.
+     * Boundaries are inclusive: exactly [WEIGHT_TOLERANCE_KG] apart, or exactly
+     * [TIME_WINDOW_MILLIS] apart, still counts as a duplicate.
+     */
+    fun withinTolerance(weightKgA: Double, weightKgB: Double, timeMillisA: Long, timeMillisB: Long): Boolean =
+        abs(weightKgA - weightKgB) <= WEIGHT_TOLERANCE_KG &&
+            abs(timeMillisA - timeMillisB) <= TIME_WINDOW_MILLIS
+
     fun isDuplicate(candidate: ReadingEntity, existing: ReadingEntity): Boolean =
         // A declined row is another person's weight; dedupping against it would
         // turn one correct rejection into two lost readings.
         existing.status != ReadingStatus.DECLINED &&
             candidate.source == existing.source &&
             candidate.userIndex == existing.userIndex &&
-            abs(candidate.weightKg - existing.weightKg) <= WEIGHT_TOLERANCE_KG &&
-            abs(candidate.capturedAtMillis - existing.capturedAtMillis) <= TIME_WINDOW_MILLIS
+            withinTolerance(
+                candidate.weightKg,
+                existing.weightKg,
+                candidate.capturedAtMillis,
+                existing.capturedAtMillis,
+            )
 
     fun isDuplicateOfAny(candidate: ReadingEntity, corpus: List<ReadingEntity>): Boolean =
         corpus.any { isDuplicate(candidate, it) }
