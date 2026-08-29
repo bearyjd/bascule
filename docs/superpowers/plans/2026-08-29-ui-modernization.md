@@ -872,7 +872,7 @@ The "V2 contract field names" bullet says both `ConfigScreen`'s `selectableContr
 - [ ] **Step 5: Verify**
 
 Run: `./gradlew testDebugUnitTest detekt`
-Expected: PASS, 540 tests.
+Expected: PASS, 541 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -936,7 +936,7 @@ git commit -m "docs: rewrite Scale screen copy in user terms"
 
 ## Final verification (after all tasks)
 
-- [ ] `./gradlew testDebugUnitTest detekt` — expect **540 tests, 0 failures, detekt clean**.
+- [ ] `./gradlew testDebugUnitTest detekt` — expect **541 tests, 0 failures, detekt clean**.
 - [ ] `adb install -r app/build/outputs/apk/debug/app-debug.apk` — **never uninstall**.
 - [ ] Screenshot all three tabs plus manual entry, in light and dark.
 - [ ] Confirm the launcher icon renders, standard and themed.
