@@ -67,7 +67,7 @@ fun HistoryScreen(
         state.captureState?.let {
             when (it) {
                 CaptureState.OFF -> item {
-                    Banner(text = "Automatic capture is off — weigh-ins won't be picked up.")
+                    Banner(text = "Automatic capture is off. Turn it on from the Scale tab to pick up weigh-ins.")
                 }
                 CaptureState.NO_SCALE -> item {
                     Banner(text = "No scale registered yet. Add one on the Scale tab.")
@@ -114,7 +114,7 @@ private fun EmptyHistory() {
     ) {
         Text("No weigh-ins yet", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Step on the scale, or add one manually.",
+            "They'll appear once your scale sends a reading, or tap + to log one manually.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),

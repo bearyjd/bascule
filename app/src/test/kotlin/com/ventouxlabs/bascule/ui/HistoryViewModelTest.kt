@@ -337,4 +337,10 @@ class HistoryViewModelTest {
         advanceUntilIdle()
         assertEquals(CaptureState.WATCHING, vm.uiState.value.captureState)
     }
+
+    /** Guards the no-flash contract: the seed must stay null, not NO_SCALE, before the first emission. */
+    @Test
+    fun historyUiStateDefaultConstructorHasNullCaptureState() {
+        assertNull(HistoryUiState().captureState)
+    }
 }

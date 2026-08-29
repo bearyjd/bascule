@@ -27,7 +27,7 @@ import com.ventouxlabs.bascule.ui.nav.BasculeDestination
 import com.ventouxlabs.bascule.ui.theme.BasculeTheme
 
 /**
- * The app shell: a flat bottom-navigation bar across the four top-level
+ * The app shell: a flat bottom-navigation bar across the three top-level
  * screens (`00-design.md` §5), plus a History-only FAB shortcut straight into
  * Manual Entry — the one-tap path for "I want to log a weight right now"
  * without detouring through the tab bar first.

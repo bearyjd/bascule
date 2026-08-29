@@ -21,7 +21,7 @@ val VioletPrimaryContainerLight = Color(0xFFE6DEFF)
 val OnVioletPrimaryContainerLight = Color(0xFF1B0A63)
 
 val VioletPrimaryDark = Color(0xFFC9B4F8)
-val OnVioletPrimaryDark = Color(0xFF003738)
+val OnVioletPrimaryDark = Color(0xFF1B0A63)
 val VioletPrimaryContainerDark = Color(0xFF3E2A96)
 val OnVioletPrimaryContainerDark = Color(0xFFE6DEFF)
 

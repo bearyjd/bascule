@@ -74,7 +74,7 @@ fun ScaleScreen(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Scale status")
-                Text("Battery and live database-change status are available only during a capability probe.")
+                Text("Battery level and live status are only available while the app is connected to your scale.")
                 Text("Profiles can't be removed yet — you can re-register a scale to replace one.")
             }
         }

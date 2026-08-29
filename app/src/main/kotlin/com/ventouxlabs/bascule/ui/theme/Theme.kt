@@ -78,7 +78,7 @@ private val DarkColors = darkColorScheme(
  * Bascule's Material3 theme. Follows the system light/dark setting and, on
  * API 31+ ([Build.VERSION_CODES.S]), the device's dynamic (wallpaper-derived)
  * color when [useDynamicColor] is left on — falling back to the hand-tuned
- * teal brand palette everywhere else, so the app still has a deliberate
+ * violet brand palette everywhere else, so the app still has a deliberate
  * identity rather than defaulting to Material's stock purple below API 31.
  */
 @Composable

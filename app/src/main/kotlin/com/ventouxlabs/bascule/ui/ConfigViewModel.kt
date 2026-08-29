@@ -306,10 +306,6 @@ class ConfigViewModel(
         viewModelScope.launch { configStore.saveDisplayUnit(unit) }
     }
 
-    fun saveContractVersion(version: ContractVersion) {
-        viewModelScope.launch { configStore.saveContractVersion(version) }
-    }
-
     /** A fresh credential unblocks the backlog — see [unblockAuthRowsAndDrain]. */
     fun saveToken(token: String) {
         val trimmed = token.trim()
@@ -617,9 +613,10 @@ class ConfigViewModel(
             // a working configuration for no benefit to the user.
             if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
-            // Same gate the dropdown applies: V2Shaper's field names are
-            // placeholders (00-design.md §4.2), so an import must not be able to
-            // put the app into a contract the screen offers no way back out of.
+            // V2Shaper's field names are placeholders (00-design.md §4.2); with
+            // the contract-version dropdown gone, selectableContractVersions now
+            // backs only this import-path gate, keeping V2_BODY_COMP out of a
+            // restored config even though nothing in the UI can select it either.
             // The existing value is kept rather than forced to a default — this
             // skips one field, it does not half-apply the import.
             if (imported.contractVersion in selectableContractVersions) {
