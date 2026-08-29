@@ -1,0 +1,14 @@
+{
+  "name": "Bascule",
+  "eyebrow": "KOTLIN · ANDROID · BLUETOOTH LE",
+  "tagline": "Bluetooth scale to VitalForge, no manual entry",
+  "subline": "./gradlew installDebug",
+  "footnote": "Standard SIG profile · Full BIA capture · Offline-first queue",
+  "palette": "violet",
+  "description": "Android BLE bridge — reads a Beurer BF720 scale, persists full BIA readings, delivers to VitalForge",
+  "topics": [
+    "android", "kotlin", "bluetooth-low-energy", "ble", "jetpack-compose",
+    "beurer", "bf720", "smart-scale", "body-composition", "bioimpedance",
+    "health-data", "self-hosted"
+  ]
+}

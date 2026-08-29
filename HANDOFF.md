@@ -5,6 +5,83 @@ as open with two commits still unpushed. Both are pushed, the PR is merged,
 and the branch it lived on is deleted. Read this first; don't re-derive
 state from git log archaeology.
 
+## Later the same day (2026-08-29): repo-glowup completed (local files only)
+
+Supersedes the earlier "repo-glowup started, not completed" note. No app code
+changed this pass — the whole diff is docs/branding/licensing. HEAD is still
+`efd7411`; **everything below is uncommitted and unpushed.**
+
+1. Answered a "what's left to get this app fully working?" question by
+   summarizing the "Known open items" section below (nothing new — see that
+   section, unchanged, for the actual list). Flagged the VitalForge
+   idempotency item (A6) as the one that actually blocks real-world use
+   verified as still open.
+2. **`/repo-glowup` resumed and finished.** The blocker that stopped the
+   earlier attempt is gone: `rsvg-convert` 2.61.4 *and* Google Chrome 145 are
+   both installed now, plus Pillow 12.2.0 for the GitHub-safe PNG re-encode.
+   No `sudo` was needed this time. Preflight was fully green.
+
+   Landed (all untracked/modified, nothing committed):
+   - `docs/assets/branding.json` — the regeneration source of truth. Palette
+     `violet`, tagline "Bluetooth scale to VitalForge, no manual entry". Also
+     carries the drafted `topics` list for whenever the remote step happens.
+   - `docs/assets/banner.svg` / `banner-light.svg` — dark + light hero,
+     both visually verified rendered, not just generated.
+   - `docs/assets/social-preview.{svg,png,jpg}` — 1280×640, confirmed.
+   - `README.md` — **authored from scratch. There was no README before**;
+     the old handoff's "branded README hero" framing understated this.
+   - `LICENSE` — see below.
+
+   One caveat on the visual check: this machine has Cantarell and Fira Code
+   installed, so the approved render used them. Most GitHub viewers won't have
+   Cantarell — they'll get the SVG's fallback stack (`Segoe UI` / `Noto Sans`).
+   The fallback chain is sane and the generator's text-fitting is conservative,
+   so this is accepted, not a defect; just know the approved render and a
+   Windows/macOS reader's render differ slightly.
+
+   To regenerate the art after editing `branding.json`:
+   ```
+   SK=~/.claude/plugins/cache/bearyjd/repo-glowup/0.1.0/skills/repo-glowup
+   python3 "$SK/scripts/gen_branding.py" --config docs/assets/branding.json --outdir docs/assets
+   bash "$SK/scripts/rasterize.sh" docs/assets
+   ```
+
+### The licensing gap this surfaced — worth reading
+
+`docs/prp/bascule-prp.md:7` declares **License: AGPL-3.0**, and
+`decisions.md:191` lists "README carries openScale attribution and the
+AGPL-3.0 notice" as a Phase 5 gate item. Neither had ever shipped: there was
+no `README.md` and no `LICENSE` file, and `gh repo view` returned
+`licenseInfo: null`. A public repo with no LICENSE is **all-rights-reserved
+by default** — the opposite of the stated intent, and it had been that way
+for the repo's whole public life.
+
+Fixed with user approval: `LICENSE` now holds the canonical AGPL-3.0 text
+(662 lines, sha256 `8d56b405…`), fetched from GitHub's `/licenses/agpl-3.0`
+API because gnu.org is unreachable from this sandbox. Installed **verbatim** —
+the `<year> <name of author>` placeholders in the "How to Apply" appendix are
+part of the license document and must not be edited; attribution lives in the
+README's License section instead (Copyright (C) 2026 Ventouxlabs).
+
+The README also carries the openScale acknowledgement ADR-002 requires,
+stating plainly that no openScale source is used and the decoders were
+reimplemented from protocol understanding.
+
+### Deliberately NOT done — remote metadata
+
+User chose "local files only". So all of this is still open:
+- Social preview **not** uploaded. There is no API for it; it is a manual
+  step at **Settings → General → Social preview**, using
+  `docs/assets/social-preview.png` (`.jpg` is the fallback if GitHub rejects
+  the PNG).
+- Repo **topics not set** (still empty). A 12-tag draft is sitting in
+  `docs/assets/branding.json` ready to apply.
+- About **description untouched** — the existing one is already accurate,
+  so overwriting it was a real decision, not a default.
+- The README's license badge currently renders **"LICENSE: NOT SPECIFIED"**.
+  This is expected, not a bug: shields.io reads GitHub's API, which cannot
+  see an unpushed `LICENSE`. It flips to AGPL-3.0 on push. Don't "fix" it.
+
 ## Where things actually are
 
 - **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0).
