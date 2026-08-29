@@ -1,152 +1,92 @@
-# Bascule — session handoff (post-review fix pipeline, Phase 3)
+# Bascule — session handoff (post-merge)
 
-Written 2026-08-28, replacing the 2026-08-25 version, which described a
-7-way review as "6 of 7 dimensions never delivered." All 6 delivered since,
-and the entire multi-batch fix pipeline this file describes happened after
-that write. Read this first; don't re-derive state from git log archaeology.
+Written 2026-08-29, replacing the 2026-08-28 version, which described PR #1
+as open with two commits still unpushed. Both are pushed, the PR is merged,
+and the branch it lived on is deleted. Read this first; don't re-derive
+state from git log archaeology.
 
 ## Where things actually are
 
-- **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0). Branch
-  `vitalforge-connectivity-and-login`, against open **PR #1**. `main` is
-  untouched by any of this.
-- **Committed:** `294d09e` ("fix: resolve correctness, security, and
-  performance findings from review") — 93 files, the CRITICAL/HIGH findings
-  plus most MEDIUM/LOW from the full 6-dimension review, in four fix batches.
-  **This commit is NOT pushed.** `git log origin/main..HEAD` / PR #1's diff
-  does not reflect it yet.
-- **Uncommitted, on top of `294d09e`, as of this write:** 13 files — a
-  further fix pass responding to a *second* review round (see below), all
-  verified: `detekt` 0 issues, **443/443 tests passing**. This needs a commit
-  (and both commits need a push) before PR #1 reflects current state.
-- **Test count: 443**, all green locally. Don't trust any older number
-  written elsewhere in this repo's docs — it moved from 249 → 267 → 337 →
-  375 → 377 → 429 → 443 across this session's fix batches.
+- **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0).
+  **`main` now has everything** — the VitalForge connectivity/login feature,
+  its two prior review-and-fix rounds, and this session's round-3
+  multi-agent review plus fix pipeline. Head is `1b6db33` (merge commit for
+  PR #1, now closed/merged).
+- **PR #1 is merged, not open.** The `vitalforge-connectivity-and-login`
+  branch it lived on is deleted, both locally and on origin. There is
+  nothing further to push for this feature.
+- **Test count: 524**, all green on `main`. `detekt`: 0 issues. CI (GitHub
+  Actions, `.github/workflows/ci.yml`) passed on the merge commit.
 - **Process doc:** `docs/prp/bascule-agent-prompt.md` governs phases/gates.
   **PRP:** `docs/prp/bascule-prp.md` governs requirements, wins on conflict.
 
 ## What actually happened this session (chronological)
 
-1. **A 6-dimension parallel `/code-review`** (correctness, type safety,
-   patterns, security, performance, completeness) ran against the full
-   `main...HEAD` diff. All 6 delivered in full this time, written to
-   `.claude/PRPs/reviews/pr-1-review-{dimension}.md`. Maintainability's
-   pass from the *previous* session (`pr-1-review.md`, 8 HIGH/12 MEDIUM/10
-   LOW) was already fixed by then — see item 2. The 6 new passes found
-   roughly 150 more findings, headlined by:
-   - **Correctness H1/H6**: a weigh-in was lost if any non-`Stable` frame
-     arrived first (collapsed the 45s measurement window to 4s), and a
-     buffered weight was discarded rather than flushed if the connection
-     dropped mid-correlation-window.
-   - **Performance CRITICAL**: `BridgeForegroundService` enqueued a full
-     GATT connect/handshake session on *every* BLE advertisement — 2-10/sec
-     while the scale was in range — with no cooldown.
-   - **Security S1-S3**: a malformed settings backup could crash-loop the
-     app permanently; importing settings silently drained the whole reading
-     backlog to whatever host the backup pointed at; a Keystore fault was an
-     unrecoverable launch crash.
-2. **Four fix batches**, each independently verified green before the next
-   started:
-   - Batch 2 (parallel: `fix-session-core`, `fix-scan-lifecycle`,
-     `fix-data-config`, `fix-delivery-layer`) — all CRITICAL/HIGH findings.
-     337 → tests. Implemented the E8 single-reconnect behavior, made every
-     `TransportEvent`/`DecodeEvent` dispatch exhaustive, fixed the GATT
-     transport data race, added the BLE-advertisement enqueue cooldown, made
-     `ScaleScanner.arm()` disarm before re-arming, fixed the silent-registry-
-     destruction bugs in the backup codec and profile store, implemented the
-     previously-unimplemented §3.4 per-row retry ladder and `Retry-After`
-     handling.
-   - Batch 3 (parallel: `fix-security-remainder`, `fix-test-coverage`,
-     `fix-ui-patterns`) — remaining security MEDIUM/LOW, the three largest
-     untested production classes (`ScaleProfileStore`, `AndroidScaleRegistrar`,
-     `ScaleViewModel`), UI/ViewModel dispatcher and testability findings.
-     → 375 tests.
-   - **`/devils-advocate` round 1** on the batch-2/3 diff (adversarial
-     dialogue review, done directly rather than via subagent). Found an ANR
-     risk (`WorkManagerScaleSessionEnqueuer` blocking the calling thread —
-     likely main — on a WorkManager query from `ScanBroadcastReceiver`) and a
-     `hostOf()` port-comparison gap neither the 6-way review nor batch 2/3
-     caught. Fixed directly. → 377 tests.
-   - Batch 4 (parallel: `fix-outcome-mapping`, `fix-data-docs`,
-     `fix-ui-remainder`) — the deliberately-deferred MEDIUM/LOW findings:
-     `SessionOutcome.Completed` changed from `List<ScaleReading>` to
-     `ScaleReading?` (the list could never legitimately hold >1 given
-     `MAX_EMISSIONS_PER_SESSION = 1`), gave `AndroidGattTransport` real
-     failure events instead of silent no-ops on a missing characteristic,
-     extracted a shared `DedupPolicy.withinTolerance` so local/remote dedup
-     literally cannot drift, amended three stale design docs, added Room
-     indices. → 429 tests. **Committed as `294d09e`.**
-3. **`/code-review` (Local Review Mode, adapted)** — since the working tree
-   was clean post-commit, scoped to the one slice that had never had an
-   independent look: the batch-4 diff plus the devil's-advocate-round-1
-   fixes (nobody but the fixing agent/session had read that code). Dispatched
-   fresh `code-reviewer` + `security-reviewer` agents in parallel.
-   - **Quality review**: 1 HIGH, 3 MEDIUM. Most consequential:
-     `AndroidScaleRegistrar`'s `forceNew` re-registration could report
-     **`Success` carrying the OLD scale slot number** when the handshake
-     completed without actually registering (`BeurerDecoder`'s `Complete`
-     carries a null credential whenever `registered` is false) — the
-     fallback line queried the real consent store directly, bypassing the
-     wrapper meant to prevent exactly this.
-   - **Security review**: 1 HIGH, 2 MEDIUM, 3 LOW, **REQUEST CHANGES**. The
-     `hostOf()` same-host gate (from devil's-advocate round 1) only ever
-     protected the one `unblockAuthRowsAndDrain()` call — the *existing*
-     `PENDING` backlog and *every future capture* were never gated by
-     anything, because the periodic drain re-reads the base URL and
-     credential fresh on every run. A crafted settings backup could
-     therefore silently and permanently redirect all present and future
-     weight/body-composition data to an attacker's server, or suppress
-     delivery to the real one via the remote-dedup path.
-4. **A second independent `/devils-advocate` round** (round 2, also direct,
-   scoped the same way) found two more issues neither review dimension nor
-   round 1 caught: `BasculeApplication`'s boot-time
-   `ForegroundServiceStartNotAllowedException` guard existed on the boot
-   path but not the interactive-toggle path (`ScaleViewModel.
-   setAlwaysOnBridging` → `AndroidBridgeServiceController.start()`, an
-   uncaught throw there crashes the process from a plain UI tap), and
-   `ManualEntryViewModel.save()`'s post-save reset used the *pre-save*
-   captured display unit rather than the live one, silently reverting a
-   unit change that landed mid-save.
-5. **All of the above fixed directly** (not dispatched — the fixes were
-   intricate enough, especially the host-change security logic, to keep in
-   one context). Notable design decision made while fixing the security
-   HIGH: **"no host configured yet" (a fresh install / first restore) is
-   deliberately NOT gated the same as "host silently changed"** — the first
-   pass over this fix broke the ordinary first-time-restore flow (an
-   existing test caught it) by treating "nothing configured" as
-   automatically different from any imported host. The corrected rule:
-   `keepsSameHost = currentHost == null || currentHost == importedHost` —
-   only an *existing, real* host now gates on a mismatch. On an actual host
-   change, the fix (a) parks the entire existing `PENDING` backlog behind
-   `BLOCKED_AUTH` and (b) does **not** auto-install the backup's own
-   credential — the user must take an explicit, visible Login/Save-token
-   action before anything drains to the new host again. → 443 tests.
-   Verification for this round is **not yet committed** — see "Where things
-   are" above.
+Picked up after the previous session's handoff (443 tests, PR #1 open with
+two commits pending push) with a request for "opus subagent code review" —
+which grew into a full round-3 review-and-fix cycle, then a devil's-advocate
+follow-up, then push and merge.
 
-## Two process mistakes made and caught this session, worth not repeating
+1. **Round-3 multi-agent review**, four independently-dispatched slices
+   (delivery/network, BLE decoders — previously never reviewed at all,
+   encrypted storage/UI, BLE session/lifecycle), each re-verified fresh
+   rather than trusted from a lossy pre-compaction summary. **55 findings:
+   3 CRITICAL, 10 HIGH, 42 MEDIUM/LOW.** Full detail in
+   `.claude/PRPs/reviews/pr-1-review-round3.md`. Headlined by:
+   - **C1**: concurrent delivery drains (periodic + immediate-trigger) could
+     both run at once and double-submit the same pending rows, with no
+     server-side idempotency key to dedupe on.
+   - **C2**: any 3xx HTTP response was classified as a permanent failure;
+     combined with redirects deliberately not being followed, a single
+     server-side redirect would mark the *entire* pending queue
+     `FAILED_PERMANENT` on first attempt.
+   - **C3**: the 90s hard session ceiling could fire during the
+     post-emission idle wait and discard an *already-decoded* weight
+     reading, since the decoder had nothing left to flush by then.
+   - The single most user-visible HIGH: registering a scale (replacing one,
+     or re-registering the same one) reported success but never activated
+     the new profile or re-armed the scanner — capture silently died.
+2. **Nine fix batches**, run in parallel where files didn't overlap, each
+   independently verified green before integration: delivery layer (closes
+   C1/C2 + 3 composing HIGHs), GATT session (closes C3 + the GATT-leak
+   HIGH), boot/startup crash-safety (2 HIGH uncaught-exception crashes),
+   scan/foreground-service lifecycle (the last 2 HIGHs), BLE decoder package
+   (orphan-pairing/plausibility bugs), scale-registration activation (the
+   user-visible bug above, closing 3 findings at once) + ConfigScreen UI
+   messaging (landed together — a real compile dependency), encrypted-
+   storage hardening, and misc test-infra cleanup. All landed as separate,
+   independently-verifiable commits — see `git log` for the individual
+   messages, each one has real detail on what changed and why.
+3. **`/devils-advocate` on the round-3 fix commits themselves** (scoped to
+   just the 9 new commits' diff — 68 files / ~3k lines — not the full
+   156-file branch diff, which had already been reviewed exhaustively by
+   this point). Found 5 real issues across all six review topics, most
+   notably: the boot/startup fix batch had reordered `BasculeApplication.
+   onCreate`'s steps for one reason (FGS exemption window timing) and, in
+   doing so, raced *two other steps against each other* — starting
+   always-on bridging before the legacy-credential migration that populates
+   the active profile it needs, so on exactly the first launch after a
+   BF720-slot-mapping upgrade with bridging already enabled, the newly-added
+   `stopSelf()` guard from a *different* fix in the same batch would fire
+   immediately. A genuine regression, introduced by this session's own
+   earlier work, caught only because the adversarial-review step existed.
+   Fixed along with 4 other items (extracted a shared `runNonCancelling`
+   coroutine-safety helper that replaced 4 hand-duplicated copies of the
+   same pattern, split `Error` from routine `Exception` handling at those
+   sites, extracted a testable `classifyForegroundStartFailure` seam, and
+   made `ScanEnqueueCooldown`'s now-persistent backing store prune stale
+   entries instead of accumulating a permanent plaintext BLE-address log).
+   → 524 tests.
+4. **Pushed and merged.** CI green on the final push, no merge conflicts
+   (branch already contained everything from `main`), PR merged via merge
+   commit (not squash — the individual fix-batch commits are each
+   independently meaningful and were left intact). Branch deleted. Local
+   `main` fast-forwarded to match.
 
-- **Piping `./gradlew ... | tail -N` masks the real exit code.** The `tail`
-  in the pipe succeeds even when gradle fails, so `[exited with code 0]`
-  annotations on a piped command are worthless as a pass/fail signal — read
-  the actual text for `BUILD SUCCESSFUL`/`BUILD FAILED`, or better, redirect
-  to a file first (`... > /tmp/log 2>&1; echo "EXIT=$?"`) and check that
-  captured code. This cost one full extra round-trip mid-session: a
-  genuinely broken compile was read as "429 tests, 0 failures" because that
-  was stale XML from the *previous* successful run, and the failing
-  `compileDebugKotlin` never got to overwrite it.
-- **A Kotlin trailing lambda always binds to the *last* parameter**, even
-  when an earlier functional-type parameter is the "obvious" target and the
-  true last parameter has a default. Adding an injectable `starter: () ->
-  Unit = { ... }` parameter *after* an existing `onStartResult: (Boolean) ->
-  Unit` parameter silently broke the call site's trailing-lambda syntax —
-  the lambda rebound to `starter`, and the compiler errors this produced
-  (`Unresolved reference 'not'`, `Cannot infer type for value parameter`)
-  did not obviously point at "wrong parameter bound." When adding a
-  defaulted functional parameter after an existing one, either use a named
-  argument at every call site or put the new parameter earlier.
+## Known open items (carried forward, still genuinely open — don't silently resolve)
 
-## Known open items (don't silently resolve these — they're tracked on purpose)
+Everything below predates this session except where noted; this session's
+round-3 review was scoped to specific findings, not a re-litigation of these.
 
 - **A6 escalation to JD, not yet sent**: v2 replay requires VitalForge to be
   idempotent on `client_id` (or `captured_at` + weight tolerance for pre-v2
@@ -157,65 +97,82 @@ that write. Read this first; don't re-derive state from git log archaeology.
 - **O-08 residues**: the recovery path for a full 8-slot scale registry
   (read `2A9A` / SIG delete-user op) is unexplored.
 - **V2 contract field names** deliberately unfilled — pinned from
-  VitalForge's Track A contract doc when it lands.
-- **C16 residual (flagged by its own fixing agent, not silently closed)**:
-  `AndroidGattTransport.write()` now emits a real failure event on a missing
-  characteristic instead of no-op'ing, but `GattSession.awaitWriteComplete`
-  and the handshake path both discard `WriteComplete.status` entirely, so
-  the fix improved observability without changing session behavior yet.
-  Needs its own scoped fix — making the session actually fail on non-success
-  status would also newly surface two *pre-existing* silently-swallowed
-  `-1` emissions with real blast radius into handshake retry, uncharacterized.
-- **L1 residual**: `ConfigStore`'s `StoredEnum`/`readStoredEnum` correctly
-  classifies a corrupted persisted enum as `Unreadable` rather than
-  silently defaulting, but nothing consumes the `Unreadable` case yet — a
-  corrupted `ContractVersion` still silently downgrades a V2 user to
-  `V1_WEIGHT_ONLY`. Needs a `ConfigStore` interface member (mirroring
-  `ScaleProfileStore.readFailure`, which *is* fully wired end-to-end) plus a
-  matching `FakeConfigStore` update.
-- **Architectural findings deliberately not fixed this session** (each
-  needs a real design decision, not a mechanical patch — see
-  `pr-1-review-patterns.md` for full detail): P8 (four config/credential
-  stores, three incompatible reactivity idioms), P16 (`ScaleProfileStore`
-  inherits `ConsentStore`, inverting the data-layer/BLE-layer dependency
-  direction), P17 (`ScaleProfileStore`/`ConfigStore` differing persistence
-  idioms), P25's behavioral half (`ManualEntry` is simultaneously a nav-bar
-  destination and a FAB target with two different back-stack contracts).
-- **C5/C7 deliberately deferred**: the project's first Room schema
-  migration (`MIGRATION_2_3`, added this session) has zero coverage, and
-  Compose has zero UI-test infrastructure. Both need their own instrumented-
-  test go/no-go decision — this repo has zero `app/src/androidTest/`
-  infrastructure today, and adding an emulator CI step is a real cost/
-  flakiness tradeoff, not a rider on any of the above fixes.
-- **A real environment constraint**: this sandbox has a shared, per-user
-  disk quota and a shared shell that other concurrent sessions on the same
-  machine can exhaust unpredictably (a full Bash outage — every command
-  returning exit 1 with zero output — happened mid-session and resolved on
-  its own). If a local build/test run fails inexplicably, don't assume your
-  change is broken before re-running.
+  VitalForge's Track A contract doc when it lands. This session added a
+  *second*, independent gate keeping V2 unreachable in the meantime (it was
+  previously selectable in the UI dropdown despite the shaper's own KDoc
+  falsely claiming otherwise) — both `ui/ConfigScreen.kt`'s
+  `selectableContractVersions` and `ui/ConfigViewModel.kt`'s matching import
+  gate need deleting together when the doc lands, not just one.
+- **C16 residual**: `AndroidGattTransport.write()` emits a real failure
+  event on a missing characteristic, but `GattSession.awaitWriteComplete`
+  and the handshake path both still discard `WriteComplete.status`
+  entirely. Needs its own scoped fix.
+- **L1 residual**: `ConfigStore`'s `StoredEnum.Unreadable` case is correctly
+  classified but nothing consumes it — a corrupted `ContractVersion` still
+  silently downgrades to `V1_WEIGHT_ONLY`.
+- **Architectural findings, deliberately not fixed** (each needs a real
+  design decision — see `pr-1-review-patterns.md`): P8 (four config/
+  credential stores, three incompatible reactivity idioms), P16
+  (`ScaleProfileStore` inherits `ConsentStore`, inverting the data-layer/
+  BLE-layer dependency direction), P17 (differing persistence idioms), P25's
+  behavioral half (`ManualEntry`'s dual nav-bar/FAB back-stack contracts).
+- **androidTest infrastructure was removed this session, not built out**
+  (LOW finding: the deps and `testInstrumentationRunner` were declared with
+  no `app/src/androidTest/` tree and no CI lane ever running them — dead
+  config that also carried a false KDoc claim of coverage that didn't
+  exist). This *changes* the framing of the old C5/C7 items: there's no
+  longer a half-started instrumented-test setup to finish, just a clean
+  decision to make from scratch if/when instrumented coverage is wanted.
+  The gap this leaves *un*covered, named explicitly by this session's own
+  fixing agents rather than hidden: `EncryptedScaleProfileStore`'s real
+  persistence/quarantine logic (only a hand-written fake is exercised in
+  the JVM lane), `BasculeApplication.onCreate`'s new crash-containment
+  guards (no injectable seam — `ScaleSessionWorker`'s equivalent guard does
+  have one, via `applicationContext as BasculeApplication`... which is
+  itself the blocker for testing anything downstream of it, see next item).
+- **`applicationContext as BasculeApplication` still blocks JVM testing of
+  `ScaleSessionWorker.doWork`'s post-cast branches** (staleness/permission
+  checks before the cast are covered; nothing after it is). This session
+  extracted the one piece of logic that *could* be pulled out
+  (`classifyForegroundStartFailure`) without the larger refactor (a
+  `WorkerFactory` or `open`/overridable dependencies) this has needed since
+  before this session started. Still not done; still a real decision, not
+  a mechanical patch.
+- **Smaller gaps flagged by name during this session's fixes, not silently
+  closed**: `MeasurementCorrelator.flush()` still clears a held orphan
+  body-composition frame without counting it as dropped (only reachable at
+  end-of-session, low severity). The FGS-exemption-window fix in
+  `BasculeApplication.onCreate` has no retry, and neither its
+  `startupFailure` flow nor the pre-existing `alwaysOnBridgingStartFailed`
+  flag is rendered anywhere in the UI yet — both need a screen surface.
+  `EncryptedScaleProfileStore.clear()` now routes through the stricter
+  `replaceAll` (which rejects duplicate ids) but is untested on the real
+  encrypted path for the same androidTest-gap reason above; safe by
+  reasoning (every write path already preserves id-uniqueness), not by
+  test.
 
-## A real discovery worth knowing before touching `GattSession` measurement code
+## A real discovery worth knowing before touching startup-sequencing code
 
-`MeasurementCorrelator.MAX_EMISSIONS_PER_SESSION = 1` is a **permanent
-one-shot latch** — this is now reflected directly in `SessionOutcome.
-Completed`'s type (`reading: ScaleReading?`, not a list) rather than left as
-an unenforced convention. See `ScaleRegistrar.kt`'s `registrationCredential`
-function for the one place this session found the convention had already
-been violated (the `forceNew` stale-credential bug above).
+Reordering independently-`guarded`/try-caught startup steps for one
+step's sake can silently break an *implicit* ordering dependency between
+two *other* steps that individually still "succeed." This session's own
+devil's-advocate round caught exactly this in `BasculeApplication.onCreate`
+(see item 3 above) — logged as a durable learning
+(`startup-step-reorder-races-dependency`) precisely because the mistake was
+made by this session's own earlier work, not inherited. When touching that
+method again: check whether any step reads state another step writes, not
+just whether each step individually still succeeds in isolation.
 
 ## Read these five files, in this order, before touching decoder/handshake code
 
 1. `docs/prp/00-design.md` — the design. §2.6, §2.7, §3.1, §9 carry
    provisional banners, superseded by #3 below.
-2. `docs/prp/decisions.md` — the ADRs (ADR-006 now has a superseded-by note
-   pointing at `04-scale-admin-and-automation-plan.md`, added this session).
-   ADR-007 is the one that matters most: the BF720 speaks the standard
-   Bluetooth SIG Weight/Body-Composition/User-Data profile, not a
-   proprietary opcode protocol.
+2. `docs/prp/decisions.md` — the ADRs. ADR-007 matters most: the BF720
+   speaks the standard Bluetooth SIG Weight/Body-Composition/User-Data
+   profile, not a proprietary opcode protocol.
 3. `docs/prp/02-interface-revision.md` — the actual revised
    `ScaleDecoder`/`DecodeEvent`/`GattOp`/`GattTransport`/`ScaleReading`
-   design (updated this session to match the real interface — it had
-   drifted, six members undocumented). Supersedes `00-design.md`.
+   design. Supersedes `00-design.md`.
 4. `docs/prp/02-phase2-dispositions.md` — a Phase 2 devil's-advocate pass.
 5. `docs/prp/01-plan.md` — the 31 original work packages, as amended.
 
@@ -240,27 +197,30 @@ Reconnect via USB before any hardware checkpoint work.
 
 ## Process notes for whoever (whatever) continues this
 
-- **Before doing anything else: commit the uncommitted work (13 files, all
-  verified green) and push both it and `294d09e`.** PR #1 currently
-  reflects neither.
-- Branch per phase/work-package, `--no-ff` merge with a gate-check message,
-  push — same pattern as Phases 0-2.
-- Fresh subagents for devil's-advocate/review passes must not share context
-  with whatever produced the thing they're reviewing — this session ran two
-  independent devil's-advocate rounds directly (not via subagent) plus one
-  fresh-subagent review round, and each of the three caught something the
-  previous ones missed. **Don't treat one review pass as sufficient once a
-  large fix wave has landed — the fixes themselves are new, unreviewed
-  surface area.**
-- **If you dispatch parallel review/analysis subagents and need their
-  findings back, have them write to a file the orchestrating session
-  reads, not just their final chat message.** This was a real, repeated
-  problem in the *previous* session (6 of 7 dimension reports lost) — this
-  session's agents were explicitly instructed to write to
-  `.claude/PRPs/reviews/pr-1-review-{dimension}.md` and all 6 delivered.
-- Trace adversarial-review fixes yourself before trusting them closed. This
-  session's own security fix needed a second pass after an existing test
-  caught a real regression the first version introduced (see "Two process
-  mistakes" above, and the `keepsSameHost` fresh-install carve-out) — a
-  security fix that breaks the most common legitimate use of a feature is
-  not a fix that should ship on the first draft.
+- **There is no open PR and no pending push for this feature.** Start from
+  `main`. If the next piece of work is another feature, branch from `main`
+  fresh rather than looking for `vitalforge-connectivity-and-login` — it's
+  gone.
+- **Multiple independent review passes each caught something the previous
+  ones missed, again, this session** — the round-3 review found things two
+  prior review rounds didn't (the whole decoder package had literally never
+  been reviewed before this session); the devil's-advocate pass on the
+  fix commits then found a regression *introduced by those same fixes*.
+  Don't treat one review pass as sufficient once a large fix wave has
+  landed — the fixes themselves are new, unreviewed surface area, same
+  lesson as the previous handoff, reconfirmed independently.
+- **Have review/fix subagents write full reports to durable storage, not
+  just their final chat message.** This session hit the same failure mode
+  the previous one named explicitly: a mid-session context compaction lost
+  the *content* of 33 findings from an earlier review round, leaving only
+  an aggregate severity tally. Recovery required re-running that scope's
+  review from scratch rather than trusting a lossy summary — costly, and
+  avoidable. This session's round-3 report (`pr-1-review-round3.md`) was
+  written to disk specifically so it wouldn't happen again; keep doing that.
+- **When agents report a cross-batch dependency mid-flight (a fix needing a
+  small change in a file another batch owns), route the change to whichever
+  agent already owns that file** rather than letting two agents edit the
+  same file concurrently. This came up twice this session (a `ConfigScreen`
+  fix needing a signal from `ConfigViewModel`, and a follow-up V2-contract
+  gate needing to apply in both the UI dropdown and the import path) and
+  both resolved cleanly by explicit routing rather than by accident.
