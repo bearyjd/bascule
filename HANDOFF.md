@@ -82,6 +82,100 @@ User chose "local files only". So all of this is still open:
   This is expected, not a bug: shields.io reads GitHub's API, which cannot
   see an unpushed `LICENSE`. It flips to AGPL-3.0 on push. Don't "fix" it.
 
+## 2026-08-29, later: FIRST on-device run since the round-3 fix wave
+
+The Pixel 9 Pro Fold (`4A111FDKD0000C`, Android 17 / SDK 37) was connected and
+the current build was installed and launched. **The scale was not present**, so
+everything BLE-dependent is still unverified. This is the first hardware
+contact since the fix wave, which until now had 524 green tests and zero real
+runs.
+
+**Device state found (pre-existing install dated 2026-08-23, i.e. before all
+the round-3 fixes):**
+- `base_url = https://weight.grepon.cc`, `display_unit = POUNDS`,
+  `paired_device_address = E7:DB:51:F1:36:91` — the BF720, registered as
+  **user slot 2**, matching the Hardware section below.
+- Exactly one reading in Room: a **MANUAL 70.5 kg entry from 2026-08-23
+  08:57:35**, `status=PENDING`, `attemptCount=0`. It had sat undelivered for
+  six days having never been attempted once — consistent with the delivery
+  scheduling defect the Aug 28 `APPEND_OR_REPLACE` fix addressed.
+
+**Backup taken first, and why it is not sufficient:** the whole data dir was
+pulled to `~/bascule-device-backup-20260829-091045.tar.gz` (verified archive).
+**That backup cannot survive an uninstall.** `EncryptedPreferences.kt:72-84`
+builds its `MasterKey` in the `AndroidKeyStore`, so the key is device- and
+install-bound and is destroyed on uninstall; restoring
+`bascule_scale_consent.xml` afterwards yields an undecryptable file. The scale
+registration is therefore only recoverable via the app's own passphrase-based
+Settings → Export, or by never uninstalling. **Install over the top
+(`adb install -r`) — never uninstall.** Done that way here; data confirmed
+intact afterwards (`firstInstallTime` still Aug 23).
+
+**Results:**
+1. **No crash on startup.** `BasculeApplication.onCreate` — the method the
+   devil's-advocate pass found a reordering regression in — ran clean on real
+   hardware with always-on bridging enabled and a registered profile present.
+   Process stayed alive. That regression fix now has hardware evidence, not
+   just a unit test.
+2. **`DeliveryWorker` actually runs now**: `WM-WorkerWrapper: Worker result
+   SUCCESS for ...delivery.DeliveryWorker`. On the old build the row sat
+   PENDING with the worker never firing. The scheduling fix is confirmed
+   against real, six-day-stale data.
+3. **The stale row moved `PENDING` → `BLOCKED_AUTH`** (`lastError=
+   "authentication required"`, `lastErrorClass=AUTH`) with `attemptCount`
+   still 0 and `lastAttemptMillis` still null. Correct: `ReadingDao.kt:78`
+   parks the queue with a bulk UPDATE rather than a per-row attempt, so no
+   HTTP call was made and no attempt was burned. Re-login flips it back
+   (`ReadingDao.kt:61`).
+
+**Two design findings from the real UI (screenshots taken of all four tabs):**
+- **The credentials card lies about session validity.** `ConfigScreen.kt:407`
+  renders "Signed in via username/password" from `state.sessionIsSet`, which
+  means *a cookie is stored*, not *the cookie still works*. Right now Settings
+  says "Signed in" while History simultaneously says "VitalForge needs your
+  login again" — both from the same state. Same family as the two unrendered
+  failure flows below: the app knows, the surface doesn't say.
+- **The display-unit setting does not affect History.** `formatWeight()`
+  (`HistoryFormatting.kt:19-20`) formats from the *reading's* persisted
+  `displayUnit`, and `HistoryViewModel` never reads the config preference at
+  all. So with the unit set to Pounds, the Add-weight field correctly says
+  "Weight (lbs)" while History still renders "70.5 kg". Arguably right (an
+  immutable historical record) but currently undocumented and surprising —
+  needs a decision, not a reflexive fix.
+
+**Still completely unverified — needs the physical scale:** the `0x2A9F`
+handshake, weight/body-composition frame correlation, and C3's 90s session
+ceiling. "Last successful capture: Never" on the Scale screen; automatic
+background capture is currently OFF, always-on foreground fallback is ON.
+
+4. **The delivery path is now proven end-to-end on real hardware.** The user
+   logged out and back in against `weight.grepon.cc`; the BLOCKED_AUTH row
+   flipped to PENDING and delivered:
+
+   | field | value |
+   |---|---|
+   | `status` | `SENT` |
+   | `attemptCount` | **1** |
+   | `deliveredFields` | `WEIGHT` |
+   | `contractVersionAtDelivery` | `1` |
+   | `lastError` / `lastErrorClass` | *(none)* |
+   | `remoteDuplicate` | `0` |
+   | `lastAttempt` | 2026-08-29 13:16:58 |
+
+   logcat shows exactly one `WM-WorkerWrapper: Starting work for
+   ...DeliveryWorker` → one INTERNET `requestNetwork` for uid 10321 → one
+   `Worker result SUCCESS`, with no exceptions. The History UI's error banner
+   cleared and the row's chip changed to `sent`.
+
+   **`attemptCount = 1` is the load-bearing number here.** It is direct
+   evidence against **C1** (concurrent periodic + immediate-trigger drains
+   double-submitting the same row): both drains were live, and the row was
+   submitted exactly once. C1 was previously closed on reasoning and unit
+   tests only. Note this is one observation, not a stress test — it does not
+   prove the race can never occur, only that the fixed code did the right
+   thing on a real drain. **§8.6's re-login recovery** (`ReadingDao.kt:61`)
+   is likewise now confirmed against real data rather than a fixture.
+
 ## Where things actually are
 
 - **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0).
