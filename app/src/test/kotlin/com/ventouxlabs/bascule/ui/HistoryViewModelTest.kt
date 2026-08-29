@@ -305,4 +305,36 @@ class HistoryViewModelTest {
         )
         assertTrue("no row insert should have happened as a side effect of the counter bump", dao.rows.value.isEmpty())
     }
+
+    /**
+     * `captureStateOf` itself is covered directly in `HistoryCaptureStateTest`.
+     * What's untested there is the wiring: that `configStore.pairedDeviceAddress`
+     * and `.automaticCaptureEnabled` — not some other same-typed `ConfigStore`
+     * flow (`alwaysOnBridging` is also a `Boolean`, `baseUrl` is also a nullable
+     * `String`) — are the two actually feeding `HistoryUiState.captureState`.
+     * Driving each flow independently *after* construction and asserting the
+     * ViewModel reacts is what rules that out, not merely a value present at
+     * startup.
+     */
+    @Test
+    fun captureStateReactsToConfigStoreChangesAfterConstruction() = runTest {
+        val dao = FakeReadingDao()
+        val configStore = FakeConfigStore()
+        val vm = viewModel(dao, configStore = configStore)
+        advanceUntilIdle()
+
+        assertEquals(CaptureState.NO_SCALE, vm.uiState.value.captureState)
+
+        configStore.savePairedDeviceAddress("AA:BB:CC:DD:EE:FF")
+        advanceUntilIdle()
+        assertEquals(
+            "a scale is paired now, but automatic capture is still off",
+            CaptureState.OFF,
+            vm.uiState.value.captureState,
+        )
+
+        configStore.saveAutomaticCaptureEnabled(true)
+        advanceUntilIdle()
+        assertEquals(CaptureState.WATCHING, vm.uiState.value.captureState)
+    }
 }

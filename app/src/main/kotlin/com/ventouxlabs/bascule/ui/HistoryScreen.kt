@@ -61,14 +61,19 @@ fun HistoryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        when (state.captureState) {
-            CaptureState.OFF -> item {
-                Banner(text = "Automatic capture is off — weigh-ins won't be picked up.")
+        // Null only until the first combine emission lands — skipped rather
+        // than defaulted, so a paired-and-watching scale never flashes the
+        // "no scale" banner on cold open (see HistoryUiState.captureState).
+        state.captureState?.let {
+            when (it) {
+                CaptureState.OFF -> item {
+                    Banner(text = "Automatic capture is off — weigh-ins won't be picked up.")
+                }
+                CaptureState.NO_SCALE -> item {
+                    Banner(text = "No scale registered yet. Add one on the Scale tab.")
+                }
+                CaptureState.WATCHING -> Unit
             }
-            CaptureState.NO_SCALE -> item {
-                Banner(text = "No scale registered yet. Add one on the Scale tab.")
-            }
-            CaptureState.WATCHING -> Unit
         }
 
         if (state.hasBlockedAuth) {

@@ -45,7 +45,12 @@ data class HistoryUiState(
     val oldestPendingAgeMillis: Long? = null,
     val counters: Map<DiagnosticsCounterKey, Int> = emptyMap(),
     val displayUnit: WeightUnit = WeightUnit.KILOGRAMS,
-    val captureState: CaptureState = CaptureState.NO_SCALE,
+    /**
+     * Null only as the `stateIn` seed — a scale that is in fact paired and
+     * watching must never flash the "no scale" banner while the first
+     * `combine` emission is still in flight.
+     */
+    val captureState: CaptureState? = null,
 )
 
 /**
