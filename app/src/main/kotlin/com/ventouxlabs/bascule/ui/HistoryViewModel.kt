@@ -25,6 +25,19 @@ import kotlinx.coroutines.launch
 /** Sort buckets, most-actionable first — declaration order *is* the sort order. */
 private enum class StatusRank { NEEDS_CONFIRMATION, BLOCKED, PENDING, DECLINED, SENT }
 
+/** What History tells the user the app is currently doing about the scale. */
+enum class CaptureState { WATCHING, OFF, NO_SCALE }
+
+/**
+ * Pure so the JVM lane can cover it. `NO_SCALE` outranks `OFF` because with
+ * nothing paired the capture flag is not the thing standing in the user's way.
+ */
+internal fun captureStateOf(pairedAddress: String?, captureEnabled: Boolean): CaptureState = when {
+    pairedAddress.isNullOrBlank() -> CaptureState.NO_SCALE
+    captureEnabled -> CaptureState.WATCHING
+    else -> CaptureState.OFF
+}
+
 data class HistoryUiState(
     val rows: List<ReadingEntity> = emptyList(),
     val hasBlockedAuth: Boolean = false,
@@ -32,6 +45,7 @@ data class HistoryUiState(
     val oldestPendingAgeMillis: Long? = null,
     val counters: Map<DiagnosticsCounterKey, Int> = emptyMap(),
     val displayUnit: WeightUnit = WeightUnit.KILOGRAMS,
+    val captureState: CaptureState = CaptureState.NO_SCALE,
 )
 
 /**
@@ -71,7 +85,9 @@ class HistoryViewModel(
         dao.observeAll(),
         diagnostics.observeAll(),
         configStore.displayUnit,
-    ) { readings, counters, displayUnit ->
+        configStore.automaticCaptureEnabled,
+        configStore.pairedDeviceAddress,
+    ) { readings, counters, displayUnit, captureEnabled, pairedAddress ->
         val summary = summarize(readings)
         HistoryUiState(
             rows = readings.sortedWith(rowOrdering),
@@ -80,6 +96,7 @@ class HistoryViewModel(
             oldestPendingAgeMillis = summary.oldestPendingCaptureMillis?.let { nowMillis() - it },
             counters = counters,
             displayUnit = displayUnit,
+            captureState = captureStateOf(pairedAddress, captureEnabled),
         )
     }.flowOn(computeDispatcher)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), HistoryUiState())

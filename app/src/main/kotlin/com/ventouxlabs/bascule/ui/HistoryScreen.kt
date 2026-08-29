@@ -61,6 +61,16 @@ fun HistoryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        when (state.captureState) {
+            CaptureState.OFF -> item {
+                Banner(text = "Automatic capture is off — weigh-ins won't be picked up.")
+            }
+            CaptureState.NO_SCALE -> item {
+                Banner(text = "No scale registered yet. Add one on the Scale tab.")
+            }
+            CaptureState.WATCHING -> Unit
+        }
+
         if (state.hasBlockedAuth) {
             item { Banner(text = "VitalForge needs your login again before more weigh-ins can send.") }
         }
