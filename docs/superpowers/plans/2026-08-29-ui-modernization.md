@@ -602,7 +602,7 @@ git commit -m "fix: pin delivery status colours so they do not depend on the wal
 
 - [ ] **Step 1: Rewrite the formatting tests**
 
-In `HistoryFormattingTest.kt`, replace the three `formatWeight` tests (`rendersTheStoredKilogramsWhenTheDisplayUnitIsKilograms`, `convertsToPoundsWhenTheDisplayUnitIsPounds`, and the corrupt-unit test) with:
+In `HistoryFormattingTest.kt`, replace **all four** `formatWeight` tests — `rendersTheStoredKilogramsWhenTheDisplayUnitIsKilograms`, `convertsToPoundsWhenTheDisplayUnitIsPounds`, the corrupt-unit test, and `alwaysRendersExactlyOneDecimalPlace` (it calls the changed signature too, so leaving it will not compile) — with:
 
 ```kotlin
     // --- formatWeight: storage is always kilograms; the user's current
