@@ -95,10 +95,9 @@ fun ConfigScreen(
             )
         }
         item {
-            UnitAndContractSection(
+            UnitSection(
                 state = state,
                 onUnitChanged = viewModel::saveDisplayUnit,
-                onContractChanged = viewModel::saveContractVersion,
             )
         }
         item {
@@ -316,10 +315,9 @@ internal val selectableContractVersions: List<ContractVersion> =
     ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP }
 
 @Composable
-private fun UnitAndContractSection(
+private fun UnitSection(
     state: ConfigUiState,
     onUnitChanged: (WeightUnit) -> Unit,
-    onContractChanged: (ContractVersion) -> Unit,
 ) {
     SectionCard(title = "Units and contract") {
         LabeledDropdown(
@@ -328,14 +326,6 @@ private fun UnitAndContractSection(
             optionLabel = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
             selected = state.displayUnit,
             onSelected = onUnitChanged,
-        )
-        LabeledDropdown(
-            label = "VitalForge contract version",
-            options = selectableContractVersions,
-            optionLabel = { "v${it.wire}" },
-            selected = state.contractVersion,
-            onSelected = onContractChanged,
-            modifier = Modifier.padding(top = 12.dp),
         )
     }
 }

@@ -26,7 +26,7 @@ class ContractVersionSelectionTest {
     @Test
     fun offersTheShippedV1Contract() {
         assertTrue(
-            "gating v2 must not leave the dropdown with nothing to choose",
+            "gating v2 must not leave the import path with no valid contract",
             ContractVersion.V1_WEIGHT_ONLY in selectableContractVersions,
         )
     }
@@ -44,5 +44,16 @@ class ContractVersionSelectionTest {
             ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP },
             selectableContractVersions,
         )
+    }
+
+    /**
+     * The Settings dropdown was removed because this list has exactly one
+     * entry, making it a control the user cannot change (spec §5.1). If a
+     * second version ever becomes selectable this fails, which is the signal
+     * to bring the control back — not to relax the assertion.
+     */
+    @Test
+    fun exactlyOneContractVersionIsSelectableSoNoControlIsWarranted() {
+        assertEquals(listOf(ContractVersion.V1_WEIGHT_ONLY), selectableContractVersions)
     }
 }

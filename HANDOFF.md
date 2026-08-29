@@ -268,12 +268,22 @@ round-3 review was scoped to specific findings, not a re-litigation of these.
 - **O-08 residues**: the recovery path for a full 8-slot scale registry
   (read `2A9A` / SIG delete-user op) is unexplored.
 - **V2 contract field names** deliberately unfilled — pinned from
-  VitalForge's Track A contract doc when it lands. This session added a
-  *second*, independent gate keeping V2 unreachable in the meantime (it was
-  previously selectable in the UI dropdown despite the shaper's own KDoc
-  falsely claiming otherwise) — both `ui/ConfigScreen.kt`'s
-  `selectableContractVersions` and `ui/ConfigViewModel.kt`'s matching import
-  gate need deleting together when the doc lands, not just one.
+  VitalForge's Track A contract doc when it lands. It was previously
+  selectable in the Settings UI dropdown despite the shaper's own KDoc
+  falsely claiming otherwise, but that dropdown offered exactly one
+  choice (`V1_WEIGHT_ONLY`) once gated, so a later session removed the
+  control itself rather than leave a single-option dropdown in the UI.
+  `ui/ConfigScreen.kt`'s `selectableContractVersions` survives as the sole
+  remaining gate — it now backs only `ui/ConfigViewModel.kt`'s import path
+  — plus `ContractVersionSelectionTest`'s
+  `exactlyOneContractVersionIsSelectableSoNoControlIsWarranted` tripwire,
+  which fails the moment a second version becomes selectable. When the
+  contract doc lands: delete the `V2_BODY_COMP` filter from
+  `selectableContractVersions` (do not delete the constant itself — it
+  still gates `ConfigViewModel.importSettings`'s
+  `imported.contractVersion in selectableContractVersions` check), update
+  or remove the tripwire test, and decide whether the Settings dropdown
+  should come back now that there is more than one legitimate option.
 - **C16 residual**: `AndroidGattTransport.write()` emits a real failure
   event on a missing characteristic, but `GattSession.awaitWriteComplete`
   and the handshake path both still discard `WriteComplete.status`
