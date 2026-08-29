@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -33,6 +34,7 @@ import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
+import com.ventouxlabs.bascule.ui.theme.statusPalette
 import java.util.concurrent.TimeUnit
 
 /**
@@ -222,15 +224,9 @@ private fun DiagnosticsSection(counters: Map<DiagnosticsCounterKey, Int>) {
 }
 
 @Composable
-private fun statusColors(status: ReadingStatus): Pair<Color, Color> = when (status) {
-    ReadingStatus.HELD_CONFIRM ->
-        MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
-    ReadingStatus.BLOCKED_AUTH, ReadingStatus.FAILED_PERMANENT ->
-        MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-    ReadingStatus.SENT ->
-        MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-    ReadingStatus.PENDING, ReadingStatus.DECLINED ->
-        MaterialTheme.colorScheme.surface to MaterialTheme.colorScheme.onSurface
+private fun statusColors(status: ReadingStatus): Pair<Color, Color> {
+    val palette = statusPalette(status, isSystemInDarkTheme())
+    return palette.container to palette.content
 }
 
 private const val STATUS_LABEL_BACKGROUND_ALPHA = 0.6f
