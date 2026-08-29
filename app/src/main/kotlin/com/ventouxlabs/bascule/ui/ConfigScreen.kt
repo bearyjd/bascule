@@ -319,7 +319,7 @@ private fun UnitSection(
     state: ConfigUiState,
     onUnitChanged: (WeightUnit) -> Unit,
 ) {
-    SectionCard(title = "Units and contract") {
+    SectionCard(title = "Units") {
         LabeledDropdown(
             label = "Weight unit",
             options = WeightUnit.entries,
