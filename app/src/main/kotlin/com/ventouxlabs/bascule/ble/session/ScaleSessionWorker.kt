@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
@@ -17,7 +18,7 @@ import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
-import kotlinx.coroutines.CancellationException
+import com.ventouxlabs.bascule.runNonCancelling
 
 class ScaleSessionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -78,16 +79,22 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
      * diagnostic. This is E10's mechanism arriving by its other route (a worker
      * downgraded out of the expedited quota is exactly a worker the platform
      * will not let go foreground), so it books the same `MISSED_QUOTA` counter.
+     *
+     * `applicationContext as BasculeApplication` above keeps this whole method
+     * out of the JVM test lane (devil's-advocate review, testing gaps round 4)
+     * — [classifyForegroundStartFailure] is split out so the one piece of
+     * actual branching logic here is still directly testable.
      */
     private suspend fun enterForeground(app: BasculeApplication): Boolean =
-        try {
+        runNonCancelling(onError = { error ->
+            if (error is Error) {
+                Log.e(TAG, "severe error contained entering the foreground state", error)
+            }
+            app.diagnosticsCounters.increment(classifyForegroundStartFailure(error))
+            false
+        }) {
             setForeground(foregroundInfo())
             true
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            app.diagnosticsCounters.increment(DiagnosticsCounterKey.MISSED_QUOTA)
-            false
         }
 
     private suspend fun resultFor(
@@ -154,5 +161,28 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         const val STALENESS_ABORT_MILLIS = 20_000L
         private const val CHANNEL = "scale_capture"
         private const val NOTIFICATION_ID = 720
+        private const val TAG = "ScaleSessionWorker"
     }
+}
+
+/**
+ * Which diagnostic counter a `setForeground` failure books. Kept as a pure,
+ * `Context`-free function — the seam [enterForeground] otherwise has no
+ * testable piece of, since `applicationContext as BasculeApplication` blocks
+ * this class itself from the JVM test lane (devil's-advocate review, testing
+ * gaps round 4).
+ *
+ * A single counter today because `ForegroundServiceStartNotAllowedException`,
+ * `ForegroundServiceTypeException`, and `SecurityException` are all the same
+ * story for this worker — the platform refused a foreground start right now,
+ * not a statement about this device — but the branch point exists here,
+ * rather than inline in [enterForeground], for whenever that stops being
+ * true.
+ */
+internal fun classifyForegroundStartFailure(error: Throwable): DiagnosticsCounterKey = when (error) {
+    // Every case maps here today (ForegroundServiceStartNotAllowedException,
+    // ForegroundServiceTypeException, and SecurityException are all the same
+    // story for this worker), but the `when` on `error` — rather than
+    // ignoring the parameter — is the seam for when that stops being true.
+    else -> DiagnosticsCounterKey.MISSED_QUOTA
 }

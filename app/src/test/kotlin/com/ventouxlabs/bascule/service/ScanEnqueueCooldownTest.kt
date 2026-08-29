@@ -109,6 +109,36 @@ class ScanEnqueueCooldownTest {
         assertTrue(cooldown.claim(ADDRESS))
     }
 
+    /**
+     * Devil's-advocate review, security round 5: this file is durable, unlike
+     * the in-memory map it replaced, so an expired entry left behind would
+     * accumulate as a small permanent plaintext record of every scale this
+     * device has ever cooled down for.
+     */
+    @Test
+    fun anExpiredEntryIsPrunedWhenAnotherAddressIsClaimed() {
+        cooldown.claim(ADDRESS)
+        now += WINDOW_MILLIS
+
+        cooldown.claim(OTHER_ADDRESS)
+
+        val keys = context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE).all.keys
+        assertFalse("expired address must not persist past its own window", keys.contains(ADDRESS))
+        assertTrue(keys.contains(OTHER_ADDRESS))
+    }
+
+    /** Pruning must only ever remove entries whose own window has elapsed. */
+    @Test
+    fun aStillLiveEntrySurvivesPruning() {
+        cooldown.claim(ADDRESS)
+        now += WINDOW_MILLIS - 1
+
+        cooldown.claim(OTHER_ADDRESS)
+
+        val keys = context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE).all.keys
+        assertTrue("an address still inside its own window must not be pruned", keys.contains(ADDRESS))
+    }
+
     private companion object {
         const val WINDOW_MILLIS = 5L * 60 * 1_000
         const val ADDRESS = "AA:BB:CC:DD:EE:FF"

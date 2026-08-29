@@ -10,8 +10,8 @@ import android.util.Log
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.ble.session.ScaleSessionEnqueuer
 import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
+import com.ventouxlabs.bascule.runNonCancelling
 import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,13 +56,16 @@ class ScanBroadcastReceiver(
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                dispatch(context, addresses)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                // A keystore fault opening the profile store must not reach the
-                // default uncaught handler — this runs on every advertisement.
-                Log.w(TAG, "scan wake could not be dispatched", error)
+                runNonCancelling(onError = { error ->
+                    if (error is Error) {
+                        Log.e(TAG, "severe error contained while dispatching a scan wake", error)
+                    }
+                    // A keystore fault opening the profile store must not reach the
+                    // default uncaught handler — this runs on every advertisement.
+                    Log.w(TAG, "scan wake could not be dispatched", error)
+                }) {
+                    dispatch(context, addresses)
+                }
             } finally {
                 // Nullable in a unit-test lane: goAsync() only returns a
                 // PendingResult when the framework put one there.

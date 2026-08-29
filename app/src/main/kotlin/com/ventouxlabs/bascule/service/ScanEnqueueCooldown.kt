@@ -43,6 +43,13 @@ internal class ScanEnqueueCooldown(
      * runs in a process that exists only to service one broadcast, and a claim
      * still sitting in the async write queue when that process dies is a claim
      * the next advertisement does not see.
+     *
+     * Prunes every other address whose window has already elapsed while
+     * writing this claim (devil's-advocate review, security round 5): this
+     * file is durable, unlike the in-memory map it replaced, so every scale
+     * this device has ever cooled down for would otherwise accumulate here
+     * forever — a small but real, and entirely avoidable, amount of plaintext
+     * BLE-address/timestamp residue on disk.
      */
     @Synchronized
     fun claim(address: String): Boolean {
@@ -52,7 +59,12 @@ internal class ScanEnqueueCooldown(
         // wall-clock correction backwards would otherwise suppress every claim
         // until real time caught up to the stale stamp.
         if (last != Long.MIN_VALUE && now - last in 0 until windowMillis) return false
-        store.edit().putLong(address, now).commit()
+        store.edit().apply {
+            store.all.keys
+                .filter { it != address && now - store.getLong(it, Long.MIN_VALUE) !in 0 until windowMillis }
+                .forEach(::remove)
+            putLong(address, now)
+        }.commit()
         return true
     }
 

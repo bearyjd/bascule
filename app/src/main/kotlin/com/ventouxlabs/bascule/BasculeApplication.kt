@@ -3,6 +3,7 @@ package com.ventouxlabs.bascule
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
@@ -32,7 +33,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -140,18 +140,28 @@ class BasculeApplication : Application() {
         // initialize — on the main thread, on every launch.
         guarded { deliveryScheduler.ensurePeriodicDrain() }
         applicationScope.launch {
-            // First, not last: the BOOT_COMPLETED foreground-service exemption
-            // window is short, and the migration below plus arm() are both
-            // DataStore/keystore reads that can outlast it. Nothing here depends
-            // on their results.
-            guarded { if (configStore.alwaysOnBridging.first()) bridgeServiceController.start() }
-            // Separately guarded so a fault in one startup step does not skip
-            // the others — a DataStore read that throws here is exactly the
-            // failure mode that used to crash the process on every launch.
+            // Migration first, deliberately: bridgeServiceController.start()
+            // below can lead to BridgeForegroundService.startActiveScan()
+            // reading scaleProfileStore.activeProfile — which this migration
+            // is what populates on a device upgrading from the legacy BF720
+            // slot mapping. Starting bridging first raced that population on
+            // exactly that one launch, so a service that would otherwise have
+            // started stopped itself immediately for having no active profile
+            // yet (devil's-advocate review, correctness round 1). Migration is
+            // a local, non-network DataStore read-then-write, so keeping it
+            // first costs essentially nothing against the FGS exemption
+            // window bridgeServiceController.start() is racing.
             guarded {
                 // Lazy, non-destructive migration of the existing BF720 slot mapping.
                 configStore.pairedDeviceAddress.first()?.let(scaleProfileStore::migrateLegacyCredential)
             }
+            // Ahead of arm(): the BOOT_COMPLETED foreground-service exemption
+            // window is short, and arm() is a DataStore/keystore read that can
+            // outlast it. Nothing here depends on arm()'s result.
+            guarded { if (configStore.alwaysOnBridging.first()) bridgeServiceController.start() }
+            // Separately guarded so a fault in one startup step does not skip
+            // the others — a DataStore read that throws here is exactly the
+            // failure mode that used to crash the process on every launch.
             guarded { scaleScanner.arm() }
         }
     }
@@ -160,15 +170,25 @@ class BasculeApplication : Application() {
      * `SupervisorJob()` only stops sibling cancellation; it installs no
      * exception handler, so without this every throwable from a startup step
      * reached the default uncaught-exception handler and killed the process.
+     * Delegates the cancellation-safety shape to [runNonCancelling] (shared
+     * with [com.ventouxlabs.bascule.service.BootReceiver],
+     * [com.ventouxlabs.bascule.ble.ScanBroadcastReceiver], and
+     * [com.ventouxlabs.bascule.ble.session.ScaleSessionWorker], which
+     * previously each reimplemented it by hand); an [Error] is logged
+     * distinctly, since it says something about device state rather than
+     * about whichever startup step happened to be running when it surfaced.
      */
     private inline fun guarded(block: () -> Unit) {
-        try {
-            block()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
+        runNonCancelling(onError = { error ->
+            if (error is Error) {
+                Log.e(TAG, "severe error contained during startup", error)
+            }
             _startupFailure.value = error
-        }
+        }, block = block)
+    }
+
+    private companion object {
+        const val TAG = "BasculeApplication"
     }
 }
 

@@ -3,8 +3,9 @@ package com.ventouxlabs.bascule.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import com.ventouxlabs.bascule.BasculeApplication
-import kotlinx.coroutines.CancellationException
+import com.ventouxlabs.bascule.runNonCancelling
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -39,17 +40,20 @@ class BootReceiver(
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // A DataStore read that never completes must not hold the
-                // goAsync() window open until the broadcast ANR limit. Bounds
-                // the suspending path only — a blocking binder call inside
-                // arm() is not interruptible by cancellation.
-                withTimeoutOrNull(armTimeoutMillis) { arm(context) }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                // A corrupt DataStore file or a keystore fault reaching the
-                // default uncaught handler would crash the app on *every* boot.
-                onFailure(context, error)
+                runNonCancelling(onError = { error ->
+                    if (error is Error) {
+                        Log.e(TAG, "severe error contained while re-arming after boot", error)
+                    }
+                    // A corrupt DataStore file or a keystore fault reaching the
+                    // default uncaught handler would crash the app on *every* boot.
+                    onFailure(context, error)
+                }) {
+                    // A DataStore read that never completes must not hold the
+                    // goAsync() window open until the broadcast ANR limit. Bounds
+                    // the suspending path only — a blocking binder call inside
+                    // arm() is not interruptible by cancellation.
+                    withTimeoutOrNull(armTimeoutMillis) { arm(context) }
+                }
             } finally {
                 // Nullable in a unit-test lane: goAsync() only returns a
                 // PendingResult when the framework put one there.
@@ -59,6 +63,7 @@ class BootReceiver(
     }
 
     private companion object {
+        const val TAG = "BootReceiver"
         const val ARM_TIMEOUT_MILLIS = 8_000L
     }
 }
