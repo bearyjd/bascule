@@ -41,6 +41,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -401,14 +402,7 @@ private fun CredentialsSection(
     }
 
     SectionCard(title = "VitalForge credentials") {
-        Text(
-            when {
-                state.tokenIsSet -> "Signed in with an API token"
-                state.sessionIsSet -> "Signed in via username/password"
-                else -> "Not signed in"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        CredentialStatusText(state)
         when (mode) {
             CredentialEditMode.NONE -> CredentialModeButtons(
                 credentialIsSet = state.tokenIsSet || state.sessionIsSet,
@@ -438,6 +432,32 @@ private fun CredentialsSection(
             )
         }
     }
+}
+
+/**
+ * `tokenIsSet`/`sessionIsSet` only mean a credential was *saved*, not that the
+ * server still accepts it. Without the rejected branches this card claimed
+ * "Signed in" while the History screen simultaneously said "VitalForge needs
+ * your login again" — the same app state described two contradictory ways.
+ * Found on the first real-hardware run against a six-day-stale session.
+ */
+@Composable
+private fun CredentialStatusText(state: ConfigUiState) {
+    Text(
+        when {
+            state.credentialRejected && state.tokenIsSet ->
+                "API token was rejected — sign in again to send waiting weigh-ins"
+
+            state.credentialRejected ->
+                "Session expired — sign in again to send waiting weigh-ins"
+
+            state.tokenIsSet -> "Signed in with an API token"
+            state.sessionIsSet -> "Signed in via username/password"
+            else -> "Not signed in"
+        },
+        style = MaterialTheme.typography.bodyMedium,
+        color = if (state.credentialRejected) MaterialTheme.colorScheme.error else Color.Unspecified,
+    )
 }
 
 @Composable

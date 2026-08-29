@@ -19,6 +19,7 @@ import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.ScaleProfileCodec
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.WeightUnit
+import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.ConnectionTestResult
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -52,6 +54,13 @@ data class ConfigUiState(
     val contractVersion: ContractVersion = ContractVersion.V1_WEIGHT_ONLY,
     val tokenIsSet: Boolean = false,
     val sessionIsSet: Boolean = false,
+    /**
+     * A credential is stored but the server has rejected it — there are
+     * `BLOCKED_AUTH` rows waiting on a new one. Distinct from "not signed
+     * in": something *is* saved, it just no longer works, which is exactly
+     * the state `tokenIsSet`/`sessionIsSet` cannot express on their own.
+     */
+    val credentialRejected: Boolean = false,
     val loginError: String? = null,
     val isLoggingIn: Boolean = false,
     val pairedDeviceAddress: String? = null,
@@ -224,17 +233,39 @@ class ConfigViewModel(
         TransientUiState(urlError, connectionTest, loginError, isLoggingIn, scaleRegistration)
     }
 
+    /**
+     * Derived from the existing [ReadingDao.observeAll] rather than a new
+     * `COUNT` query, matching how `HistoryViewModel` reads the same signal —
+     * one fewer method on an already-wide DAO interface, and the row volume
+     * here is one per weigh-in.
+     *
+     * Deliberately a fourth flow into [uiState] rather than a field on
+     * [credentialState]: that flow re-reads the encrypted stores on every
+     * emission, so folding this in there would re-decrypt the token and
+     * cookie each time any reading changed status — the exact waste its own
+     * KDoc above exists to prevent. `distinctUntilChanged` keeps unrelated
+     * row edits from re-emitting an unchanged boolean.
+     */
+    private val hasBlockedAuthRows = dao.observeAll()
+        .map { readings -> readings.any { it.status == ReadingStatus.BLOCKED_AUTH } }
+        .distinctUntilChanged()
+
     val uiState: StateFlow<ConfigUiState> = combine(
         storedConfig,
         transientState,
         credentialState,
-    ) { stored, transient, credentials ->
+        hasBlockedAuthRows,
+    ) { stored, transient, credentials, hasBlockedAuth ->
         ConfigUiState(
             baseUrl = stored.baseUrl.orEmpty(),
             displayUnit = stored.displayUnit,
             contractVersion = stored.contractVersion,
             tokenIsSet = credentials.tokenIsSet,
             sessionIsSet = credentials.sessionIsSet,
+            // Only meaningful when something is actually stored: with no
+            // credential the card already says "Not signed in", and calling
+            // that *rejected* would be a second wrong message, not a fix.
+            credentialRejected = (credentials.tokenIsSet || credentials.sessionIsSet) && hasBlockedAuth,
             loginError = transient.loginError,
             isLoggingIn = transient.isLoggingIn,
             pairedDeviceAddress = credentials.pairedDeviceAddress,
