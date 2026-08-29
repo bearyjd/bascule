@@ -43,7 +43,7 @@ fun BasculeApp() {
         Scaffold(
             bottomBar = {
                 NavigationBar {
-                    BasculeDestination.entries.forEach { destination ->
+                    BasculeDestination.bottomBarEntries.forEach { destination ->
                         NavigationBarItem(
                             selected = currentRoute?.hierarchy?.any { it.route == destination.route } == true,
                             onClick = {
