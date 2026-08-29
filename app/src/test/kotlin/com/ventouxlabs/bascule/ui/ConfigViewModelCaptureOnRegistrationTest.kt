@@ -1,5 +1,8 @@
 package com.ventouxlabs.bascule.ui
 
+import com.ventouxlabs.bascule.ble.RegistrationPhase
+import com.ventouxlabs.bascule.ble.ScaleRegistrar
+import com.ventouxlabs.bascule.ble.ScaleRegistrationResult
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
 import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
@@ -31,7 +34,10 @@ class ConfigViewModelCaptureOnRegistrationTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    private fun TestScope.viewModel(configStore: FakeConfigStore): ConfigViewModel {
+    private fun TestScope.viewModel(
+        configStore: FakeConfigStore,
+        scaleRegistrar: ScaleRegistrar? = null,
+    ): ConfigViewModel {
         val vm = ConfigViewModel(
             configStore,
             FakeAuthTokenStore(),
@@ -40,10 +46,37 @@ class ConfigViewModelCaptureOnRegistrationTest {
             FakeDeliveryTrigger(),
             FakeReadingDao(),
             ioDispatcher = mainDispatcherRule.dispatcher,
+            scaleRegistrar = scaleRegistrar,
             apiFactory = { FakeVitalForgeApi() },
         )
         backgroundScope.launch { vm.uiState.collect {} }
         return vm
+    }
+
+    @Test
+    fun registeringViaTheBleHandshakeEnablesAutomaticCapture() = runTest {
+        val configStore = FakeConfigStore()
+        assertFalse(
+            "precondition: capture ships off",
+            configStore.automaticCaptureEnabled.first(),
+        )
+        val registrar = object : ScaleRegistrar {
+            override suspend fun register(
+                forceNew: Boolean,
+                onPhase: (RegistrationPhase) -> Unit,
+            ): ScaleRegistrationResult {
+                onPhase(RegistrationPhase.SCANNING)
+                onPhase(RegistrationPhase.CONNECTING)
+                return ScaleRegistrationResult.Success("E7:DB:51:F1:36:91", 2)
+            }
+        }
+        val vm = viewModel(configStore, scaleRegistrar = registrar)
+        advanceUntilIdle()
+
+        vm.startScaleRegistration()
+        advanceUntilIdle()
+
+        assertTrue(configStore.automaticCaptureEnabled.first())
     }
 
     @Test
