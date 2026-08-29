@@ -571,7 +571,7 @@ This is deliberately cosmetic and unreachable on the test device (SDK 37 always 
 - [ ] **Step 6: Verify**
 
 Run: `./gradlew testDebugUnitTest detekt`
-Expected: PASS, 535 tests. If a contrast assertion fails, adjust the offending hex — **do not lower the 4.5 threshold.** If `Theme.kt` fails to compile, a `Teal*` reference was missed in the rename.
+Expected: PASS, 536 tests. If a contrast assertion fails, adjust the offending hex — **do not lower the 4.5 threshold.** If `Theme.kt` fails to compile, a `Teal*` reference was missed in the rename.
 
 - [ ] **Step 7: Commit**
 
@@ -694,7 +694,7 @@ In `HistoryScreen.kt`, replace the weight `Text`'s first argument. It currently 
 - [ ] **Step 6: Verify**
 
 Run: `./gradlew testDebugUnitTest detekt`
-Expected: PASS, 535 tests (count unchanged — tests were replaced, not added).
+Expected: PASS, 536 tests (count unchanged — tests were replaced, not added).
 
 - [ ] **Step 7: Commit**
 
@@ -805,7 +805,7 @@ In `HistoryScreen.kt`, add above the existing banners:
 - [ ] **Step 5: Verify**
 
 Run: `./gradlew testDebugUnitTest detekt`
-Expected: PASS, 538 tests. If `HistoryScreen`'s composable trips `LongMethod`, extract the banner block into a private `@Composable` rather than raising the limit.
+Expected: PASS, 539 tests. If `HistoryScreen`'s composable trips `LongMethod`, extract the banner block into a private `@Composable` rather than raising the limit.
 
 - [ ] **Step 6: Commit**
 
@@ -872,7 +872,7 @@ The "V2 contract field names" bullet says both `ConfigScreen`'s `selectableContr
 - [ ] **Step 5: Verify**
 
 Run: `./gradlew testDebugUnitTest detekt`
-Expected: PASS, 539 tests.
+Expected: PASS, 540 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -936,7 +936,7 @@ git commit -m "docs: rewrite Scale screen copy in user terms"
 
 ## Final verification (after all tasks)
 
-- [ ] `./gradlew testDebugUnitTest detekt` — expect **539 tests, 0 failures, detekt clean**.
+- [ ] `./gradlew testDebugUnitTest detekt` — expect **540 tests, 0 failures, detekt clean**.
 - [ ] `adb install -r app/build/outputs/apk/debug/app-debug.apk` — **never uninstall**.
 - [ ] Screenshot all three tabs plus manual entry, in light and dark.
 - [ ] Confirm the launcher icon renders, standard and themed.
