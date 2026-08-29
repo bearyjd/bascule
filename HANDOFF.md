@@ -5,6 +5,74 @@ as open with two commits still unpushed. Both are pushed, the PR is merged,
 and the branch it lived on is deleted. Read this first; don't re-derive
 state from git log archaeology.
 
+## 2026-08-29, evening: UI modernization branch (`ui-modernization`)
+
+An eight-task plan executed by subagents with a review after every task and a
+whole-branch review at the end. **16 commits off `main@73716c7`, 27 files,
++603/-155, 542 tests, detekt clean.** Spec: `docs/superpowers/specs/2026-08-29-ui-modernization-design.md`.
+Plan: `docs/superpowers/plans/2026-08-29-ui-modernization.md`.
+
+What landed: the app's first launcher icon (adaptive, with a monochrome layer
+for themed icons); manual entry dropped from the bottom bar so the rarest
+action no longer owns a quarter of primary nav (closing **P25**); automatic
+capture enabled on registration via a helper shared by *both* registration
+paths; delivery-status colours pinned so a failed delivery no longer depends
+on the wallpaper to be distinguishable from a successful one; History now
+renders the user's selected weight unit instead of each row's capture-time
+unit (which also closed a documented defect where a corrupt stored unit
+rendered a silently wrong number); a capture-state banner so a registered-but-
+idle app stops looking identical to "nobody weighed in"; the single-option
+contract-version dropdown removed; and Scale-screen copy rewritten out of
+implementation vocabulary.
+
+### KNOWN DEVIATION FROM THE SPEC — read before trusting §5.3
+
+Spec §5.3 requires the capture-off state offer **a one-tap enable**. The plan
+specified only banners, and the branch faithfully implements the plan, so the
+button does not exist. The banner now at least names where the toggle lives.
+This was caught by the final whole-branch review, not by any per-task review —
+each of those only compared code against its own brief. Deliberately deferred
+rather than landed as unreviewed UI after the last review pass.
+
+### Verification limits — do not overstate these
+
+- **Nothing in this branch has been verified on a physical device.** The Pixel
+  was unplugged partway through the first task and never reconnected. The
+  icon, every screen layout, the status chips and the capture banner are
+  code-verified only. A green unit lane depends on `processDebugResources`, so
+  it proves the icon vectors and `<adaptive-icon>` XML compile and link — and
+  nothing whatever about how any of it looks.
+- **This repo has no Compose/instrumented lane**, so the contract-dropdown
+  removal is verified by nothing and cannot be; its tripwire test pins the
+  premise (exactly one selectable version), not the removal.
+
+### Follow-up work, triaged by the final review and deliberately deferred
+
+- **`Banner()` is hardcoded to `errorContainer` + a warning icon**
+  (`HistoryScreen.kt`), so the informational capture-state banner renders as a
+  red error — a brand-new user's first screen is an error bar — and up to four
+  banners can stack as identical red bars. One root cause; the fix is a visual
+  judgement that needs a device.
+- **`ConfigViewModel` is ~730 lines at 19 of detekt's 20-function ceiling.**
+  Task 3 had to inline an unrelated helper purely to make room. Deleting the
+  dead `saveContractVersion` wrapper freed one slot, but this needs a design
+  decision, not a patch. Reverting that inlining is clean once it is addressed.
+- **`ConfigStore` maps three preferences over one DataStore**, so any unrelated
+  preference write re-sorts the whole readings table three times. Fix is
+  `distinctUntilChanged()`. Invisible to the JVM lane because `FakeConfigStore`
+  uses separate flows.
+- **`DECLINED` now shares `SENT`'s colours**, so "not me" looks like
+  "delivered". Defensible but unremarked and uncovered.
+- **The violet fallback re-tune is half-done** — neutrals keep a teal-green
+  tint (`OutlineVariantLight`, `InverseSurfaceLight`, `BackgroundDark`).
+  Near-unreachable on SDK 31+ where dynamic colour wins.
+- **`HistoryScreen` calls `isSystemInDarkTheme()` directly** while `BasculeTheme`
+  is parameterized — no live defect today, but a `@Preview` or a future in-app
+  theme setting would get status cards from the system and everything else from
+  the override.
+- **`StatusLabel`'s own chip background is still wallpaper-derived**, and the
+  contrast test only covers container-vs-content.
+
 ## Later the same day (2026-08-29): repo-glowup completed (local files only)
 
 Supersedes the earlier "repo-glowup started, not completed" note. No app code
