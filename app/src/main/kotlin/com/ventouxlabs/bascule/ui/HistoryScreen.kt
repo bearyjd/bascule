@@ -33,6 +33,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.ui.theme.statusPalette
 import java.util.concurrent.TimeUnit
@@ -78,6 +79,7 @@ fun HistoryScreen(
             items(state.rows, key = { it.id }) { reading ->
                 ReadingRow(
                     reading = reading,
+                    unit = state.displayUnit,
                     onConfirm = { viewModel.confirm(reading) },
                     onDecline = { viewModel.decline(reading) },
                     onRetry = { viewModel.retry(reading) },
@@ -134,6 +136,7 @@ private fun Banner(text: String) {
 @Composable
 private fun ReadingRow(
     reading: ReadingEntity,
+    unit: WeightUnit,
     onConfirm: () -> Unit,
     onDecline: () -> Unit,
     onRetry: () -> Unit,
@@ -151,7 +154,7 @@ private fun ReadingRow(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${formatWeight(reading)} ${reading.displayUnit}",
+                    "${formatWeight(reading, unit)} ${unit.wire}",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                 )

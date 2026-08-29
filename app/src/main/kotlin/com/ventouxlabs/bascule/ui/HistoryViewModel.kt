@@ -5,9 +5,11 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
@@ -29,6 +31,7 @@ data class HistoryUiState(
     val hasFailedPermanent: Boolean = false,
     val oldestPendingAgeMillis: Long? = null,
     val counters: Map<DiagnosticsCounterKey, Int> = emptyMap(),
+    val displayUnit: WeightUnit = WeightUnit.KILOGRAMS,
 )
 
 /**
@@ -44,16 +47,19 @@ data class HistoryUiState(
 class HistoryViewModel(
     private val dao: ReadingDao,
     private val diagnostics: DiagnosticsCounters,
+    private val configStore: ConfigStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val deliveryTrigger: DeliveryTrigger? = null,
     computeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     /**
-     * `DiagnosticsCounters` is combined alongside `dao.observeAll()`, not read
-     * inside its collect block — a counter can change (E7's `NO_MEASUREMENT`,
-     * most notably: a session that produced no reading inserts no row by
-     * definition) with no corresponding row change to trigger a recompute.
+     * `DiagnosticsCounters` and `configStore.displayUnit` are combined
+     * alongside `dao.observeAll()`, not read inside its collect block — a
+     * counter can change (E7's `NO_MEASUREMENT`, most notably: a session that
+     * produced no reading inserts no row by definition) with no corresponding
+     * row change to trigger a recompute, and the same is true of a unit
+     * change made from the Config screen while History is on-screen.
      *
      * `flowOn` keeps the sort and the summary pass off `Dispatchers.Main`:
      * `stateIn` collects on the main dispatcher, so without it the whole
@@ -64,7 +70,8 @@ class HistoryViewModel(
     val uiState: StateFlow<HistoryUiState> = combine(
         dao.observeAll(),
         diagnostics.observeAll(),
-    ) { readings, counters ->
+        configStore.displayUnit,
+    ) { readings, counters, displayUnit ->
         val summary = summarize(readings)
         HistoryUiState(
             rows = readings.sortedWith(rowOrdering),
@@ -72,6 +79,7 @@ class HistoryViewModel(
             hasFailedPermanent = summary.hasFailedPermanent,
             oldestPendingAgeMillis = summary.oldestPendingCaptureMillis?.let { nowMillis() - it },
             counters = counters,
+            displayUnit = displayUnit,
         )
     }.flowOn(computeDispatcher)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), HistoryUiState())
@@ -161,6 +169,7 @@ class HistoryViewModel(
                 HistoryViewModel(
                     app.database.readingDao(),
                     app.diagnosticsCounters,
+                    app.configStore,
                     deliveryTrigger = app.deliveryTrigger,
                 )
             }

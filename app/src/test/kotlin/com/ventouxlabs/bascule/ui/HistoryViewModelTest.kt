@@ -5,6 +5,7 @@ import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
+import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
 import com.ventouxlabs.bascule.ui.fake.FakeDeliveryTrigger
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
@@ -41,10 +42,12 @@ class HistoryViewModelTest {
         now: Long = 0L,
         diagnostics: InMemoryDiagnosticsCounters = InMemoryDiagnosticsCounters(),
         deliveryTrigger: DeliveryTrigger? = null,
+        configStore: FakeConfigStore = FakeConfigStore(),
     ): HistoryViewModel {
         val vm = HistoryViewModel(
             dao,
             diagnostics,
+            configStore,
             nowMillis = { now },
             deliveryTrigger = deliveryTrigger,
             computeDispatcher = mainDispatcherRule.dispatcher,

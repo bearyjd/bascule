@@ -11,15 +11,14 @@ import java.util.concurrent.TimeUnit
  */
 
 /**
- * Falls back to kilograms when the persisted `displayUnit` matches no
- * [WeightUnit], so a corrupt pounds row renders a *wrong number* rather than
- * an error. Pinned by test rather than fixed here — changing it is a product
- * decision about what to show when storage disagrees with itself.
+ * Storage is always kilograms (`00-design.md` §2.7); `ReadingEntity.displayUnit`
+ * records only which unit was on screen when the row was captured, which is a
+ * UI preference rather than part of the measurement. Rendering therefore uses
+ * the user's *current* unit — the stored string is not consulted, so a corrupt
+ * one can no longer produce a silently wrong number.
  */
-internal fun formatWeight(reading: ReadingEntity): String {
-    val unit = WeightUnit.entries.firstOrNull { it.wire == reading.displayUnit } ?: WeightUnit.KILOGRAMS
-    return "%.1f".format(unit.fromKilograms(reading.weightKg))
-}
+internal fun formatWeight(reading: ReadingEntity, unit: WeightUnit): String =
+    "%.1f".format(unit.fromKilograms(reading.weightKg))
 
 /** Coarse, dependency-free relative-age formatting — no locale-aware library is in this project's dependency set. */
 internal fun formatRelativeAge(millis: Long): String {
