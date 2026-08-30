@@ -36,7 +36,7 @@ data class ScaleUiState(
     val isLoading: Boolean = true,
 )
 
-private data class CaptureState(
+private data class ScaleCaptureSnapshot(
     val automaticCaptureEnabled: Boolean,
     val alwaysOnBridging: Boolean,
     val pendingDeliveries: Int,
@@ -84,7 +84,7 @@ class ScaleViewModel(
         dao.observeLastScaleCapture(),
         diagnostic,
     ) { automaticCapture, alwaysOn, pending, lastCapture, message ->
-        CaptureState(automaticCapture, alwaysOn, pending, lastCapture, message)
+        ScaleCaptureSnapshot(automaticCapture, alwaysOn, pending, lastCapture, message)
     }
 
     val uiState: StateFlow<ScaleUiState> = combine(

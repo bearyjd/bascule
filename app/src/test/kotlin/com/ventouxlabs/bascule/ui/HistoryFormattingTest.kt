@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -48,42 +49,43 @@ class HistoryFormattingTest {
         assertEquals("1d", formatRelativeAge(TimeUnit.HOURS.toMillis(47)))
     }
 
-    // --- formatWeight: storage is always kilograms, so displayUnit decides the number shown.
+    // --- formatWeight: storage is always kilograms; the user's current
+    // --- preference decides the number shown, not the row's stored unit.
 
     @Test
-    fun rendersTheStoredKilogramsWhenTheDisplayUnitIsKilograms() {
-        assertEquals("90.8", formatWeight(readingFixture(weightKg = 90.82, displayUnit = "kg")))
+    fun rendersKilogramsWhenTheUserSelectedKilograms() {
+        assertEquals(
+            "90.8",
+            formatWeight(readingFixture(weightKg = 90.82, displayUnit = "kg"), WeightUnit.KILOGRAMS),
+        )
     }
 
     @Test
-    fun convertsToPoundsWhenTheDisplayUnitIsPounds() {
-        assertEquals("200.2", formatWeight(readingFixture(weightKg = 90.82, displayUnit = "lbs")))
+    fun convertsToPoundsWhenTheUserSelectedPounds() {
+        assertEquals(
+            "200.2",
+            formatWeight(readingFixture(weightKg = 90.82, displayUnit = "kg"), WeightUnit.POUNDS),
+        )
     }
 
     /**
-     * The corrupt-unit case, pinned as-is rather than fixed: an unrecognized
-     * `displayUnit` falls back to kilograms, so the row renders a **wrong
-     * number** — 90.8 where the user's pounds row should read 200.2 — with no
-     * error anywhere. Changing this is a product decision; this test exists so
-     * the behaviour cannot change silently.
+     * Replaces the old corrupt-`displayUnit` test, which pinned a real defect:
+     * an unrecognised stored unit fell back to kilograms and rendered a wrong
+     * number (90.8 where a pounds row should read 200.2) with nothing marking
+     * it. Display no longer reads the stored string at all, so that failure
+     * mode cannot occur — this test exists to keep the record that it once
+     * could, and to fail if anyone reintroduces the dependency.
      */
     @Test
-    fun aCorruptDisplayUnitSilentlyFallsBackToKilograms() {
-        val corrupt = readingFixture(weightKg = 90.82, displayUnit = "stones")
-        val pounds = readingFixture(weightKg = 90.82, displayUnit = "lbs")
-
-        assertEquals("90.8", formatWeight(corrupt))
-        assertEquals(
-            "the fallback is indistinguishable from a genuine kg row — no marker reaches the user",
-            formatWeight(readingFixture(weightKg = 90.82, displayUnit = "kg")),
-            formatWeight(corrupt),
-        )
-        assertEquals("200.2", formatWeight(pounds))
+    fun aCorruptStoredUnitNoLongerAffectsWhatIsDisplayed() {
+        val corrupt = readingFixture(weightKg = 90.82, displayUnit = "not-a-unit")
+        assertEquals("200.2", formatWeight(corrupt, WeightUnit.POUNDS))
+        assertEquals("90.8", formatWeight(corrupt, WeightUnit.KILOGRAMS))
     }
 
     @Test
     fun alwaysRendersExactlyOneDecimalPlace() {
-        assertEquals("70.0", formatWeight(readingFixture(weightKg = 70.0)))
-        assertEquals("70.3", formatWeight(readingFixture(weightKg = 70.25)))
+        assertEquals("70.0", formatWeight(readingFixture(weightKg = 70.0), WeightUnit.KILOGRAMS))
+        assertEquals("70.3", formatWeight(readingFixture(weightKg = 70.25), WeightUnit.KILOGRAMS))
     }
 }

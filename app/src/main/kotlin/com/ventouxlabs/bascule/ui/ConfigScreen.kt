@@ -95,10 +95,9 @@ fun ConfigScreen(
             )
         }
         item {
-            UnitAndContractSection(
+            UnitSection(
                 state = state,
                 onUnitChanged = viewModel::saveDisplayUnit,
-                onContractChanged = viewModel::saveContractVersion,
             )
         }
         item {
@@ -305,37 +304,28 @@ private fun ConnectionTestResultText(result: ConnectionTestUiState) {
  * `V2_BODY_COMP` is withheld because `V2Shaper`'s body-composition field names
  * are placeholders: 00-design.md §4.2 requires them to come from VitalForge's
  * Track A contract doc, which has not landed. The shaper's own KDoc claims it
- * "is not selectable until that document lands" — this dropdown and
- * [com.ventouxlabs.bascule.ui.ConfigViewModel.importSettings]'s matching
- * field-skip gate are what make that true together; a settings import is a
- * second path into this same state and is gated identically. Delete both
- * filters when the doc lands and the names are pinned, alongside the
- * shaper's KDoc caveat.
+ * "is not selectable until that document lands" — the settings dropdown that
+ * used to enforce this is gone (spec §5.1; see `ContractVersionSelectionTest`),
+ * so [com.ventouxlabs.bascule.ui.ConfigViewModel.importSettings]'s field-skip
+ * gate, filtering against this same list, is what makes that claim true today.
+ * Delete the filter and that gate together when the doc lands and the names
+ * are pinned, alongside the shaper's KDoc caveat.
  */
 internal val selectableContractVersions: List<ContractVersion> =
     ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP }
 
 @Composable
-private fun UnitAndContractSection(
+private fun UnitSection(
     state: ConfigUiState,
     onUnitChanged: (WeightUnit) -> Unit,
-    onContractChanged: (ContractVersion) -> Unit,
 ) {
-    SectionCard(title = "Units and contract") {
+    SectionCard(title = "Units") {
         LabeledDropdown(
             label = "Weight unit",
             options = WeightUnit.entries,
             optionLabel = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
             selected = state.displayUnit,
             onSelected = onUnitChanged,
-        )
-        LabeledDropdown(
-            label = "VitalForge contract version",
-            options = selectableContractVersions,
-            optionLabel = { "v${it.wire}" },
-            selected = state.contractVersion,
-            onSelected = onContractChanged,
-            modifier = Modifier.padding(top = 12.dp),
         )
     }
 }

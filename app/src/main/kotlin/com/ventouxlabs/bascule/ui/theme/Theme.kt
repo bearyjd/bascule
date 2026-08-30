@@ -11,10 +11,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 private val LightColors = lightColorScheme(
-    primary = TealPrimaryLight,
-    onPrimary = OnTealPrimaryLight,
-    primaryContainer = TealPrimaryContainerLight,
-    onPrimaryContainer = OnTealPrimaryContainerLight,
+    primary = VioletPrimaryLight,
+    onPrimary = OnVioletPrimaryLight,
+    primaryContainer = VioletPrimaryContainerLight,
+    onPrimaryContainer = OnVioletPrimaryContainerLight,
     secondary = ClaySecondaryLight,
     onSecondary = OnClaySecondaryLight,
     secondaryContainer = ClaySecondaryContainerLight,
@@ -43,10 +43,10 @@ private val LightColors = lightColorScheme(
 )
 
 private val DarkColors = darkColorScheme(
-    primary = TealPrimaryDark,
-    onPrimary = OnTealPrimaryDark,
-    primaryContainer = TealPrimaryContainerDark,
-    onPrimaryContainer = OnTealPrimaryContainerDark,
+    primary = VioletPrimaryDark,
+    onPrimary = OnVioletPrimaryDark,
+    primaryContainer = VioletPrimaryContainerDark,
+    onPrimaryContainer = OnVioletPrimaryContainerDark,
     secondary = ClaySecondaryDark,
     onSecondary = OnClaySecondaryDark,
     secondaryContainer = ClaySecondaryContainerDark,
@@ -78,7 +78,7 @@ private val DarkColors = darkColorScheme(
  * Bascule's Material3 theme. Follows the system light/dark setting and, on
  * API 31+ ([Build.VERSION_CODES.S]), the device's dynamic (wallpaper-derived)
  * color when [useDynamicColor] is left on — falling back to the hand-tuned
- * teal brand palette everywhere else, so the app still has a deliberate
+ * violet brand palette everywhere else, so the app still has a deliberate
  * identity rather than defaulting to Material's stock purple below API 31.
  */
 @Composable

@@ -5,9 +5,11 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
@@ -16,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -23,12 +26,32 @@ import kotlinx.coroutines.launch
 /** Sort buckets, most-actionable first — declaration order *is* the sort order. */
 private enum class StatusRank { NEEDS_CONFIRMATION, BLOCKED, PENDING, DECLINED, SENT }
 
+/** What History tells the user the app is currently doing about the scale. */
+enum class CaptureState { WATCHING, OFF, NO_SCALE }
+
+/**
+ * Pure so the JVM lane can cover it. `NO_SCALE` outranks `OFF` because with
+ * nothing paired the capture flag is not the thing standing in the user's way.
+ */
+internal fun captureStateOf(pairedAddress: String?, captureEnabled: Boolean): CaptureState = when {
+    pairedAddress.isNullOrBlank() -> CaptureState.NO_SCALE
+    captureEnabled -> CaptureState.WATCHING
+    else -> CaptureState.OFF
+}
+
 data class HistoryUiState(
     val rows: List<ReadingEntity> = emptyList(),
     val hasBlockedAuth: Boolean = false,
     val hasFailedPermanent: Boolean = false,
     val oldestPendingAgeMillis: Long? = null,
     val counters: Map<DiagnosticsCounterKey, Int> = emptyMap(),
+    val displayUnit: WeightUnit = WeightUnit.KILOGRAMS,
+    /**
+     * Null only as the `stateIn` seed — a scale that is in fact paired and
+     * watching must never flash the "no scale" banner while the first
+     * `combine` emission is still in flight.
+     */
+    val captureState: CaptureState? = null,
 )
 
 /**
@@ -44,16 +67,19 @@ data class HistoryUiState(
 class HistoryViewModel(
     private val dao: ReadingDao,
     private val diagnostics: DiagnosticsCounters,
+    private val configStore: ConfigStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val deliveryTrigger: DeliveryTrigger? = null,
     computeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     /**
-     * `DiagnosticsCounters` is combined alongside `dao.observeAll()`, not read
-     * inside its collect block — a counter can change (E7's `NO_MEASUREMENT`,
-     * most notably: a session that produced no reading inserts no row by
-     * definition) with no corresponding row change to trigger a recompute.
+     * `DiagnosticsCounters` and `configStore.displayUnit` are combined
+     * alongside `dao.observeAll()`, not read inside its collect block — a
+     * counter can change (E7's `NO_MEASUREMENT`, most notably: a session that
+     * produced no reading inserts no row by definition) with no corresponding
+     * row change to trigger a recompute, and the same is true of a unit
+     * change made from the Config screen while History is on-screen.
      *
      * `flowOn` keeps the sort and the summary pass off `Dispatchers.Main`:
      * `stateIn` collects on the main dispatcher, so without it the whole
@@ -64,7 +90,15 @@ class HistoryViewModel(
     val uiState: StateFlow<HistoryUiState> = combine(
         dao.observeAll(),
         diagnostics.observeAll(),
-    ) { readings, counters ->
+        // `displayUnit`, `automaticCaptureEnabled`, and `pairedDeviceAddress`
+        // all map the same underlying DataStore (`ConfigStore.kt`), which
+        // re-emits its whole preferences object on any single write. Without
+        // `distinctUntilChanged()`, one unrelated preference change fires all
+        // three and re-sorts the entire readings table three times over.
+        configStore.displayUnit.distinctUntilChanged(),
+        configStore.automaticCaptureEnabled.distinctUntilChanged(),
+        configStore.pairedDeviceAddress.distinctUntilChanged(),
+    ) { readings, counters, displayUnit, captureEnabled, pairedAddress ->
         val summary = summarize(readings)
         HistoryUiState(
             rows = readings.sortedWith(rowOrdering),
@@ -72,6 +106,8 @@ class HistoryViewModel(
             hasFailedPermanent = summary.hasFailedPermanent,
             oldestPendingAgeMillis = summary.oldestPendingCaptureMillis?.let { nowMillis() - it },
             counters = counters,
+            displayUnit = displayUnit,
+            captureState = captureStateOf(pairedAddress, captureEnabled),
         )
     }.flowOn(computeDispatcher)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), HistoryUiState())
@@ -161,6 +197,7 @@ class HistoryViewModel(
                 HistoryViewModel(
                     app.database.readingDao(),
                     app.diagnosticsCounters,
+                    app.configStore,
                     deliveryTrigger = app.deliveryTrigger,
                 )
             }

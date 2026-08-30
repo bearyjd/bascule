@@ -74,11 +74,8 @@ fun ScaleScreen(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Scale status")
-                Text("Battery and live database-change status are available only during a capability probe.")
-                Text(
-                    "Profile deletion is disabled until consent verification and typed " +
-                        "confirmation can be completed safely.",
-                )
+                Text("Battery level and live status are only available while the app is connected to your scale.")
+                Text("Profiles can't be removed yet — you can re-register a scale to replace one.")
             }
         }
     }
@@ -120,7 +117,7 @@ private fun ProfilesCard(
                     }
                 }
             }
-            Text("Scale inventory may be incomplete until List All Users capability probing is supported.")
+            Text("Bascule may not know about every user slot stored on the scale itself.")
         }
     }
 }

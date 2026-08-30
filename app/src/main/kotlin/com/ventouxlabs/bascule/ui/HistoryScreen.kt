@@ -1,5 +1,7 @@
 package com.ventouxlabs.bascule.ui
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
@@ -24,15 +27,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
+import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
+import com.ventouxlabs.bascule.ui.theme.statusPalette
 import java.util.concurrent.TimeUnit
 
 /**
@@ -42,6 +49,7 @@ import java.util.concurrent.TimeUnit
  */
 @Composable
 fun HistoryScreen(
+    onNavigateToScale: () -> Unit,
     viewModel: HistoryViewModel = viewModel(
         factory = HistoryViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
     ),
@@ -58,17 +66,7 @@ fun HistoryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (state.hasBlockedAuth) {
-            item { Banner(text = "VitalForge needs your login again before more weigh-ins can send.") }
-        }
-        if (state.hasFailedPermanent) {
-            item { Banner(text = "Some weigh-ins couldn't be delivered. Retry them below.") }
-        }
-        state.oldestPendingAgeMillis?.let { ageMillis ->
-            if (ageMillis >= PENDING_BACKLOG_WARNING_MILLIS) {
-                item { Banner(text = "Weigh-ins have been waiting to send for ${formatRelativeAge(ageMillis)}.") }
-            }
-        }
+        historyBanners(state, onNavigateToScale)
 
         if (state.rows.isEmpty()) {
             item { EmptyHistory() }
@@ -76,6 +74,7 @@ fun HistoryScreen(
             items(state.rows, key = { it.id }) { reading ->
                 ReadingRow(
                     reading = reading,
+                    unit = state.displayUnit,
                     onConfirm = { viewModel.confirm(reading) },
                     onDecline = { viewModel.decline(reading) },
                     onRetry = { viewModel.retry(reading) },
@@ -87,6 +86,47 @@ fun HistoryScreen(
     }
 }
 
+/**
+ * The scale-state and delivery-health banners at the top of History. Split out
+ * of [HistoryScreen] so that block stays under detekt's LongMethod ceiling —
+ * not a [Composable] itself, since it only arranges [LazyListScope.item] calls
+ * rather than emitting UI directly.
+ */
+private fun LazyListScope.historyBanners(state: HistoryUiState, onNavigateToScale: () -> Unit) {
+    // Null only until the first combine emission lands — skipped rather
+    // than defaulted, so a paired-and-watching scale never flashes the
+    // "no scale" banner on cold open (see HistoryUiState.captureState).
+    state.captureState?.let {
+        when (it) {
+            CaptureState.OFF -> item {
+                Banner(
+                    text = "Automatic capture is off. Tap to open the Scale tab and turn it on.",
+                    onClick = onNavigateToScale,
+                )
+            }
+            CaptureState.NO_SCALE -> item {
+                Banner(
+                    text = "No scale registered yet. Tap to open the Scale tab and add one.",
+                    onClick = onNavigateToScale,
+                )
+            }
+            CaptureState.WATCHING -> Unit
+        }
+    }
+
+    if (state.hasBlockedAuth) {
+        item { Banner(text = "VitalForge needs your login again before more weigh-ins can send.") }
+    }
+    if (state.hasFailedPermanent) {
+        item { Banner(text = "Some weigh-ins couldn't be delivered. Retry them below.") }
+    }
+    state.oldestPendingAgeMillis?.let { ageMillis ->
+        if (ageMillis >= PENDING_BACKLOG_WARNING_MILLIS) {
+            item { Banner(text = "Weigh-ins have been waiting to send for ${formatRelativeAge(ageMillis)}.") }
+        }
+    }
+}
+
 @Composable
 private fun EmptyHistory() {
     Column(
@@ -95,7 +135,7 @@ private fun EmptyHistory() {
     ) {
         Text("No weigh-ins yet", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Step on the scale, or add one manually.",
+            "They'll appear once your scale sends a reading, or tap + to log one manually.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
@@ -104,11 +144,23 @@ private fun EmptyHistory() {
 }
 
 @Composable
-private fun Banner(text: String) {
+private fun Banner(text: String, onClick: (() -> Unit)? = null) {
+    val shape = MaterialTheme.shapes.medium
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth(),
+        shape = shape,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick != null) {
+                    // Surface appends its own .clip(shape) after the caller's modifier, so a
+                    // clickable ripple added here would bleed past the rounded corners unless
+                    // we clip it ourselves first, using the same shape passed to Surface above.
+                    Modifier.clip(shape).clickable(role = Role.Button, onClick = onClick)
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
@@ -132,6 +184,7 @@ private fun Banner(text: String) {
 @Composable
 private fun ReadingRow(
     reading: ReadingEntity,
+    unit: WeightUnit,
     onConfirm: () -> Unit,
     onDecline: () -> Unit,
     onRetry: () -> Unit,
@@ -149,7 +202,7 @@ private fun ReadingRow(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "${formatWeight(reading)} ${reading.displayUnit}",
+                    "${formatWeight(reading, unit)} ${unit.wire}",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -222,15 +275,9 @@ private fun DiagnosticsSection(counters: Map<DiagnosticsCounterKey, Int>) {
 }
 
 @Composable
-private fun statusColors(status: ReadingStatus): Pair<Color, Color> = when (status) {
-    ReadingStatus.HELD_CONFIRM ->
-        MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
-    ReadingStatus.BLOCKED_AUTH, ReadingStatus.FAILED_PERMANENT ->
-        MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-    ReadingStatus.SENT ->
-        MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-    ReadingStatus.PENDING, ReadingStatus.DECLINED ->
-        MaterialTheme.colorScheme.surface to MaterialTheme.colorScheme.onSurface
+private fun statusColors(status: ReadingStatus): Pair<Color, Color> {
+    val palette = statusPalette(status, isSystemInDarkTheme())
+    return palette.container to palette.content
 }
 
 private const val STATUS_LABEL_BACKGROUND_ALPHA = 0.6f

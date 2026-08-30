@@ -306,10 +306,6 @@ class ConfigViewModel(
         viewModelScope.launch { configStore.saveDisplayUnit(unit) }
     }
 
-    fun saveContractVersion(version: ContractVersion) {
-        viewModelScope.launch { configStore.saveContractVersion(version) }
-    }
-
     /** A fresh credential unblocks the backlog — see [unblockAuthRowsAndDrain]. */
     fun saveToken(token: String) {
         val trimmed = token.trim()
@@ -351,13 +347,6 @@ class ConfigViewModel(
     }
 
     /**
-     * Read from the store, not from `uiState.value`: [uiState] is
-     * `WhileSubscribed`, so its cached value is the initial [ConfigUiState]
-     * — an empty base URL — whenever nothing is collecting it.
-     */
-    private suspend fun currentBaseUrl(): String = configStore.baseUrl.first().orEmpty()
-
-    /**
      * Exchanges a username/password for a session cookie (`shared/auth.py`'s
      * `/auth/login` — VitalForge has no per-user token, so this is a second,
      * independent credential type, not a way to obtain the bearer token).
@@ -377,7 +366,11 @@ class ConfigViewModel(
         _isLoggingIn.value = true
         _loginError.value = null
         viewModelScope.launch {
-            when (val result = apiFactory(currentBaseUrl()).login(trimmedUser, password)) {
+            // Read from the store, not from `uiState.value`: uiState is
+            // WhileSubscribed, so its cached value is the initial ConfigUiState
+            // — an empty base URL — whenever nothing is collecting it.
+            val baseUrl = configStore.baseUrl.first().orEmpty()
+            when (val result = apiFactory(baseUrl).login(trimmedUser, password)) {
                 is LoginResult.Success -> {
                     writeCredentials {
                         sessionCookieStore.save(result.sessionCookie)
@@ -422,7 +415,9 @@ class ConfigViewModel(
         val generation = ++connectionTestGeneration
         _connectionTest.value = ConnectionTestUiState.Testing
         viewModelScope.launch {
-            val resultState = when (val result = apiFactory(currentBaseUrl()).testConnection()) {
+            // Same store read as login — see its comment for why not uiState.value.
+            val baseUrl = configStore.baseUrl.first().orEmpty()
+            val resultState = when (val result = apiFactory(baseUrl).testConnection()) {
                 ConnectionTestResult.Authorized -> ConnectionTestUiState.Success
                 is ConnectionTestResult.Unauthorized ->
                     ConnectionTestUiState.Failure("Server rejected the credential (HTTP ${result.httpCode})")
@@ -462,17 +457,7 @@ class ConfigViewModel(
                 }
             }
             when (result) {
-                is ScaleRegistrationResult.Success -> {
-                    // The registrar persists the credential but cannot decide
-                    // which profile the user meant to capture from, so the
-                    // registry stores the new one inactive whenever another
-                    // profile already holds the flag. Same two calls
-                    // linkExistingScale makes, for the same reason.
-                    activateLinkedProfile(result.address, result.scaleIndex)
-                    rearmScanner?.invoke()
-                    _consentVersion.value++
-                    _scaleRegistration.value = ScaleRegistrationUiState.Success(result.address, result.scaleIndex)
-                }
+                is ScaleRegistrationResult.Success -> onRegistrationSucceeded(result.address, result.scaleIndex)
                 is ScaleRegistrationResult.Failure ->
                     _scaleRegistration.value = ScaleRegistrationUiState.Failure(result.message)
             }
@@ -501,13 +486,29 @@ class ConfigViewModel(
                 withContext(ioDispatcher) {
                     consentStore.save(normalizedAddress, ScaleCredential(scaleIndexValue, requireNotNull(code)))
                 }
-                activateLinkedProfile(normalizedAddress, scaleIndexValue)
                 configStore.savePairedDeviceAddress(normalizedAddress)
-                rearmScanner?.invoke()
-                _consentVersion.value++
-                _scaleRegistration.value = ScaleRegistrationUiState.Success(normalizedAddress, scaleIndexValue)
+                onRegistrationSucceeded(normalizedAddress, scaleIndexValue)
             }
         }
+    }
+
+    /**
+     * The tail both registration routes share — the BLE handshake and
+     * [linkExistingScale]. Extracted because enabling capture in only one would
+     * make registering via the scale work while linking by hand silently did
+     * not, with nothing to report the difference.
+     *
+     * Capture is enabled here rather than defaulted on in `ConfigStore`: a bare
+     * default would arm background scanning for someone who never asked, whereas
+     * completing a registration is an unambiguous statement of intent. The Scale
+     * screen's toggle still turns it back off.
+     */
+    private suspend fun onRegistrationSucceeded(address: String, scaleIndex: Int) {
+        activateLinkedProfile(address, scaleIndex)
+        configStore.saveAutomaticCaptureEnabled(true)
+        rearmScanner?.invoke()
+        _consentVersion.value++
+        _scaleRegistration.value = ScaleRegistrationUiState.Success(address, scaleIndex)
     }
 
     /**
@@ -612,9 +613,10 @@ class ConfigViewModel(
             // a working configuration for no benefit to the user.
             if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
-            // Same gate the dropdown applies: V2Shaper's field names are
-            // placeholders (00-design.md §4.2), so an import must not be able to
-            // put the app into a contract the screen offers no way back out of.
+            // V2Shaper's field names are placeholders (00-design.md §4.2); with
+            // the contract-version dropdown gone, selectableContractVersions now
+            // backs only this import-path gate, keeping V2_BODY_COMP out of a
+            // restored config even though nothing in the UI can select it either.
             // The existing value is kept rather than forced to a default — this
             // skips one field, it does not half-apply the import.
             if (imported.contractVersion in selectableContractVersions) {
