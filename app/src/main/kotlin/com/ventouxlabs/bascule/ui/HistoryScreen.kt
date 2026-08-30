@@ -27,6 +27,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -144,12 +145,22 @@ private fun EmptyHistory() {
 
 @Composable
 private fun Banner(text: String, onClick: (() -> Unit)? = null) {
+    val shape = MaterialTheme.shapes.medium
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
-        shape = MaterialTheme.shapes.medium,
+        shape = shape,
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier),
+            .then(
+                if (onClick != null) {
+                    // Surface appends its own .clip(shape) after the caller's modifier, so a
+                    // clickable ripple added here would bleed past the rounded corners unless
+                    // we clip it ourselves first, using the same shape passed to Surface above.
+                    Modifier.clip(shape).clickable(role = Role.Button, onClick = onClick)
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
