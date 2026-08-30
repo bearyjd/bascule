@@ -31,4 +31,10 @@ class HistoryCaptureStateTest {
             captureStateOf(pairedAddress = "E7:DB:51:F1:36:91", captureEnabled = true),
         )
     }
+
+    @Test
+    fun aBlankStoredAddressIsTreatedAsNoScale() {
+        assertEquals(CaptureState.NO_SCALE, captureStateOf(pairedAddress = "", captureEnabled = true))
+        assertEquals(CaptureState.NO_SCALE, captureStateOf(pairedAddress = "   ", captureEnabled = true))
+    }
 }

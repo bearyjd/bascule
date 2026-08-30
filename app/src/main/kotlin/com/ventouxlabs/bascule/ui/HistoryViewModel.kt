@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -89,9 +90,14 @@ class HistoryViewModel(
     val uiState: StateFlow<HistoryUiState> = combine(
         dao.observeAll(),
         diagnostics.observeAll(),
-        configStore.displayUnit,
-        configStore.automaticCaptureEnabled,
-        configStore.pairedDeviceAddress,
+        // `displayUnit`, `automaticCaptureEnabled`, and `pairedDeviceAddress`
+        // all map the same underlying DataStore (`ConfigStore.kt`), which
+        // re-emits its whole preferences object on any single write. Without
+        // `distinctUntilChanged()`, one unrelated preference change fires all
+        // three and re-sorts the entire readings table three times over.
+        configStore.displayUnit.distinctUntilChanged(),
+        configStore.automaticCaptureEnabled.distinctUntilChanged(),
+        configStore.pairedDeviceAddress.distinctUntilChanged(),
     ) { readings, counters, displayUnit, captureEnabled, pairedAddress ->
         val summary = summarize(readings)
         HistoryUiState(
