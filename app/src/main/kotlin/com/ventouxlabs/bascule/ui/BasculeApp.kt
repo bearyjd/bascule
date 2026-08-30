@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.navigation.NavController
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -46,13 +47,7 @@ fun BasculeApp() {
                     BasculeDestination.bottomBarEntries.forEach { destination ->
                         NavigationBarItem(
                             selected = currentRoute?.hierarchy?.any { it.route == destination.route } == true,
-                            onClick = {
-                                navController.navigate(destination.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            onClick = { navController.navigateToTab(destination.route) },
                             icon = { Icon(destination.icon, contentDescription = destination.label) },
                             label = { Text(destination.label) },
                         )
@@ -78,7 +73,11 @@ fun BasculeApp() {
                 startDestination = BasculeDestination.History.route,
                 modifier = Modifier.padding(innerPadding),
             ) {
-                composable(BasculeDestination.History.route) { HistoryScreen() }
+                composable(BasculeDestination.History.route) {
+                    HistoryScreen(
+                        onNavigateToScale = { navController.navigateToTab(BasculeDestination.Scale.route) },
+                    )
+                }
                 composable(BasculeDestination.ManualEntry.route) {
                     ManualEntryScreen(onSaved = { navController.popBackStack() })
                 }
@@ -86,6 +85,21 @@ fun BasculeApp() {
                 composable(BasculeDestination.Scale.route) { SharedViewModelScope(sharedOwner) { ScaleScreen() } }
             }
         }
+    }
+}
+
+/**
+ * Navigates to a top-level tab using the singleton back-stack contract the
+ * bottom bar relies on — save-and-restore state, single top, pop to the graph
+ * start. Anything that jumps to a bottom-bar destination (the bar itself, or
+ * a shortcut like History's scale banners) must resolve to the one instance
+ * already on the back stack rather than spawn a second copy of it (P25).
+ */
+private fun NavController.navigateToTab(route: String) {
+    navigate(route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
 

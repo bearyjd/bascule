@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
@@ -27,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -45,6 +48,7 @@ import java.util.concurrent.TimeUnit
  */
 @Composable
 fun HistoryScreen(
+    onNavigateToScale: () -> Unit,
     viewModel: HistoryViewModel = viewModel(
         factory = HistoryViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
     ),
@@ -61,32 +65,7 @@ fun HistoryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Null only until the first combine emission lands — skipped rather
-        // than defaulted, so a paired-and-watching scale never flashes the
-        // "no scale" banner on cold open (see HistoryUiState.captureState).
-        state.captureState?.let {
-            when (it) {
-                CaptureState.OFF -> item {
-                    Banner(text = "Automatic capture is off. Turn it on from the Scale tab to pick up weigh-ins.")
-                }
-                CaptureState.NO_SCALE -> item {
-                    Banner(text = "No scale registered yet. Add one on the Scale tab.")
-                }
-                CaptureState.WATCHING -> Unit
-            }
-        }
-
-        if (state.hasBlockedAuth) {
-            item { Banner(text = "VitalForge needs your login again before more weigh-ins can send.") }
-        }
-        if (state.hasFailedPermanent) {
-            item { Banner(text = "Some weigh-ins couldn't be delivered. Retry them below.") }
-        }
-        state.oldestPendingAgeMillis?.let { ageMillis ->
-            if (ageMillis >= PENDING_BACKLOG_WARNING_MILLIS) {
-                item { Banner(text = "Weigh-ins have been waiting to send for ${formatRelativeAge(ageMillis)}.") }
-            }
-        }
+        historyBanners(state, onNavigateToScale)
 
         if (state.rows.isEmpty()) {
             item { EmptyHistory() }
@@ -103,6 +82,47 @@ fun HistoryScreen(
         }
 
         item { DiagnosticsSection(state.counters) }
+    }
+}
+
+/**
+ * The scale-state and delivery-health banners at the top of History. Split out
+ * of [HistoryScreen] so that block stays under detekt's LongMethod ceiling —
+ * not a [Composable] itself, since it only arranges [LazyListScope.item] calls
+ * rather than emitting UI directly.
+ */
+private fun LazyListScope.historyBanners(state: HistoryUiState, onNavigateToScale: () -> Unit) {
+    // Null only until the first combine emission lands — skipped rather
+    // than defaulted, so a paired-and-watching scale never flashes the
+    // "no scale" banner on cold open (see HistoryUiState.captureState).
+    state.captureState?.let {
+        when (it) {
+            CaptureState.OFF -> item {
+                Banner(
+                    text = "Automatic capture is off. Tap to open the Scale tab and turn it on.",
+                    onClick = onNavigateToScale,
+                )
+            }
+            CaptureState.NO_SCALE -> item {
+                Banner(
+                    text = "No scale registered yet. Tap to open the Scale tab and add one.",
+                    onClick = onNavigateToScale,
+                )
+            }
+            CaptureState.WATCHING -> Unit
+        }
+    }
+
+    if (state.hasBlockedAuth) {
+        item { Banner(text = "VitalForge needs your login again before more weigh-ins can send.") }
+    }
+    if (state.hasFailedPermanent) {
+        item { Banner(text = "Some weigh-ins couldn't be delivered. Retry them below.") }
+    }
+    state.oldestPendingAgeMillis?.let { ageMillis ->
+        if (ageMillis >= PENDING_BACKLOG_WARNING_MILLIS) {
+            item { Banner(text = "Weigh-ins have been waiting to send for ${formatRelativeAge(ageMillis)}.") }
+        }
     }
 }
 
@@ -123,11 +143,13 @@ private fun EmptyHistory() {
 }
 
 @Composable
-private fun Banner(text: String) {
+private fun Banner(text: String, onClick: (() -> Unit)? = null) {
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
         shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
