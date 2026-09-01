@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.service
 
 import android.Manifest
 import android.app.Application
+import android.app.Service
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanResult
 import android.content.Intent
@@ -184,6 +185,68 @@ class BridgeForegroundServiceTest {
         assertFalse("no scheduled stop means the service is still running", shadowOf(controller.get()).isStoppedBySelf)
     }
 
+    /**
+     * H-1 (post-devil's-advocate review): the no-arg `stopSelf()` stops the
+     * service unconditionally, ignoring any start command that arrived after
+     * the one that armed the timer — so a `weighNow()` window expiring after
+     * the user separately turned "Always-on" on kills the scan they just
+     * asked for, with the toggle still reading on. `stopSelf(startId)` is a
+     * documented no-op once a newer start has landed; this only proves this
+     * service passes its OWN startId through, not that the platform actually
+     * honors it — Robolectric's `ShadowService` records the call, it doesn't
+     * model the real no-op-on-a-newer-start semantics.
+     */
+    @Test
+    fun aBoundedStopIsArmedWithTheStartIdItWasGivenNotTheNoArgOverload() {
+        val controller = grantedController()
+        controller.get().activeAddressProvider = { DEVICE_ADDRESS }
+        controller.get().boundStopScheduler = { _, onExpire -> onExpire() }
+        controller.create()
+
+        controller.get().onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, BOUND_MILLIS),
+            0,
+            SPECIFIC_START_ID,
+        )
+
+        assertEquals(SPECIFIC_START_ID, shadowOf(controller.get()).stopSelfId)
+    }
+
+    /**
+     * M-5 (post-devil's-advocate review): `START_STICKY` restarts the
+     * service after a process kill with a null `Intent` — which a bounded
+     * start would read as `boundMillis = 0`, arming no timer and leaving a
+     * scan nothing will ever stop. `START_NOT_STICKY` for a bounded start
+     * accepts losing the window on a rare mid-window process kill rather
+     * than risking a permanently unbounded one.
+     */
+    @Test
+    fun aBoundedStartReturnsNotStickySoAKilledProcessDoesNotRestartUnbounded() {
+        val controller = grantedController()
+        controller.get().activeAddressProvider = { DEVICE_ADDRESS }
+        controller.get().boundStopScheduler = { _, _ -> }
+        controller.create()
+
+        val result = controller.get().onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, BOUND_MILLIS),
+            0,
+            1,
+        )
+
+        assertEquals(Service.START_NOT_STICKY, result)
+    }
+
+    @Test
+    fun aPlainStartReturnsStickyUnchangedFromBeforeThisOverrideExisted() {
+        val controller = grantedController()
+        controller.get().activeAddressProvider = { DEVICE_ADDRESS }
+        controller.create()
+
+        val result = controller.get().onStartCommand(Intent(), 0, 1)
+
+        assertEquals(Service.START_STICKY, result)
+    }
+
     private fun grantedController(): ServiceController<BridgeForegroundService> {
         val context = ApplicationProvider.getApplicationContext<Application>()
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_SCAN)
@@ -202,5 +265,6 @@ class BridgeForegroundServiceTest {
         const val DEVICE_ADDRESS = "AA:BB:CC:DD:EE:FF"
         const val RSSI = -50
         const val BOUND_MILLIS = 120_000L
+        const val SPECIFIC_START_ID = 7
     }
 }

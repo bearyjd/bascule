@@ -427,12 +427,6 @@ class ScaleViewModelTest {
         assertEquals(listOf(kept), profiles.profiles.value)
     }
 
-    /**
-     * `ScaleScanner.arm()` already refuses to arm with no active profile, and
-     * `setAutomaticCapture` already turns that into a diagnostic — deleting the
-     * active profile needs no new guard, only proof the existing ones still
-     * cover the state it leaves behind.
-     */
     @Test
     fun deletingTheActiveProfileLeavesNoneActive() = runTest {
         val profiles = FakeScaleProfileStore(listOf(profile(active = true)))
@@ -442,6 +436,47 @@ class ScaleViewModelTest {
         advanceUntilIdle()
 
         assertNull(profiles.activeProfile.value)
+    }
+
+    /**
+     * `ScaleScanner.arm()` and `setAutomaticCapture`'s diagnostic guard
+     * *arming* with no active profile, but neither runs again once capture
+     * is already armed — so deleting the active profile while it's on must
+     * disarm explicitly, or the toggle and the LOW_POWER scan both keep
+     * advertising a capture path that can never fire again.
+     */
+    @Test
+    fun deletingTheActiveProfileWithCaptureOnDisarmsIt() = runTest {
+        val config = FakeConfigStore()
+        config.saveAutomaticCaptureEnabled(true)
+        val profiles = FakeScaleProfileStore(listOf(profile(active = true)))
+        val recorder = Recorder()
+        val vm = collecting(viewModel(config = config, profiles = profiles, recorder = recorder))
+        advanceUntilIdle()
+
+        vm.delete(profile())
+        advanceUntilIdle()
+
+        assertFalse(config.automaticCaptureEnabled.value)
+        assertEquals(1, recorder.disarmCount)
+        assertNotNull(vm.uiState.value.diagnostic)
+    }
+
+    @Test
+    fun deletingAnInactiveProfileLeavesCaptureAlone() = runTest {
+        val config = FakeConfigStore()
+        config.saveAutomaticCaptureEnabled(true)
+        val kept = profile(active = true)
+        val toDelete = profile(id = "slot-3", scaleIndex = 3, label = "Profile 3", active = false)
+        val profiles = FakeScaleProfileStore(listOf(kept, toDelete))
+        val recorder = Recorder()
+        val vm = viewModel(config = config, profiles = profiles, recorder = recorder)
+
+        vm.delete(toDelete)
+        advanceUntilIdle()
+
+        assertTrue(config.automaticCaptureEnabled.value)
+        assertEquals(0, recorder.disarmCount)
     }
 
     // --- Always-on bridging.
@@ -480,7 +515,8 @@ class ScaleViewModelTest {
     @Test
     fun weighNowStartsABoundedForegroundScan() = runTest {
         val recorder = Recorder()
-        val vm = collecting(viewModel(recorder = recorder))
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles, recorder = recorder))
         advanceUntilIdle()
 
         vm.weighNow()
@@ -490,10 +526,30 @@ class ScaleViewModelTest {
         assertTrue(vm.uiState.value.weighNowActive)
     }
 
+    /**
+     * `setAutomaticCapture`'s guard (line 118) refuses to *arm* with no
+     * active profile; `weighNow()` mirrors that rather than starting a scan
+     * with nothing to filter on and no way to ever stop waiting.
+     */
+    @Test
+    fun weighNowRefusesWithNoActiveProfile() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(profiles = FakeScaleProfileStore(), recorder = recorder))
+        advanceUntilIdle()
+
+        vm.weighNow()
+        advanceUntilIdle()
+
+        assertTrue("no profile to scan for — nothing should start", recorder.bridgeCalls.isEmpty())
+        assertFalse(vm.uiState.value.weighNowActive)
+        assertNotNull(vm.uiState.value.diagnostic)
+    }
+
     @Test
     fun weighNowIsIgnoredWhileAlreadyWaiting() = runTest {
         val recorder = Recorder()
-        val vm = collecting(viewModel(recorder = recorder))
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles, recorder = recorder))
         advanceUntilIdle()
 
         vm.weighNow()
@@ -513,7 +569,8 @@ class ScaleViewModelTest {
     fun weighNowDoesNothingWhenAlwaysOnBridgingIsAlreadyRunning() = runTest {
         val config = FakeConfigStore(initialAlwaysOnBridging = true)
         val recorder = Recorder()
-        val vm = collecting(viewModel(config = config, recorder = recorder))
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(config = config, profiles = profiles, recorder = recorder))
         advanceUntilIdle()
 
         vm.weighNow()
@@ -526,7 +583,8 @@ class ScaleViewModelTest {
 
     @Test
     fun weighNowClearsItselfOnceItsWindowElapses() = runTest {
-        val vm = collecting(viewModel())
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles))
         advanceUntilIdle()
 
         vm.weighNow()
@@ -542,7 +600,8 @@ class ScaleViewModelTest {
     @Test
     fun cancelWeighNowStopsTheServiceAndClearsState() = runTest {
         val recorder = Recorder()
-        val vm = collecting(viewModel(recorder = recorder))
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles, recorder = recorder))
         advanceUntilIdle()
         vm.weighNow()
         runCurrent()
@@ -574,7 +633,8 @@ class ScaleViewModelTest {
     @Test
     fun cancellingThenLettingTheOriginalWindowElapseStaysCleared() = runTest {
         val recorder = Recorder()
-        val vm = collecting(viewModel(recorder = recorder))
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles, recorder = recorder))
         advanceUntilIdle()
         vm.weighNow()
         runCurrent()
@@ -585,5 +645,35 @@ class ScaleViewModelTest {
 
         assertFalse(vm.uiState.value.weighNowActive)
         assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "stop"), recorder.bridgeCalls)
+    }
+
+    /**
+     * H-2 (devil's-advocate review): `cancelWeighNow()` used to call
+     * `bridgeService.stop()` unconditionally. If "Always-on foreground
+     * fallback" was switched on *during* a weighNow() window — `weighNow()`
+     * only checks it once, at start — cancelling would kill the scan the
+     * user separately asked to keep running, leaving that toggle reading on
+     * with nothing behind it.
+     */
+    @Test
+    fun cancelWeighNowDoesNotStopTheServiceWhenAlwaysOnBridgingTurnedOnMidWindow() = runTest {
+        val config = FakeConfigStore()
+        val recorder = Recorder()
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(config = config, profiles = profiles, recorder = recorder))
+        advanceUntilIdle()
+        vm.weighNow()
+        runCurrent()
+
+        config.saveAlwaysOnBridging(true)
+        vm.cancelWeighNow()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.weighNowActive)
+        assertEquals(
+            "the bounded scan stops waiting, but the shared service itself must keep running",
+            listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}"),
+            recorder.bridgeCalls,
+        )
     }
 }

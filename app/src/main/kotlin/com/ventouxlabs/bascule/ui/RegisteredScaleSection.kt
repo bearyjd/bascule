@@ -58,6 +58,11 @@ internal fun RegisteredScaleSection(
             )
         }
         Row(modifier = Modifier.padding(top = 8.dp)) {
+            // registeredUserIndex != null && pairedDeviceAddress == null
+            // renders neither branch — "Use existing" ends up alone, so its
+            // leading gap only belongs there when something precedes it
+            // (devil's-advocate review, L-6).
+            val hasLeadingButton = registeredUserIndex == null || pairedDeviceAddress != null
             if (registeredUserIndex == null) {
                 Button(onClick = { showWarning = true }, enabled = !busy) {
                     Text("Register scale")
@@ -73,7 +78,7 @@ internal fun RegisteredScaleSection(
             OutlinedButton(
                 onClick = { showExisting = true },
                 enabled = !busy,
-                modifier = Modifier.padding(start = 8.dp),
+                modifier = if (hasLeadingButton) Modifier.padding(start = 8.dp) else Modifier,
             ) {
                 Text("Use existing")
             }

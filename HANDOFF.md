@@ -112,6 +112,106 @@ wants day-to-day was flagged but not resolved.
 whole, then decide the commit boundary — none of tonight's three items
 depend on each other, so they could ship as one commit or three.
 
+**Resolved 2026-09-01 morning:** committed as `b3c10bd` and pushed straight
+to `main` (no branch, no PR — see the next section for why that couldn't be
+retrofitted into a PR after the fact). Also resolved: slot 2 ("bryn") sitting
+idle was flagged, not fixed — still true, this app only ever watches one
+active profile at a time; not addressed this pass either.
+
+## 2026-09-01, morning: independent review of `b3c10bd`, then a fix-all pass
+
+`b3c10bd` had already shipped straight to `main` with no review (see above).
+Dispatched a fresh `code-reviewer` subagent against it — never self-review
+your own just-written code, per this project's own standing rule — which
+found **2 HIGH, 5 MEDIUM, 6 LOW**, all real, none CRITICAL. Decision was
+REQUEST_CHANGES / follow-up commit, not a revert: architecture was sound
+(reusing `BridgeForegroundService` over a third scan subsystem, the
+injectable `boundStopScheduler` seam, sharing `WeighNowButton`, hoisting
+`ScaleViewModel` to the shared owner all correct), validation was still
+green (557 tests, detekt 0). Fixed everything HIGH/MEDIUM plus the LOW items
+that were real defects, each with its own test, three spot-checked by
+mutation (broke it, confirmed red, reverted) — same discipline as the night
+before. **564 tests, detekt clean**, all pushed to `main` in a follow-up
+commit.
+
+**What was actually wrong, in order of how much it mattered:**
+
+- **H-1 + H-2 — one defect, two independent fixes needed.** `weighNow()`'s
+  bounded scan and the "Always-on foreground fallback" toggle share one
+  `BridgeForegroundService`. Interleave them — tap Weigh now, then turn
+  always-on on before the 120s window expires — and the stale bounded timer
+  fired `stopSelf()` with no `startId`, unconditionally killing the scan the
+  user had separately asked to keep running, with the toggle still reading
+  on and nothing behind it. `cancelWeighNow()` had the identical bug from
+  the other direction (`context.stopService()` ignores start ids entirely,
+  so fixing only the service side left this route open). Fixed: `onStartCommand`
+  now captures and passes its own `startId` to `stopSelf(startId)` (a
+  documented no-op once a newer start has landed); `cancelWeighNow()` now
+  checks `config.alwaysOnBridging` before calling `stop()` at all.
+  `BridgeForegroundService.kt`, `ScaleViewModel.kt`.
+- **M-5, same method as H-1.** `START_STICKY` on a *bounded* start meant a
+  mid-window process kill restarted with a null `Intent` → `boundMillis = 0`
+  → no timer armed → a scan nothing would ever stop. Now `START_NOT_STICKY`
+  for a bounded start only; the always-on path's restart behavior is
+  unchanged.
+- **M-1.** `weighNow()`'s no-op cases (already-running, no active profile)
+  write a diagnostic message that `ScaleScreen` renders and `HistoryScreen`
+  silently did not — so the identical tap explained itself on one screen and
+  did nothing visible on the other. History now renders it too.
+- **M-3.** Deleting the *active* profile while automatic capture was on left
+  the config flag and the LOW_POWER scan both armed against a profile that
+  no longer existed — `delete()` now disarms and turns capture off when this
+  happens, with a diagnostic. The KDoc's original claim that existing guards
+  already covered this was false; corrected.
+- **M-2.** `HistoryScreen`'s `scaleViewModel` parameter had a `viewModel()`
+  default that silently resolved to a second, route-scoped instance,
+  defeating the one-shared-instance guarantee its own KDoc promised (the
+  exact P25 shape this whole feature exists to avoid). Made required —
+  `BasculeApp.kt` already supplied it explicitly, so nothing else changed.
+- **M-4.** `weighNow()` didn't check for an active profile before showing
+  "Waiting…" for the full 120s over a scan that self-stopped instantly.
+  Guarded, mirroring `setAutomaticCapture`'s existing line-118 check.
+- **L-1, subtle.** `weighNowJob = launch{}.also{ invokeOnCompletion {...} }`
+  had a real evaluation-order bug: if the coroutine completed before
+  `launch()` returned, the completion callback could fire *before* the outer
+  assignment landed, leaving `weighNowJob` stuck non-null forever — a dead
+  `weighNow()` with no error. Didn't fire in practice (today's suspend calls
+  never resolve synchronously) but was one dispatcher change away from being
+  live, and — per the reviewer — `MainDispatcherRule` always dispatches, so
+  **no test in this suite's current form could have caught it**. Fixed:
+  assign first, then register with an identity check (`if (weighNowJob ===
+  job)`).
+- **L-6, cosmetic but real.** "Use existing" carries a fixed leading
+  8dp padding meant to separate it from a preceding button — in the one
+  state where it's the *only* button in the row, that gap floated it off the
+  card edge for no reason. Now conditional on whether a leading button
+  actually rendered.
+
+**Explicitly not fixed, with reasons — don't silently re-open these without
+re-reading why:**
+- **L-2** (expose `weighNowActive` as its own narrower `StateFlow` so History
+  doesn't recompose on unrelated `ScaleUiState` changes) is superseded by
+  M-1's fix: M-1 requires History to read `diagnostic` too, so collecting
+  only a narrower flow was never actually available as an option once M-1
+  landed.
+- **L-3** (`alwaysOnBridgingStartFailed` renders nowhere in the UI) is a
+  pre-existing gap this commit made reachable via a new path, not one it
+  introduced — flagged, not fixed.
+- **L-4** (`WeighNowButton` lives in `HistoryScreen.kt` despite being shared
+  by two screens — convention wants its own file) and **L-5** (new strings
+  hardcoded instead of `stringResource`, matching a pre-existing, wider
+  pattern across `ScaleScreen.kt` and others) were both left alone as
+  genuinely out of scope for a bug-fix pass — L-5 in particular is drift
+  this commit didn't create.
+
+**On the missing PR:** the review happened *after* `b3c10bd` was already on
+`main`, because it was pushed directly there the night before with no branch
+cut. `/prp-pr` was tried afterward and correctly refused — the current
+branch *is* `main`, so there was nothing to open a PR from. Retrofitting one
+would mean reverting `main` and replaying the commit on a branch, which
+wasn't done. If review-before-merge matters going forward, cut a branch
+*before* committing, not after.
+
 ## 2026-08-29, evening: UI modernization branch (`ui-modernization`)
 
 An eight-task plan executed by subagents with a review after every task and a

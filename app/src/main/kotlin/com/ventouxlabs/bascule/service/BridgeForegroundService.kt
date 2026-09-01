@@ -90,16 +90,27 @@ class BridgeForegroundService : Service() {
      * already-running instance — which is exactly when `weighNow()`'s bounded
      * call needs to land, since `Always-on foreground fallback` skips it
      * entirely when this service is already running unbounded (see
-     * `ScaleViewModel.weighNow`). `START_STICKY`, unchanged from the platform
-     * default this class relied on before overriding this method — a
-     * `weighNow()` window is short enough that a mid-window process kill and
-     * restart losing its bound timer is an acceptable, rare cost, and changing
-     * the always-on toggle's restart behavior is not what this change is for.
+     * `ScaleViewModel.weighNow`).
+     *
+     * `stopSelf(startId)` rather than the no-arg overload: the no-arg form
+     * stops the service unconditionally, so a bounded call's timer firing
+     * after a *later* plain (always-on) start arrived would kill a scan the
+     * user just turned on. The `startId` overload is a documented no-op once
+     * a newer start has landed — exactly the guard this needs.
+     *
+     * `START_NOT_STICKY` for a bounded start, `START_STICKY` (the platform
+     * default this class relied on before overriding this method) for a
+     * plain one: a sticky restart after a mid-window process kill delivers a
+     * null `Intent`, which reads as `boundMillis = 0` — no timer gets armed,
+     * and the scan `onCreate` starts is never bounded again. Restarting
+     * unbounded is worse than not restarting at all here; the always-on
+     * toggle's own restart behavior is unchanged.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
-        if (boundMillis > 0) boundStopScheduler(boundMillis) { stopSelf() }
-        return START_STICKY
+        if (boundMillis <= 0) return START_STICKY
+        boundStopScheduler(boundMillis) { stopSelf(startId) }
+        return START_NOT_STICKY
     }
 
     /** BLUETOOTH_SCAN, not CONNECT: this service only ever scans. */

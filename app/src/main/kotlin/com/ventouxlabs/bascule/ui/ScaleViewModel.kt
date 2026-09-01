@@ -157,12 +157,20 @@ class ScaleViewModel(
 
     /**
      * Local-only: the BF720 keeps its own copy of the slot until it's
-     * overwritten or reset. Deleting the active profile leaves none active —
-     * [ScaleScanner.arm] and [setAutomaticCapture]'s diagnostic already cover
-     * that state, so no extra guard is needed here.
+     * overwritten or reset. Deleting the *active* profile explicitly disarms
+     * automatic capture — [ScaleScanner.arm] and [setAutomaticCapture]'s
+     * diagnostic only guard *arming* with no active profile; neither runs
+     * again once capture is already armed, so without this the config flag
+     * and the LOW_POWER scan would both keep advertising a capture path that
+     * can never fire again (devil's-advocate review, M-3).
      */
     fun delete(profile: ScaleProfile) = viewModelScope.launch {
         withContext(ioDispatcher) { profiles.deleteProfile(profile.id) }
+        if (profile.active && config.automaticCaptureEnabled.first()) {
+            config.saveAutomaticCaptureEnabled(false)
+            onDisarm()
+            diagnostic.value = "Automatic capture turned off — its profile was removed."
+        }
     }
 
     /**
@@ -174,7 +182,11 @@ class ScaleViewModel(
      */
     fun weighNow() {
         if (weighNowJob != null) return
-        weighNowJob = viewModelScope.launch {
+        val job = viewModelScope.launch {
+            if (profiles.activeProfile.value == null) {
+                diagnostic.value = "Link or register a profile before using Weigh now."
+                return@launch
+            }
             if (config.alwaysOnBridging.first()) {
                 diagnostic.value = "Always-on foreground fallback is already scanning — nothing more to start."
                 return@launch
@@ -183,15 +195,33 @@ class ScaleViewModel(
             bridgeService.startBounded(WEIGH_NOW_DURATION_MILLIS)
             delay(WEIGH_NOW_DURATION_MILLIS)
             mutableWeighNowActive.value = false
-        }.also { job -> job.invokeOnCompletion { weighNowJob = null } }
+        }
+        weighNowJob = job
+        // Assigned above, registered after: a coroutine that completes
+        // before `launch` returns would otherwise run this callback before
+        // the outer `weighNowJob = job` assignment lands, leaving the field
+        // stuck non-null forever — the identity check is what makes a stale
+        // completion from an earlier job a no-op against the current one
+        // (devil's-advocate review, L-1).
+        job.invokeOnCompletion { if (weighNowJob === job) weighNowJob = null }
     }
 
-    /** No-op with no window running — the service self-stops on its own once its window elapses regardless. */
+    /**
+     * No window running is a no-op — the service self-stops on its own once
+     * its window elapses regardless. Stopping it here is itself conditional:
+     * "Always-on foreground fallback" can be switched on *during* a
+     * `weighNow()` window (that check only runs once, at start), and an
+     * unconditional `stop()` would kill the scan the user separately asked
+     * to keep running, leaving that toggle reading on with nothing behind it
+     * (devil's-advocate review, H-2).
+     */
     fun cancelWeighNow() {
         if (!mutableWeighNowActive.value) return
         weighNowJob?.cancel()
-        bridgeService.stop()
         mutableWeighNowActive.value = false
+        viewModelScope.launch {
+            if (!config.alwaysOnBridging.first()) bridgeService.stop()
+        }
     }
 
     companion object {

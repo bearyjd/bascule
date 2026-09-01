@@ -58,10 +58,15 @@ fun HistoryScreen(
      * explicitly scoped to the shared owner, so "Weigh now" here and on Scale
      * always agree on whether a window is running (P25: two views of one
      * running scan must not read as two different answers).
+     *
+     * No default: a `viewModel()` default here would resolve against this
+     * route's own `NavBackStackEntry` — a second, independently-tracked
+     * instance that silently defeats the sharing this whole parameter exists
+     * for. Required, not optional, so that guarantee holds at compile time,
+     * which matters given this project has no instrumented lane to catch the
+     * divergence at runtime (devil's-advocate review, M-2).
      */
-    scaleViewModel: ScaleViewModel = viewModel(
-        factory = ScaleViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
-    ),
+    scaleViewModel: ScaleViewModel,
 ) {
     val state by viewModel.uiState.collectAsState()
     val scaleState by scaleViewModel.uiState.collectAsState()
@@ -79,7 +84,14 @@ fun HistoryScreen(
         item {
             val onWeighNowClick =
                 if (scaleState.weighNowActive) scaleViewModel::cancelWeighNow else scaleViewModel::weighNow
-            WeighNowButton(active = scaleState.weighNowActive, onClick = onWeighNowClick)
+            Column {
+                WeighNowButton(active = scaleState.weighNowActive, onClick = onWeighNowClick)
+                // Scale renders this same field (ScaleScreen.kt) — without it
+                // here, the always-on/no-profile no-op cases explain
+                // themselves on one screen and do nothing visible on the
+                // other (devil's-advocate review, M-1).
+                scaleState.diagnostic?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
         }
         historyBanners(state, onNavigateToScale)
 
