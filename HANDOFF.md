@@ -1,9 +1,116 @@
 # Bascule — session handoff (post-merge)
 
-Written 2026-08-29, replacing the 2026-08-28 version, which described PR #1
-as open with two commits still unpushed. Both are pushed, the PR is merged,
-and the branch it lived on is deleted. Read this first; don't re-derive
-state from git log archaeology.
+Written 2026-08-31, superseding the numbers in "Where things actually are"
+below (still 08-29's: `main@1b6db33`, 524 tests, PR #1). Read this section
+first. **`ui-modernization` (PR #2) is also merged now** — `main` is at
+`5ed6791`, 543 tests, detekt clean, independently re-verified with
+`--rerun-tasks` after the merge. That branch and its remote copy are both
+gone the same way `vitalforge-connectivity-and-login` is.
+
+## 2026-08-31, night: live hardware session — profile management + weigh-now
+
+Continuation of the same day's UI-modernization merge, this time with the
+Pixel actually connected and the physical BF720 in reach. Three real findings,
+one real feature, all device-verified — not just unit-tested.
+
+**Uncommitted at handoff — nothing here is pushed or even committed.**
+`git status` shows 9 modified/added files, +326/-9:
+`BasculeApplication.kt`, `BridgeForegroundService.kt`, `BasculeApp.kt`,
+`HistoryScreen.kt`, `RegisteredScaleSection.kt`, `ScaleScreen.kt`,
+`ScaleViewModel.kt`, plus the three matching test files, plus this spec:
+`docs/superpowers/specs/2026-08-31-scale-profile-management.md` (written
+*before* implementing — read it for the full design reasoning behind all
+three items below, including the rejected alternatives). All green:
+**557 unit tests pass** (`--rerun-tasks`, forced non-cached, confirmed after
+the History-screen wiring — up from 543 at last night's merge), detekt
+clean, every new guard mutation-tested by hand (broke it, confirmed red,
+reverted).
+**Not yet committed on purpose** — the session ended mid-flow when the user's
+phone left the app for an unrelated text conversation; nothing was lost, but
+nobody has reviewed the diff as a whole yet the way `finishing-a-development-branch`
+would.
+
+1. **Delete a local profile.** `ScaleProfileStore.deleteProfile` existed and
+   was never wired up. Added `ScaleViewModel.delete()`, a `Remove` button per
+   profile row with a confirm dialog, and fixed the stale "can't be removed
+   yet" copy. Device-verified: dialog opens, cancels cleanly, copy is
+   accurate. Never device-verified confirming an *actual* delete on this
+   user's real (only-known) profiles — deliberately not exercised destructively
+   against real data mid-session.
+
+2. **The real bug behind "why doesn't Bascule see Profile 1."** Not a display
+   bug — `RegisteredScaleSection`'s "Use existing" button was gated behind
+   `registeredUserIndex == null`, so once *any* scale is registered there was
+   no reachable UI path to link a second profile, even though
+   `ConfigViewModel.linkExistingScale` → `EncryptedScaleProfileStore.save()`
+   already handles multiple profiles per address correctly. Fixed the gating
+   (`RegisteredScaleSection.kt`) so "Use existing" is always offered alongside
+   "Re-register." **Then actually used it live**, with the user's real PIN
+   (P01 → slot 1, consent 3907) for the same BF720 already holding slot 2
+   ("bryn"/"JD" — profiles have since been renamed on-device by the user).
+   Slot 1 ("jd") is now the active profile. This is real production data on
+   the user's real device, not test fixtures.
+
+   **This produced independent, unplanned proof the whole pipeline works**:
+   minutes after linking, a real 200.8 lbs weigh-in was captured through slot
+   1, landed in History as `pending`, and resolved to `sent` against
+   `https://weight.grepon.cc` on its own within a few minutes — no
+   intervention needed. `BLOCKED_AUTH`/credential-rejection UI was never
+   exercised because auth is fine; not a coverage gap the app's still hiding.
+
+3. **`weighNow()` — a bounded fast-scan button, on both Scale and History.**
+   Diagnosed first: the two existing scan paths (`ScaleScanner`'s
+   `LOW_POWER`/`PendingIntent` background scan, and `BridgeForegroundService`'s
+   `BALANCED` always-on one) both turned out to work correctly — an earlier
+   150s silent window in this same session was bad timing (scale not
+   advertising, or nobody actually on it), not a broken pipeline. Confirmed by
+   later `dumpsys`/logcat evidence of a real `ScaleSessionWorker` completing.
+   Given that, `weighNow()` doesn't add a third scan subsystem — it reuses
+   `BridgeForegroundService` with a new `EXTRA_BOUND_MILLIS` intent extra
+   (120s, past `SessionBudget.HARD_SESSION_CEILING`'s 90s with margin) that
+   arms a self-stop via an injectable `boundStopScheduler` seam
+   (`Handler.postDelayed` in production). No-ops with a clear diagnostic line
+   when "Always-on foreground fallback" is already on, since starting a
+   second scan against the same filter would just fight the first one's
+   `PendingIntent` registration for nothing.
+
+   `ScaleViewModel` and `AndroidBridgeServiceController` both grew a
+   `startBounded(durationMillis)` alongside the existing unbounded `start()`.
+   `HistoryScreen` now takes an optional `scaleViewModel` parameter —
+   `BasculeApp.kt` constructs it once, explicitly scoped to the same shared
+   `ViewModelStoreOwner` `ConfigViewModel` already uses across Settings/Scale,
+   so History's button and Scale's button read one shared `weighNowActive`
+   flag rather than two independent ones that could silently disagree
+   (exactly the P25 failure shape this codebase has hit before). The button
+   composable itself (`WeighNowButton`) is shared, not duplicated, between the
+   two screens.
+
+   **Device-verified end to end, both directions**: tapped on Scale, showed
+   "Waiting…" on History too; `dumpsys activity services` confirmed
+   `BridgeForegroundService` actually running foreground with `(has extras)`
+   on the intent both times; cancel (once a tap actually landed on it — two
+   earlier taps missed the button on a resized layout) stopped the service,
+   confirmed absent from `dumpsys` afterward. **One weighNow window also
+   caught a live capture** — a second foreground notification
+   (`scale_capture` channel) appeared mid-window and cleared on its own,
+   consistent with a real `ScaleSessionWorker` session running to completion,
+   though the resulting History row was not directly re-confirmed before the
+   phone left the app (see below) — worth a quick glance next time it's in
+   hand.
+
+**Device end-state when the session paused:** Bascule was backgrounded (the
+phone switched to a messaging app under the user's own control, not a crash).
+No foreground service was left running — the last `weighNow()` window had
+already self-expired cleanly by the time this was checked
+(`dumpsys` showed nothing). Both `Automatic background capture` and
+`Always-on foreground fallback` toggles were left **off**. Active profile is
+**"jd" (slot 1)** — "bryn" (slot 2) is registered but currently inactive, so
+only one of the two is actually being watched; whether that's what the user
+wants day-to-day was flagged but not resolved.
+
+**Before doing anything else with this branch of work:** read the diff as a
+whole, then decide the commit boundary — none of tonight's three items
+depend on each other, so they could ship as one commit or three.
 
 ## 2026-08-29, evening: UI modernization branch (`ui-modernization`)
 

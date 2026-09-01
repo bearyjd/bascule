@@ -1,7 +1,10 @@
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
+import com.ventouxlabs.bascule.service.BridgeForegroundService
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -66,5 +69,34 @@ class BasculeApplicationTest {
         )
 
         controller.start()
+    }
+
+    /** `startBounded` shares [AndroidBridgeServiceController.start]'s exception handling — only the intent differs. */
+    @Test
+    fun startBoundedCarriesTheDurationAsAnIntentExtra() {
+        var captured: Intent? = null
+        val controller = AndroidBridgeServiceController(
+            context = context,
+            onStartResult = {},
+            starter = { intent -> captured = intent },
+        )
+
+        controller.startBounded(90_000L)
+
+        assertEquals(90_000L, captured?.getLongExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, -1L))
+    }
+
+    @Test
+    fun startDoesNotCarryTheBoundedExtra() {
+        var captured: Intent? = null
+        val controller = AndroidBridgeServiceController(
+            context = context,
+            onStartResult = {},
+            starter = { intent -> captured = intent },
+        )
+
+        controller.start()
+
+        assertEquals(0L, captured?.getLongExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 0L))
     }
 }

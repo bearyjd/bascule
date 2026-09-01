@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanResult
+import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.ventouxlabs.bascule.ble.fake.FakeScaleSessionEnqueuer
 import org.junit.Assert.assertEquals
@@ -143,6 +144,46 @@ class BridgeForegroundServiceTest {
         assertFalse("a running scan must not stop the service", shadow.isStoppedBySelf)
     }
 
+    /**
+     * S4 continued: `weighNow()`'s bounded scan reuses this same service, so a
+     * start carrying the duration extra must arm a self-stop — otherwise the
+     * only difference between "weigh now" and "always-on" would be a duration
+     * nobody enforces. [BridgeForegroundService.boundStopScheduler] is
+     * injectable for the same reason [enqueuerFactory] and
+     * [activeAddressProvider] are: real time cannot be waited out in a JVM test.
+     */
+    @Test
+    fun aBoundedStartArmsASelfStopAfterItsWindow() {
+        val controller = grantedController()
+        controller.get().activeAddressProvider = { DEVICE_ADDRESS }
+        var scheduledMillis: Long? = null
+        controller.get().boundStopScheduler = { millis, onExpire -> scheduledMillis = millis; onExpire() }
+        controller.create()
+
+        controller.get().onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, BOUND_MILLIS),
+            0,
+            1,
+        )
+
+        assertEquals(BOUND_MILLIS, scheduledMillis)
+        assertTrue("the bounded window elapsing must stop the service", shadowOf(controller.get()).isStoppedBySelf)
+    }
+
+    @Test
+    fun aPlainStartNeverArmsASelfStop() {
+        val controller = grantedController()
+        controller.get().activeAddressProvider = { DEVICE_ADDRESS }
+        var scheduled = false
+        controller.get().boundStopScheduler = { _, _ -> scheduled = true }
+        controller.create()
+
+        controller.get().onStartCommand(Intent(), 0, 1)
+
+        assertFalse("the always-on toggle's start must not carry a self-stop timer", scheduled)
+        assertFalse("no scheduled stop means the service is still running", shadowOf(controller.get()).isStoppedBySelf)
+    }
+
     private fun grantedController(): ServiceController<BridgeForegroundService> {
         val context = ApplicationProvider.getApplicationContext<Application>()
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_SCAN)
@@ -160,5 +201,6 @@ class BridgeForegroundServiceTest {
     private companion object {
         const val DEVICE_ADDRESS = "AA:BB:CC:DD:EE:FF"
         const val RSSI = -50
+        const val BOUND_MILLIS = 120_000L
     }
 }

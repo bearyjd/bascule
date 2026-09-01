@@ -13,9 +13,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -23,6 +25,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ui.nav.BasculeDestination
 import com.ventouxlabs.bascule.ui.theme.BasculeTheme
@@ -74,8 +77,19 @@ fun BasculeApp() {
                 modifier = Modifier.padding(innerPadding),
             ) {
                 composable(BasculeDestination.History.route) {
+                    // Explicit owner rather than wrapping the whole call in
+                    // SharedViewModelScope: HistoryViewModel itself has no
+                    // reason to leave its own route-scoped store, only the
+                    // "Weigh now" button needs the same ScaleViewModel Scale
+                    // itself renders, so their weighNowActive flag doesn't
+                    // read as two different answers on the two screens.
+                    val scaleViewModel: ScaleViewModel = viewModel(
+                        factory = ScaleViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
+                        viewModelStoreOwner = sharedOwner,
+                    )
                     HistoryScreen(
                         onNavigateToScale = { navController.navigateToTab(BasculeDestination.Scale.route) },
+                        scaleViewModel = scaleViewModel,
                     )
                 }
                 composable(BasculeDestination.ManualEntry.route) {

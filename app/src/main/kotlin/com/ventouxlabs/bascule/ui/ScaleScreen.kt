@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.RadioButton
@@ -52,6 +53,12 @@ fun ScaleScreen(
                 Text("Capture")
                 ToggleRow("Automatic background capture", state.automaticCaptureEnabled, viewModel::setAutomaticCapture)
                 ToggleRow("Always-on foreground fallback", state.alwaysOnBridging, viewModel::setAlwaysOnBridging)
+                // A bounded fast scan for "I'm stepping on right now" — independent of
+                // whichever of the two toggles above is on, since both can legitimately be off.
+                WeighNowButton(
+                    active = state.weighNowActive,
+                    onClick = { if (state.weighNowActive) viewModel.cancelWeighNow() else viewModel.weighNow() },
+                )
                 Text("Pending deliveries: ${state.pendingDeliveries}")
                 Text("Last successful capture: ${state.lastCaptureMillis?.let(::formatTime) ?: "Never"}")
                 state.diagnostic?.let { Text(it) }
@@ -70,12 +77,13 @@ fun ScaleScreen(
             isLoading = state.isLoading,
             onSetActive = viewModel::setActive,
             onRename = viewModel::rename,
+            onDelete = viewModel::delete,
         )
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Scale status")
                 Text("Battery level and live status are only available while the app is connected to your scale.")
-                Text("Profiles can't be removed yet — you can re-register a scale to replace one.")
+                Text("Removing a profile only forgets it on this phone — the BF720 keeps its own copy of the slot.")
             }
         }
     }
@@ -87,7 +95,9 @@ private fun ProfilesCard(
     isLoading: Boolean,
     onSetActive: (String) -> Unit,
     onRename: (ScaleProfile, String) -> Unit,
+    onDelete: (ScaleProfile) -> Unit,
 ) {
+    var pendingDelete by remember { mutableStateOf<ScaleProfile?>(null) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Profiles")
@@ -109,6 +119,7 @@ private fun ProfilesCard(
                         Text("Last verified: ${profile.lastVerifiedAtMillis?.let(::formatTime) ?: "Not yet"}")
                     }
                     TextButton(onClick = { editing = !editing }) { Text(if (editing) "Cancel" else "Rename") }
+                    TextButton(onClick = { pendingDelete = profile }) { Text("Remove") }
                 }
                 if (editing) {
                     InlineLabelEditor(profile.label) { newLabel ->
@@ -119,6 +130,22 @@ private fun ProfilesCard(
             }
             Text("Bascule may not know about every user slot stored on the scale itself.")
         }
+    }
+    pendingDelete?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Remove ${profile.label}?") },
+            text = {
+                Text(
+                    "This only forgets it on this phone. The BF720 keeps its own copy of " +
+                        "slot ${profile.scaleIndex} until it's overwritten or reset.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { onDelete(profile); pendingDelete = null }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } },
+        )
     }
 }
 

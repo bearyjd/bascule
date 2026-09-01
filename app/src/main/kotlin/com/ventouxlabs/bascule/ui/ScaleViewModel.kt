@@ -11,6 +11,8 @@ import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +36,8 @@ data class ScaleUiState(
      * open before the first combine lands.
      */
     val isLoading: Boolean = true,
+    /** True while a [ScaleViewModel.weighNow] window is running. */
+    val weighNowActive: Boolean = false,
 )
 
 private data class ScaleCaptureSnapshot(
@@ -53,6 +57,9 @@ private data class ScaleCaptureSnapshot(
  */
 interface BridgeServiceController {
     fun start()
+
+    /** Same underlying scan, bounded: the service stops itself once [durationMillis] elapses. */
+    fun startBounded(durationMillis: Long)
     fun stop()
 }
 
@@ -87,10 +94,14 @@ class ScaleViewModel(
         ScaleCaptureSnapshot(automaticCapture, alwaysOn, pending, lastCapture, message)
     }
 
+    private val mutableWeighNowActive = MutableStateFlow(false)
+    private var weighNowJob: Job? = null
+
     val uiState: StateFlow<ScaleUiState> = combine(
         profiles.profiles,
         captureState,
-    ) { all, capture ->
+        mutableWeighNowActive,
+    ) { all, capture, weighNowActive ->
         ScaleUiState(
             profiles = all,
             automaticCaptureEnabled = capture.automaticCaptureEnabled,
@@ -99,6 +110,7 @@ class ScaleViewModel(
             lastCaptureMillis = capture.lastCaptureMillis,
             diagnostic = capture.diagnostic,
             isLoading = false,
+            weighNowActive = weighNowActive,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), ScaleUiState())
 
@@ -143,9 +155,51 @@ class ScaleViewModel(
         }
     }
 
+    /**
+     * Local-only: the BF720 keeps its own copy of the slot until it's
+     * overwritten or reset. Deleting the active profile leaves none active —
+     * [ScaleScanner.arm] and [setAutomaticCapture]'s diagnostic already cover
+     * that state, so no extra guard is needed here.
+     */
+    fun delete(profile: ScaleProfile) = viewModelScope.launch {
+        withContext(ioDispatcher) { profiles.deleteProfile(profile.id) }
+    }
+
+    /**
+     * A bounded, foreground-triggered fast scan for "I'm about to step on the
+     * scale right now" — orthogonal to [setAutomaticCapture]'s LOW_POWER
+     * background path and [setAlwaysOnBridging]'s persistent one. Re-entrant
+     * calls while a window is already running are ignored rather than
+     * restarting the timer, so a double-tap doesn't quietly extend it.
+     */
+    fun weighNow() {
+        if (weighNowJob != null) return
+        weighNowJob = viewModelScope.launch {
+            if (config.alwaysOnBridging.first()) {
+                diagnostic.value = "Always-on foreground fallback is already scanning — nothing more to start."
+                return@launch
+            }
+            mutableWeighNowActive.value = true
+            bridgeService.startBounded(WEIGH_NOW_DURATION_MILLIS)
+            delay(WEIGH_NOW_DURATION_MILLIS)
+            mutableWeighNowActive.value = false
+        }.also { job -> job.invokeOnCompletion { weighNowJob = null } }
+    }
+
+    /** No-op with no window running — the service self-stops on its own once its window elapses regardless. */
+    fun cancelWeighNow() {
+        if (!mutableWeighNowActive.value) return
+        weighNowJob?.cancel()
+        bridgeService.stop()
+        mutableWeighNowActive.value = false
+    }
+
     companion object {
         private const val MAX_LABEL_LENGTH = 40
         private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
+
+        /** Past `SessionBudget.HARD_SESSION_CEILING` (90s), with margin for discovery time ahead of that session. */
+        const val WEIGH_NOW_DURATION_MILLIS = 120_000L
         const val REGISTRY_UNREADABLE_MESSAGE =
             "Your saved scale registrations could not be read and were reset. Re-link or re-register your scale."
 

@@ -57,26 +57,25 @@ internal fun RegisteredScaleSection(
                 color = MaterialTheme.colorScheme.error,
             )
         }
-        if (registeredUserIndex == null) {
-            Row(modifier = Modifier.padding(top = 8.dp)) {
+        Row(modifier = Modifier.padding(top = 8.dp)) {
+            if (registeredUserIndex == null) {
                 Button(onClick = { showWarning = true }, enabled = !busy) {
                     Text("Register scale")
                 }
-                OutlinedButton(
-                    onClick = { showExisting = true },
-                    enabled = !busy,
-                    modifier = Modifier.padding(start = 8.dp),
-                ) {
-                    Text("Use existing")
+            } else if (pairedDeviceAddress != null) {
+                OutlinedButton(onClick = { showWarning = true }, enabled = !busy) {
+                    Text("Re-register with the scale")
                 }
             }
-        } else if (pairedDeviceAddress != null) {
+            // Always reachable, not just before the first registration: a
+            // second (or third) known slot on the same BF720 is linked the
+            // same way the first one was — see ConfigViewModel.linkExistingScale.
             OutlinedButton(
-                onClick = { showWarning = true },
+                onClick = { showExisting = true },
                 enabled = !busy,
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(start = 8.dp),
             ) {
-                Text("Re-register with the scale")
+                Text("Use existing")
             }
         }
     }

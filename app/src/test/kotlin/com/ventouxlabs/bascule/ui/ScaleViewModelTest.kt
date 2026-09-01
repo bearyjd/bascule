@@ -8,7 +8,9 @@ import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,6 +66,10 @@ class ScaleViewModelTest {
 
         override fun start() {
             bridgeCalls += "start"
+        }
+
+        override fun startBounded(durationMillis: Long) {
+            bridgeCalls += "startBounded:$durationMillis"
         }
 
         override fun stop() {
@@ -396,6 +402,48 @@ class ScaleViewModelTest {
         assertEquals(profile().copy(label = "Renamed"), profiles.profiles.value.single())
     }
 
+    // --- delete(): local-only removal; the scale keeps its own copy of the slot.
+
+    @Test
+    fun deleteRemovesTheProfileFromTheStore() = runTest {
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = viewModel(profiles = profiles)
+
+        vm.delete(profile())
+        advanceUntilIdle()
+
+        assertTrue(profiles.profiles.value.isEmpty())
+    }
+
+    @Test
+    fun deleteLeavesOtherProfilesUntouched() = runTest {
+        val kept = profile(id = "slot-3", scaleIndex = 3, label = "Profile 3", active = false)
+        val profiles = FakeScaleProfileStore(listOf(profile(), kept))
+        val vm = viewModel(profiles = profiles)
+
+        vm.delete(profile())
+        advanceUntilIdle()
+
+        assertEquals(listOf(kept), profiles.profiles.value)
+    }
+
+    /**
+     * `ScaleScanner.arm()` already refuses to arm with no active profile, and
+     * `setAutomaticCapture` already turns that into a diagnostic — deleting the
+     * active profile needs no new guard, only proof the existing ones still
+     * cover the state it leaves behind.
+     */
+    @Test
+    fun deletingTheActiveProfileLeavesNoneActive() = runTest {
+        val profiles = FakeScaleProfileStore(listOf(profile(active = true)))
+        val vm = viewModel(profiles = profiles)
+
+        vm.delete(profile())
+        advanceUntilIdle()
+
+        assertNull(profiles.activeProfile.value)
+    }
+
     // --- Always-on bridging.
 
     @Test
@@ -425,5 +473,117 @@ class ScaleViewModelTest {
 
         assertFalse(config.alwaysOnBridging.value)
         assertEquals(listOf("stop"), recorder.bridgeCalls)
+    }
+
+    // --- weighNow(): a bounded fast scan, orthogonal to arm()/disarm()'s LOW_POWER path.
+
+    @Test
+    fun weighNowStartsABoundedForegroundScan() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(recorder = recorder))
+        advanceUntilIdle()
+
+        vm.weighNow()
+        runCurrent()
+
+        assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}"), recorder.bridgeCalls)
+        assertTrue(vm.uiState.value.weighNowActive)
+    }
+
+    @Test
+    fun weighNowIsIgnoredWhileAlreadyWaiting() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(recorder = recorder))
+        advanceUntilIdle()
+
+        vm.weighNow()
+        vm.weighNow()
+        advanceUntilIdle()
+
+        assertEquals(1, recorder.bridgeCalls.size)
+    }
+
+    /**
+     * The always-on foreground scan already covers this address at a faster
+     * duty cycle than the LOW_POWER background path — starting a second scan
+     * against the same filter would just fight the first one's PendingIntent
+     * registration for nothing.
+     */
+    @Test
+    fun weighNowDoesNothingWhenAlwaysOnBridgingIsAlreadyRunning() = runTest {
+        val config = FakeConfigStore(initialAlwaysOnBridging = true)
+        val recorder = Recorder()
+        val vm = collecting(viewModel(config = config, recorder = recorder))
+        advanceUntilIdle()
+
+        vm.weighNow()
+        advanceUntilIdle()
+
+        assertTrue("nothing to start — the fast scan is already running", recorder.bridgeCalls.isEmpty())
+        assertFalse(vm.uiState.value.weighNowActive)
+        assertNotNull(vm.uiState.value.diagnostic)
+    }
+
+    @Test
+    fun weighNowClearsItselfOnceItsWindowElapses() = runTest {
+        val vm = collecting(viewModel())
+        advanceUntilIdle()
+
+        vm.weighNow()
+        runCurrent()
+        assertTrue(vm.uiState.value.weighNowActive)
+
+        advanceTimeBy(ScaleViewModel.WEIGH_NOW_DURATION_MILLIS)
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.weighNowActive)
+    }
+
+    @Test
+    fun cancelWeighNowStopsTheServiceAndClearsState() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(recorder = recorder))
+        advanceUntilIdle()
+        vm.weighNow()
+        runCurrent()
+
+        vm.cancelWeighNow()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.weighNowActive)
+        assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "stop"), recorder.bridgeCalls)
+    }
+
+    @Test
+    fun cancelWeighNowWithNothingActiveIsANoOp() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(recorder = recorder))
+        advanceUntilIdle()
+
+        vm.cancelWeighNow()
+        advanceUntilIdle()
+
+        assertTrue(recorder.bridgeCalls.isEmpty())
+    }
+
+    /**
+     * A cancelled window must not still fire the auto-clear scheduled by the
+     * original `weighNow()` call — cancelling the ViewModel's own coroutine is
+     * what stops that, on top of `cancelWeighNow` clearing the flag directly.
+     */
+    @Test
+    fun cancellingThenLettingTheOriginalWindowElapseStaysCleared() = runTest {
+        val recorder = Recorder()
+        val vm = collecting(viewModel(recorder = recorder))
+        advanceUntilIdle()
+        vm.weighNow()
+        runCurrent()
+
+        vm.cancelWeighNow()
+        advanceTimeBy(ScaleViewModel.WEIGH_NOW_DURATION_MILLIS)
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.weighNowActive)
+        assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "stop"), recorder.bridgeCalls)
     }
 }

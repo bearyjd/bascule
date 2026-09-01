@@ -53,8 +53,18 @@ fun HistoryScreen(
     viewModel: HistoryViewModel = viewModel(
         factory = HistoryViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
     ),
+    /**
+     * The same instance [ScaleScreen] renders — [BasculeApp] passes it in
+     * explicitly scoped to the shared owner, so "Weigh now" here and on Scale
+     * always agree on whether a window is running (P25: two views of one
+     * running scan must not read as two different answers).
+     */
+    scaleViewModel: ScaleViewModel = viewModel(
+        factory = ScaleViewModel.factory(LocalContext.current.applicationContext as BasculeApplication),
+    ),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val scaleState by scaleViewModel.uiState.collectAsState()
 
     // Banners and diagnostics must render even with zero rows — O-11.4's
     // whole point is that a session producing no reading (E7) inserts no row
@@ -66,6 +76,11 @@ fun HistoryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item {
+            val onWeighNowClick =
+                if (scaleState.weighNowActive) scaleViewModel::cancelWeighNow else scaleViewModel::weighNow
+            WeighNowButton(active = scaleState.weighNowActive, onClick = onWeighNowClick)
+        }
         historyBanners(state, onNavigateToScale)
 
         if (state.rows.isEmpty()) {
@@ -124,6 +139,14 @@ private fun LazyListScope.historyBanners(state: HistoryUiState, onNavigateToScal
         if (ageMillis >= PENDING_BACKLOG_WARNING_MILLIS) {
             item { Banner(text = "Weigh-ins have been waiting to send for ${formatRelativeAge(ageMillis)}.") }
         }
+    }
+}
+
+/** Shared with [ScaleScreen] so the two screens can never disagree on what a running window looks like. */
+@Composable
+internal fun WeighNowButton(active: Boolean, onClick: () -> Unit) {
+    Button(onClick = onClick) {
+        Text(if (active) "Waiting for your scale… Cancel" else "Weigh now")
     }
 }
 

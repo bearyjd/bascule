@@ -14,7 +14,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -44,6 +46,15 @@ class BridgeForegroundService : Service() {
     internal var activeAddressProvider: () -> String? =
         { (application as BasculeApplication).scaleProfileStore.activeProfile.value?.deviceAddress }
 
+    /**
+     * The same seam, for the same reason, as [enqueuerFactory] and
+     * [activeAddressProvider]: a JVM test cannot wait out a real
+     * [EXTRA_BOUND_MILLIS] window, so [onStartCommand] schedules through this
+     * instead of a bare `Handler.postDelayed` call.
+     */
+    internal var boundStopScheduler: (millis: Long, onExpire: () -> Unit) -> Unit =
+        { millis, onExpire -> Handler(Looper.getMainLooper()).postDelayed(onExpire, millis) }
+
     private val enqueuer by lazy { enqueuerFactory(this) }
     private val cooldown by lazy { ScanEnqueueCooldown(this) }
 
@@ -71,6 +82,24 @@ class BridgeForegroundService : Service() {
                 .setOngoing(true).build(),
         )
         startActiveScan()
+    }
+
+    /**
+     * `onCreate` runs once; this runs on every `startService`/
+     * `startForegroundService` call, including a later one against an
+     * already-running instance — which is exactly when `weighNow()`'s bounded
+     * call needs to land, since `Always-on foreground fallback` skips it
+     * entirely when this service is already running unbounded (see
+     * `ScaleViewModel.weighNow`). `START_STICKY`, unchanged from the platform
+     * default this class relied on before overriding this method — a
+     * `weighNow()` window is short enough that a mid-window process kill and
+     * restart losing its bound timer is an acceptable, rare cost, and changing
+     * the always-on toggle's restart behavior is not what this change is for.
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
+        if (boundMillis > 0) boundStopScheduler(boundMillis) { stopSelf() }
+        return START_STICKY
     }
 
     /** BLUETOOTH_SCAN, not CONNECT: this service only ever scans. */
@@ -154,5 +183,8 @@ class BridgeForegroundService : Service() {
         private const val CHANNEL = "scale_bridge"
         private const val NOTIFICATION_ID = 721
         private const val BATCH_REPORT_DELAY_MILLIS = 5_000L
+
+        /** Positive only on a `weighNow()`-bounded start; absent on the always-on toggle's unbounded one. */
+        const val EXTRA_BOUND_MILLIS = "bound_millis"
     }
 }

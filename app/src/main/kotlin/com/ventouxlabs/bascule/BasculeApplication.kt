@@ -219,16 +219,22 @@ internal class AndroidBridgeServiceController(
     private val context: Context,
     private val onStartResult: (succeeded: Boolean) -> Unit,
     /**
-     * Injectable so the exception-handling in [start] is unit-testable without
-     * needing Robolectric to simulate `ForegroundServiceStartNotAllowedException`,
-     * which its shadow of `startForegroundService` does not throw.
+     * Injectable so the exception-handling in [start]/[startBounded] is
+     * unit-testable without needing Robolectric to simulate
+     * `ForegroundServiceStartNotAllowedException`, which its shadow of
+     * `startForegroundService` does not throw. Takes the built `Intent` rather
+     * than being a bare `() -> Unit` so a test can inspect what [startBounded]
+     * actually sent, the same way [start] always could.
      */
-    private val starter: () -> Unit = {
-        ContextCompat.startForegroundService(context, Intent(context, BridgeForegroundService::class.java))
-    },
+    private val starter: (Intent) -> Unit = { intent -> ContextCompat.startForegroundService(context, intent) },
 ) : BridgeServiceController {
-    override fun start() {
-        val succeeded = runCatching(starter)
+    override fun start() = startWith(intent())
+
+    override fun startBounded(durationMillis: Long) =
+        startWith(intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, durationMillis))
+
+    private fun startWith(intent: Intent) {
+        val succeeded = runCatching { starter(intent) }
             .onFailure { if (it !is IllegalStateException) throw it }
             .isSuccess
         onStartResult(succeeded)
