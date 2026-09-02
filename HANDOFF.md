@@ -1,11 +1,15 @@
 # Bascule — session handoff (post-merge)
 
-Written 2026-08-31, superseding the numbers in "Where things actually are"
-below (still 08-29's: `main@1b6db33`, 524 tests, PR #1). Read this section
-first. **`ui-modernization` (PR #2) is also merged now** — `main` is at
-`5ed6791`, 543 tests, detekt clean, independently re-verified with
-`--rerun-tasks` after the merge. That branch and its remote copy are both
-gone the same way `vitalforge-connectivity-and-login` is.
+Written 2026-09-01, superseding the numbers in "Where things actually are"
+below (still 08-29's: `main@1b6db33`, 524 tests, PR #1) and this file's own
+08-31 claim that `ui-modernization`'s branches were already gone — they
+weren't; see the housekeeping note below. **`main` is at `f358f99`**, 564
+tests, detekt clean, independently re-verified. Local branch list is `main`
+only — `ui-modernization` plus five other fully-merged local-only stragglers
+(`hardware-evidence-milestone1`, `phase-0-design`, `phase-1-planning`,
+`phase-2-validation`, `ui-material-design-wp23-24-25`) were all deleted in a
+2026-09-01 housekeeping pass, confirmed zero commits ahead of `main` each
+before deletion.
 
 ## 2026-08-31, night: live hardware session — profile management + weigh-now
 
@@ -211,6 +215,23 @@ branch *is* `main`, so there was nothing to open a PR from. Retrofitting one
 would mean reverting `main` and replaying the commit on a branch, which
 wasn't done. If review-before-merge matters going forward, cut a branch
 *before* committing, not after.
+
+**The fix commit itself, `f358f99`, had the identical near-miss**: committed
+locally, then genuinely forgotten — not pushed until a `git status` check
+during an unrelated "housekeeping" request caught `main` sitting one commit
+ahead of `origin/main` with nobody aware. Caught and pushed same session, but
+note the pattern: two commits in a row on this branch of work almost shipped
+un-pushed or un-PR'd. Verify `git log origin/main..HEAD` is empty as a matter
+of course after any commit, not just when asked to tidy up.
+
+**2026-09-01 housekeeping**, prompted by the same request: `ui-modernization`
+was *not* actually auto-deleted after PR #2 merged, on either `origin` or
+locally — this file's earlier claim that it was gone was wrong, uncaught
+until now. Confirmed `gh pr view 2` showed `MERGED`, confirmed zero commits
+ahead of `main`, deleted both copies with the user's explicit sign-off (two
+separate confirmations — the merged branch first, five more fully-merged
+local-only relics from earlier phases second). Local branch list is now
+`main` only, matching `origin`.
 
 ## 2026-08-29, evening: UI modernization branch (`ui-modernization`)
 
