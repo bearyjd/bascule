@@ -6,6 +6,13 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
+// A Room @Dao is structurally a flat list of small, single-purpose queries --
+// merging any of these to reach the class threshold of 20 would hide one
+// query's WHERE clause inside another's, which is the actual correctness
+// surface ReadingDaoSqlTest exists to pin. The interface default (11) has no
+// override in detekt.yml the way the class default does; this is that
+// exception, made explicit here rather than by quietly raising it globally.
+@Suppress("TooManyFunctions")
 @Dao
 interface ReadingDao {
 
@@ -85,4 +92,31 @@ interface ReadingDao {
 
     @Query("SELECT MAX(capturedAtMillis) FROM readings WHERE source = 'SCALE'")
     fun observeLastScaleCapture(): Flow<Long?>
+
+    /**
+     * WP-22's candidate pool. Per-row eligibility
+     * ([com.ventouxlabs.bascule.delivery.ReplayEligibility]) compares
+     * `deliveredFields` (a `Set<ReadingField>` column) against the active
+     * contract, which SQL can't express — so this returns every `SENT` row
+     * and the filter runs in Kotlin, not here.
+     */
+    @Query("SELECT * FROM readings WHERE status = 'SENT'")
+    suspend fun sent(): List<ReadingEntity>
+
+    /**
+     * WP-22: re-queue rows [com.ventouxlabs.bascule.delivery.ReplayEligibility]
+     * found eligible. Same reset shape as [unblockAuthRows] — a fresh retry
+     * window, not a continuation of whatever attempt/backoff state the
+     * original `SENT` delivery left behind, since this is a new delivery
+     * attempt in every sense that matters to the drain.
+     */
+    @Query(
+        """
+        UPDATE readings
+        SET status = 'PENDING', attemptCount = 0, retryEpochMillis = :nowMillis,
+            lastError = NULL, lastErrorClass = NULL, nextAttemptMillis = NULL
+        WHERE id IN (:ids)
+        """,
+    )
+    suspend fun requeueForReplay(ids: List<String>, nowMillis: Long)
 }

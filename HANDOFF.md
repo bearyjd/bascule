@@ -11,11 +11,53 @@ only — `ui-modernization` plus five other fully-merged local-only stragglers
 2026-09-01 housekeeping pass, confirmed zero commits ahead of `main` each
 before deletion.
 
-**Updated 2026-09-02**: see the section immediately below for a cross-repo
-A6 resolution. **Uncommitted at the time of writing** — `V2Shaper.kt` and
-`V2ShaperTest.kt` have working-tree changes not yet committed to this repo
-(the `vitalforge` half is already committed and PR'd there, independently).
-565 tests locally (up from 564), detekt clean.
+**Updated 2026-09-03**: A6 resolved and merged in `vitalforge` (below), then
+WP-22 itself implemented on top of it (see that section, further below).
+**Uncommitted at the time of writing** — WP-22's diff (`ReplayMigrationWorker.kt`,
+`ReplayEligibility.kt`, the `ReadingDao`/`ConfigStore` additions they need,
+and their tests) is not yet committed to this repo. 574 tests locally (up
+from 565), detekt clean.
+
+## 2026-09-03: WP-22 implemented — replay migration worker, not wired in
+
+Continuation of the A6 resolution below: once VitalForge's side (`vitalforge`
+PR #39) was reviewed, fixed, and merged, the natural next step was WP-22
+itself — the Kotlin side that A6 had been blocking. New:
+`delivery/ReplayEligibility.kt` (the two-clause + status-gate predicate from
+`00-design.md` §4.4) and `delivery/ReplayMigrationWorker.kt` (the
+`CoroutineWorker` shell, `applicationContext as BasculeApplication` like
+every other worker in this repo — no DI framework here). `ReadingDao` gained
+`sent()` and `requeueForReplay(ids, nowMillis)`; `ConfigStore` gained
+`lastReplayMigrationContractVersion` so the worker knows whether it's already
+run for the *current* contract version (not a boolean flag — a second
+upgrade must run again).
+
+**Deliberately not wired into any scheduling path.** Nothing calls
+`WorkManager` for this worker anywhere in the app. `01-plan.md`'s WP-22
+section already said enabling it is a Phase-5+ decision, and that's still
+true after A6 — the residual gap (a row whose *original* delivery was itself
+delayed past the dedup window has no reliable capture-time proxy for replay
+to match against) is a real scope question, not something this session had
+standing to decide unilaterally.
+
+**Two of the plan's four named worker tests were deliberately not written
+as literally named**, and the reasoning is recorded in `01-plan.md`'s WP-22
+section, not just here: `isDisabledPendingIdempotencyEscalation` named a
+hard gate that stopped existing once A6 resolved — keeping that name would
+have meant either a dishonest test (asserting a disabled-flag that isn't
+there) or a misleadingly-named one (testing something else under a stale
+title). Renamed to `onlyEligibleRowsAreRequeued`.
+`requeuedRowResetsRetryEpochAndAttemptCount` moved to `ReadingDaoSqlTest`
+(renamed `requeueingForReplayResetsRetryEpochAndAttemptCountAndOnlyTouchesTheNamedRows`)
+since it's a DAO-SQL-correctness question against real Room, the same
+category every other test in that file covers — not a reason to pull
+Robolectric into what's otherwise a set of plain-JUnit companion-function
+tests in `ReplayMigrationWorkerTest`.
+
+Every new guard mutation-tested by hand before committing (the status gate,
+the `remoteDuplicate` gate, and the subset check in `ReplayEligibility.isEligible`
+— broke each in turn, confirmed the right tests went red, reverted). 574
+tests (565 + 9 new/moved), detekt clean.
 
 ## 2026-09-02: A6 resolved — client_id + captured_at idempotency (cross-repo)
 

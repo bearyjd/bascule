@@ -36,12 +36,22 @@ interface ConfigStore {
     val automaticCaptureEnabled: Flow<Boolean>
     val pairedDeviceAddress: Flow<String?>
 
+    /**
+     * WP-22 (`01-plan.md`): the [ContractVersion] [ReplayMigrationWorker][com.ventouxlabs.bascule.delivery.ReplayMigrationWorker]
+     * last finished a replay pass for. Null means never run. Compared against
+     * the current [contractVersion] to decide whether a pass is due -- not a
+     * boolean flag, because a *second* contract upgrade must run again even
+     * though a first one already has.
+     */
+    val lastReplayMigrationContractVersion: Flow<ContractVersion?>
+
     suspend fun saveBaseUrl(url: String)
     suspend fun saveDisplayUnit(unit: WeightUnit)
     suspend fun saveContractVersion(version: ContractVersion)
     suspend fun saveAlwaysOnBridging(enabled: Boolean)
     suspend fun saveAutomaticCaptureEnabled(enabled: Boolean)
     suspend fun savePairedDeviceAddress(address: String?)
+    suspend fun saveLastReplayMigrationContractVersion(version: ContractVersion)
 }
 
 /**
@@ -101,6 +111,16 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
 
     override val pairedDeviceAddress: Flow<String?> = store.data.map { it[PAIRED_DEVICE_ADDRESS] }
 
+    override val lastReplayMigrationContractVersion: Flow<ContractVersion?> = store.data.map { prefs ->
+        // Unreadable collapses to null same as Absent, not a distinct branch:
+        // a corrupted marker just means "unconfirmed" here, and re-running an
+        // already-satisfied replay pass is a safe no-op (every row it would
+        // find is already ineligible), unlike contractVersion's Unreadable
+        // case, where silently reverting scope is the actual defect.
+        val stored = readStoredEnum(prefs[LAST_REPLAY_MIGRATION_CONTRACT_VERSION], ContractVersion.entries)
+        (stored as? StoredEnum.Parsed)?.value
+    }
+
     override suspend fun saveBaseUrl(url: String) {
         store.edit { it[BASE_URL] = url }
     }
@@ -127,6 +147,10 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
         }
     }
 
+    override suspend fun saveLastReplayMigrationContractVersion(version: ContractVersion) {
+        store.edit { it[LAST_REPLAY_MIGRATION_CONTRACT_VERSION] = version.name }
+    }
+
     private companion object {
         val BASE_URL = stringPreferencesKey("base_url")
         val DISPLAY_UNIT = stringPreferencesKey("display_unit")
@@ -134,5 +158,6 @@ class DataStoreConfigStore(context: Context) : ConfigStore {
         val ALWAYS_ON_BRIDGING = booleanPreferencesKey("always_on_bridging")
         val AUTOMATIC_CAPTURE = booleanPreferencesKey("automatic_capture_enabled")
         val PAIRED_DEVICE_ADDRESS = stringPreferencesKey("paired_device_address")
+        val LAST_REPLAY_MIGRATION_CONTRACT_VERSION = stringPreferencesKey("last_replay_migration_contract_version")
     }
 }

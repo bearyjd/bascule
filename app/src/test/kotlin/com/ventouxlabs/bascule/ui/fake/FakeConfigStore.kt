@@ -34,6 +34,10 @@ class FakeConfigStore(
     private val _pairedDeviceAddress = MutableStateFlow(initialPairedDeviceAddress)
     override val pairedDeviceAddress: StateFlow<String?> = _pairedDeviceAddress.asStateFlow()
 
+    private val _lastReplayMigrationContractVersion = MutableStateFlow<ContractVersion?>(null)
+    override val lastReplayMigrationContractVersion: StateFlow<ContractVersion?> =
+        _lastReplayMigrationContractVersion.asStateFlow()
+
     override suspend fun saveBaseUrl(url: String) {
         _baseUrl.value = url
     }
@@ -56,5 +60,9 @@ class FakeConfigStore(
 
     override suspend fun savePairedDeviceAddress(address: String?) {
         _pairedDeviceAddress.value = address
+    }
+
+    override suspend fun saveLastReplayMigrationContractVersion(version: ContractVersion) {
+        _lastReplayMigrationContractVersion.value = version
     }
 }

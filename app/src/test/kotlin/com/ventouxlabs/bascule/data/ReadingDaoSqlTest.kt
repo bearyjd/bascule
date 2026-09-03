@@ -126,6 +126,31 @@ class ReadingDaoSqlTest {
     }
 
     /**
+     * WP-22 (`01-plan.md`) `ReplayMigrationWorkerTest.requeuedRowResetsRetryEpochAndAttemptCount`
+     * — kept here rather than a Robolectric-only worker test file, since this
+     * is exactly the DAO-SQL-correctness question the rest of this class
+     * exists to answer, same shape as [unblockingAuthRowsClearsTheBackoffGateAndTheAttemptCount]
+     * above. [com.ventouxlabs.bascule.delivery.ReplayMigrationWorkerTest]
+     * covers the pure eligibility/scheduling logic that doesn't need Room at all.
+     */
+    @Test
+    fun requeueingForReplayResetsRetryEpochAndAttemptCountAndOnlyTouchesTheNamedRows() = runBlocking {
+        dao.insert(readingFixture(id = "replay-me", status = ReadingStatus.SENT, attemptCount = 3))
+        dao.insert(readingFixture(id = "leave-me-sent", status = ReadingStatus.SENT, attemptCount = 5))
+
+        dao.requeueForReplay(ids = listOf("replay-me"), nowMillis = 9_000L)
+
+        val requeued = dao.pending(nowMillis = 9_000L, limit = 10).single()
+        assertEquals("only the named row is requeued", "replay-me", requeued.id)
+        assertEquals(0, requeued.attemptCount)
+        assertEquals(9_000L, requeued.retryEpochMillis)
+        assertNull(requeued.nextAttemptMillis)
+        assertNull(requeued.lastError)
+        assertEquals("an unnamed SENT row must be left exactly as it was", 1, dao.sent().size)
+        assertEquals("leave-me-sent", dao.sent().single().id)
+    }
+
+    /**
      * The load-bearing property (P1): the SQL prefilter is never *narrower* than
      * the Kotlin predicate. Every row [DedupPolicy] would call a duplicate must
      * survive `dedupCandidates`, or a duplicate reaches the table unnoticed.

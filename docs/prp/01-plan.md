@@ -1370,23 +1370,35 @@ mid-POST strands nothing (§3.2's `IN_FLIGHT` rationale).
 
 **Files:** `delivery/ReplayMigrationWorker.kt`, `delivery/ReplayEligibility.kt`
 
-**Does:** §4.4's two-clause eligibility. **Ships disabled** (unchanged after
-A6's resolution below, per §4.4's own framing — enabling it is still a
-Phase-5+ decision, not a merge decision, now for scheduling reasons rather
-than an open unknown): the worker is written, tested, and gated off.
+**Does:** §4.4's two-clause eligibility. **Implemented 2026-09-03**
+(`ReplayMigrationWorker.kt`, `ReplayEligibility.kt`), **but not wired into
+any scheduling path** — no code anywhere calls `WorkManager` for it. That's
+deliberate, not an oversight: A6 (below) made the idempotency question safe,
+but the residual gap it still names is an operational scope decision, not a
+correctness bug a passing test suite can close. Enabling it is still a
+Phase-5+ decision.
 
 **A6 resolved 2026-09-02** (see `00-design.md` §4.4): VitalForge now supports
-`client_id` + `captured_at` idempotency (`vitalforge` PR #39). This work
-package can be implemented with confidence — it was never blocked on writing
-the Kotlin, only on whether the server side it replays against was safe to
-call twice. Not yet implemented: `ReplayMigrationWorker.kt` and
-`ReplayEligibility.kt` don't exist in this repo yet. **Note the residual gap
-`00-design.md` §4.4 documents**: rows whose original v1 delivery was itself
-delayed past the dedup window have no reliable capture-time proxy — this
-worker will still be unsafe to run against *that* specific slice of the
-backlog even once written. Confirm the scope of what's actually
-replay-matchable before enabling this in production, not just that the
-worker compiles and passes its own tests.
+`client_id` + `captured_at` idempotency (`vitalforge` PR #39). **Note the
+residual gap `00-design.md` §4.4 documents**: rows whose original v1
+delivery was itself delayed past the dedup window have no reliable
+capture-time proxy — this worker is still unsafe to run against *that*
+specific slice of the backlog, correctness bugs aside. Confirm the scope of
+what's actually replay-matchable before wiring this into production, not
+just that the worker compiles and passes its own tests.
+
+**Deviation from the test list below, made deliberately, not silently:**
+`ReplayMigrationWorkerTest.isDisabledPendingIdempotencyEscalation` named a
+hard gate that no longer exists — there's nothing left to be "pending" once
+A6 is resolved, and a test asserting a permanent disabled-flag would be
+dishonest about what the code actually does. Repurposed to
+`onlyEligibleRowsAreRequeued`, covering what was otherwise untested: a real
+pass touches exactly its eligible subset of SENT rows, not every SENT row.
+`requeuedRowResetsRetryEpochAndAttemptCount` also moved, to
+`ReadingDaoSqlTest` (as `requeueingForReplayResetsRetryEpochAndAttemptCountAndOnlyTouchesTheNamedRows`)
+— it's a DAO-SQL-correctness question, the exact category that file exists
+for, not a worker-level one; putting it there avoided pulling Robolectric
+into `ReplayMigrationWorkerTest`'s otherwise-pure companion-function tests.
 
 **Tests:**
 - `ReplayEligibilityTest.undeliveredPopulatedFieldMakesRowEligible`
@@ -1403,9 +1415,11 @@ worker compiles and passes its own tests.
   arriving instead as a migration worker with no user action at all. Could not be
   written in Phase 2: `ReplayEligibility` does not exist yet.
 - `ReplayEligibilityTest.emptyDeliveredFieldsAloneDoesNotImplyEligible`
-- `ReplayMigrationWorkerTest.requeuedRowResetsRetryEpochAndAttemptCount`
+- `ReadingDaoSqlTest.requeueingForReplayResetsRetryEpochAndAttemptCountAndOnlyTouchesTheNamedRows`
+  ← moved from `ReplayMigrationWorkerTest`, see the deviation note above
 - `ReplayMigrationWorkerTest.isDisabledUnderContractV1`
-- `ReplayMigrationWorkerTest.isDisabledPendingIdempotencyEscalation`
+- `ReplayMigrationWorkerTest.onlyEligibleRowsAreRequeued` ← renamed from
+  `isDisabledPendingIdempotencyEscalation`, see the deviation note above
 - `ReplayMigrationWorkerTest.runsAtMostOncePerContractVersionChange`
 
 **Counter:** none.

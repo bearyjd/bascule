@@ -79,4 +79,24 @@ class FakeReadingDao(
     override fun observeLastScaleCapture() = rows.map { list ->
         list.filter { it.source.name == "SCALE" }.maxOfOrNull { it.capturedAtMillis }
     }
+
+    override suspend fun sent(): List<ReadingEntity> = _rows.value.filter { it.status == ReadingStatus.SENT }
+
+    override suspend fun requeueForReplay(ids: List<String>, nowMillis: Long) {
+        val idSet = ids.toSet()
+        _rows.value = _rows.value.map { reading ->
+            if (reading.id !in idSet) {
+                reading
+            } else {
+                reading.copy(
+                    status = ReadingStatus.PENDING,
+                    attemptCount = 0,
+                    retryEpochMillis = nowMillis,
+                    lastError = null,
+                    lastErrorClass = null,
+                    nextAttemptMillis = null,
+                )
+            }
+        }
+    }
 }
