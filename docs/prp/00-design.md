@@ -683,6 +683,36 @@ escalation rule ("anything requiring the VitalForge contract to change beyond
 what the parallel effort has already agreed to ship"), this is an **escalation to
 JD**, not a silent assumption.
 
+**Resolved 2026-09-02.** The escalation went to JD directly (this session, in
+person, not via a written note left for a future one) and the honest answer,
+checked against VitalForge's actual code rather than assumed, was **no on both
+counts**: `WeightIn` had no `client_id` field at all — `extra="forbid"` would
+have 422'd the whole request the moment v2 sent one, which is worse than
+"not idempotent," it's an immediate `FAILED_PERMANENT` on every v2 delivery —
+and dedup was receipt-time-only, with no client-supplied capture time stored
+anywhere. `vitalforge` PR #39 (`fix/a6-weight-client-id-idempotency`) fixes
+both: a `client_id` column, unique per person, checked as a primary exact
+match before the timestamp+weight window; and an optional `captured_at` the
+window (and the stored row timestamp) anchor on instead of receipt time, so a
+replay POSTed long after the original weigh-in can still line up with a row
+stored near its true capture time. `V2Shaper.kt` already sent both keys —
+`client_id` was a live landmine per the paragraph above, `captured_at` was
+present but wire-formatted as raw epoch millis, which VitalForge's Pydantic
+`datetime` field would have parsed as **seconds**, landing tens of thousands
+of years in the future; fixed to an ISO-8601 `Instant.toString()`. Neither
+shaper bug had shipped user-visible impact — `V2_BODY_COMP` isn't selectable
+in the UI yet (see the "Known open items" note on `ui/ConfigScreen.kt`'s
+`selectableContractVersions`).
+
+**Residual gap this does not close, documented in both repos, not silently
+assumed away:** a legacy row whose *original* delivery was itself delayed
+past the dedup window has no reliable capture-time proxy to match a later
+replay against — VitalForge never had the chance to record one. `captured_at`
+fixes this for every row captured from here forward, not retroactively for
+that specific backlog shape. WP-22 (§4.4 below, `01-plan.md`) still doesn't
+exist in this repo — this resolution unblocks writing it with confidence, it
+does not build it.
+
 **The v1 shaper does not send `client_id`.** It would be convenient to send the
 row UUID from v1 onward so the idempotency key pre-exists — but §4.1's v1 body is
 exactly `{"weight", "unit"}`, and VitalForge is Python (PRP §6 names
@@ -721,6 +751,15 @@ does VitalForge store, and which one should replay join on", asked alongside
 A6.** Both are now available locally, so the answer is a shaper change either
 way — which is why this is one line on an existing escalation rather than a
 reopening of it.
+
+**Resolved alongside A6, 2026-09-02.** VitalForge doesn't impose an answer —
+its new `captured_at` field stores whatever the client sends and has no
+opinion about which clock it came from. `V2Shaper` sends `capturedAtMillis`
+(the phone clock at `EMITTED`), not `scaleTimestampMillis`, matching what
+§3.3's local dedup already uses and staying consistent with this section's
+own "seconds apart, well inside the window" reasoning for a live session. If
+Atlas ever proves to deliver the *scale's* clock instead, this is a one-line
+shaper change (swap which field feeds `captured_at`), not a VitalForge change.
 
 ### 4.5 HTTP response classification
 
@@ -1124,7 +1163,7 @@ Named explicitly because the design rests on them.
 | A3 | Beurer init requires no vendor-app pairing (openScale marks init "fully supported") | Agent-prompt escalation to JD: live traffic capture from the vendor app |
 | A4 | The scale stays connectable ≥ 15 s after step-on | Shorten the E1 retry ladder; the 20 s worker staleness abort (E10) already assumes ~this |
 | A5 | `GET /api/weight/recent` exists on VitalForge | ADR-003 degrades to first-to-connect-wins (§8.3 step 3) |
-| A6 | VitalForge v2 will be idempotent on `client_id` | Replay is unsafe; escalate before enabling it (§4.4) |
+| A6 | **Resolved 2026-09-02, false as originally posed, now fixed.** VitalForge had no `client_id` at all (`extra="forbid"` would have 422'd the moment v2 sent one) and no client-supplied capture time — dedup was receipt-time-only. `vitalforge` PR #39 adds both: a `client_id` column (unique per person, checked before the timestamp+weight window) and an optional `captured_at` the window anchors on instead of receipt time. See §4.4 for the residual gap this does not close |
 | A7 | The v1 `/api/weight` route **ignores** unknown JSON fields | Already assumed false — the V1 shaper sends exactly `{"weight", "unit"}`. Confirming it true unlocks sending `client_id` from v1, which simplifies replay (§4.4). Confirm against the Track A contract doc, not by probing with a real reading |
 
 ---

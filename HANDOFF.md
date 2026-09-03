@@ -11,6 +11,72 @@ only — `ui-modernization` plus five other fully-merged local-only stragglers
 2026-09-01 housekeeping pass, confirmed zero commits ahead of `main` each
 before deletion.
 
+**Updated 2026-09-02**: see the section immediately below for a cross-repo
+A6 resolution. **Uncommitted at the time of writing** — `V2Shaper.kt` and
+`V2ShaperTest.kt` have working-tree changes not yet committed to this repo
+(the `vitalforge` half is already committed and PR'd there, independently).
+565 tests locally (up from 564), detekt clean.
+
+## 2026-09-02: A6 resolved — client_id + captured_at idempotency (cross-repo)
+
+Picked "continue open work" from the previous handoff's list of genuinely
+open items and chose **A6** (`00-design.md` §4.4): whether VitalForge is
+idempotent on `client_id`, which WP-22's replay path has been blocked on
+since Phase 2. This had sat as "escalation to JD, not yet sent" for weeks —
+today it actually got asked, and answered with evidence rather than
+assumption, because `~/Documents/vibe-code/vitalforge` turned out to be a
+sibling checkout of the actual server this session could read.
+
+**What the evidence said, first pass:** VitalForge had no `client_id`
+concept at all. `WeightIn`'s `extra="forbid"` meant `V2Shaper.kt`'s existing
+`client_id` field (already on the wire, since `V2Shaper` was written before
+this was checked) would 422 the *entire* v2 payload the instant it was sent
+— worse than "not idempotent," an immediate `FAILED_PERMANENT` on every v2
+delivery. Not live today only because `V2_BODY_COMP` isn't selectable in the
+UI yet.
+
+**First proposed fix was itself incomplete — caught by a second opinion
+before writing any code.** Adding `client_id` alone only protects *future*
+rows. WP-22 exists to replay the **backlog** of already-`SENT` v1 rows, none
+of which will ever have a `client_id` — a replay of one of those would still
+miss VitalForge's receipt-time-only dedup window and duplicate into Garmin.
+Also checked and ruled out: Bascule never persisted VitalForge's returned
+`row_id` from a successful delivery (`ReadingEntity` has no such column), so
+there was no cheaper "match by previously-seen server id" path available
+either.
+
+**Full fix, chosen explicitly over the cheaper partial one:** `vitalforge`
+PR #39 (`fix/a6-weight-client-id-idempotency`, https://github.com/bearyjd/vitalforge/pull/39)
+adds both `client_id` (exact-identity match, checked before the dedup
+window) and an optional `captured_at` the window anchors on instead of
+receipt time. `ruff` clean, 664 tests (646 pre-existing + 18 new), all
+passing. Committed and pushed on that repo's own branch — **not merged**,
+left for review since it's a live health-data production service.
+
+**Then closed the loop on this side**, since `V2Shaper.kt` already put both
+keys on the wire and one of them was silently wrong: `client_id` was fine,
+but `captured_at` was sent as raw `capturedAtMillis` — a bare number, which
+VitalForge's Pydantic `datetime` field parses as Unix **seconds**, landing
+tens of thousands of years in the future. Fixed to `Instant.ofEpochMilli(…).toString()`
+(ISO-8601 with an explicit UTC offset). `V2ShaperTest.kt` updated to match
+and gained a dedicated regression test for the wire-format bug itself, not
+just the value. 565 unit tests, detekt clean.
+
+**Residual gap, not silently closed — read this before touching WP-22:** a
+legacy row whose *original* delivery was itself delayed past the dedup
+window has no reliable capture-time proxy for a later replay to match
+against; VitalForge never had the chance to record one for that row.
+`captured_at` fixes every row captured from here forward, not retroactively
+for that specific backlog shape. `00-design.md` §4.4 and `01-plan.md`'s WP-22
+section both carry this note now — don't let it get silently reopened as
+"unknown" the way A6 itself did.
+
+**Not done this session, deliberately:** `ReplayMigrationWorker.kt` and
+`ReplayEligibility.kt` still don't exist in this repo. This resolution
+unblocks writing WP-22 with confidence; it does not implement it. The
+`vitalforge` PR is also not merged — check its status before assuming the
+server side is actually live.
+
 ## 2026-08-31, night: live hardware session — profile management + weigh-now
 
 Continuation of the same day's UI-modernization merge, this time with the

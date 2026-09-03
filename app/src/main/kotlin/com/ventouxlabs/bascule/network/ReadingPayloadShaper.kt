@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.network
 
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.WeightUnit
+import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -45,7 +46,13 @@ object V2Shaper : ReadingPayloadShaper {
         val json = buildJsonObject {
             put("weight", JsonPrimitive(unit.fromKilograms(reading.weightKg)))
             put("unit", JsonPrimitive(unit.wire))
-            put("captured_at", JsonPrimitive(reading.capturedAtMillis))
+            // VitalForge's captured_at is a Pydantic `datetime`, which parses a
+            // bare number as a Unix *seconds* timestamp -- reading.capturedAtMillis
+            // sent raw would be misread as ~30,000 years in the future and
+            // rejected. An ISO-8601 instant with an explicit offset (Instant's
+            // own toString(), e.g. "…Z") is what the field actually expects
+            // (VitalForge vitalforge-weight/app.py WeightIn.captured_at).
+            put("captured_at", JsonPrimitive(Instant.ofEpochMilli(reading.capturedAtMillis).toString()))
             put("client_id", JsonPrimitive(reading.id))
             putOptional("body_fat_pct", reading.bodyFatPct, ReadingField.BODY_FAT_PCT, fields)
             putOptional("body_water_pct", reading.bodyWaterPct, ReadingField.BODY_WATER_PCT, fields)

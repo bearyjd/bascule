@@ -1,9 +1,9 @@
 package com.ventouxlabs.bascule.network
 
 import com.ventouxlabs.bascule.data.WeightUnit
+import java.time.Instant
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -56,9 +56,24 @@ class V2ShaperTest {
 
         assertEquals(complete.id, payload.json.getValue("client_id").jsonPrimitive.content)
         assertEquals(
-            ReadingFixtures.CAPTURED_AT_MILLIS,
-            payload.json.getValue("captured_at").jsonPrimitive.longOrNull,
+            Instant.ofEpochMilli(ReadingFixtures.CAPTURED_AT_MILLIS).toString(),
+            payload.json.getValue("captured_at").jsonPrimitive.content,
         )
+    }
+
+    /**
+     * VitalForge's `captured_at` is a Pydantic `datetime`, which parses a bare
+     * number as a Unix *seconds* timestamp — sending capturedAtMillis raw would
+     * be misread as tens of thousands of years in the future. Must be an
+     * ISO-8601 string with an explicit UTC offset, not a JSON number.
+     */
+    @Test
+    fun captureTimestampIsAnIsoStringNotARawMillisNumber() {
+        val payload = V2Shaper.shape(complete, WeightUnit.KILOGRAMS)
+
+        val raw = payload.json.getValue("captured_at").jsonPrimitive
+        assertTrue("captured_at must be a JSON string, not a bare number", raw.isString)
+        assertTrue(raw.content.endsWith("Z"))
     }
 
     @Test

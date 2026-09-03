@@ -1370,9 +1370,23 @@ mid-POST strands nothing (§3.2's `IN_FLIGHT` rationale).
 
 **Files:** `delivery/ReplayMigrationWorker.kt`, `delivery/ReplayEligibility.kt`
 
-**Does:** §4.4's two-clause eligibility. **Ships disabled**: the escalation to JD
-on v2 `client_id` idempotency (A6) is unresolved, so the worker is written,
-tested, and gated off. Enabling it is a Phase-5+ decision, not a merge decision.
+**Does:** §4.4's two-clause eligibility. **Ships disabled** (unchanged after
+A6's resolution below, per §4.4's own framing — enabling it is still a
+Phase-5+ decision, not a merge decision, now for scheduling reasons rather
+than an open unknown): the worker is written, tested, and gated off.
+
+**A6 resolved 2026-09-02** (see `00-design.md` §4.4): VitalForge now supports
+`client_id` + `captured_at` idempotency (`vitalforge` PR #39). This work
+package can be implemented with confidence — it was never blocked on writing
+the Kotlin, only on whether the server side it replays against was safe to
+call twice. Not yet implemented: `ReplayMigrationWorker.kt` and
+`ReplayEligibility.kt` don't exist in this repo yet. **Note the residual gap
+`00-design.md` §4.4 documents**: rows whose original v1 delivery was itself
+delayed past the dedup window have no reliable capture-time proxy — this
+worker will still be unsafe to run against *that* specific slice of the
+backlog even once written. Confirm the scope of what's actually
+replay-matchable before enabling this in production, not just that the
+worker compiles and passes its own tests.
 
 **Tests:**
 - `ReplayEligibilityTest.undeliveredPopulatedFieldMakesRowEligible`
@@ -1395,7 +1409,7 @@ tested, and gated off. Enabling it is a Phase-5+ decision, not a merge decision.
 - `ReplayMigrationWorkerTest.runsAtMostOncePerContractVersionChange`
 
 **Counter:** none.
-**Escalation:** A6, §4.4 — blocked on JD.
+**Escalation:** A6, §4.4 — resolved 2026-09-02, no longer blocking.
 
 ---
 
@@ -2058,8 +2072,8 @@ this behavior.
 | Item | Kind | Owner |
 |---|---|---|
 | **P1-A** — §8.8 forbids the full-frame capture Phase 3 needs (§0.2) | Design amendment → **ADR-007** | Phase 2 |
-| **A6** — v2 idempotency on `client_id`; replay is unsafe without it | **Escalation to JD** (§4.4) | Before WP-22 is enabled |
-| **A6, second question** — *which* timestamp does VitalForge store, and which one should replay join on? Bascule now holds both `capturedAtMillis` (phone clock at `EMITTED`) and `scaleTimestampMillis` (the frame's own). If Atlas delivered the same weigh-in under the scale's clock, a join on `captured_at` misses and replay duplicates | **Same escalation, one added line** — not a new one; the answer is a shaper change either way (O-10) | With A6, before WP-22 |
+| **A6** — v2 idempotency on `client_id`; replay is unsafe without it | **Resolved 2026-09-02** (§4.4) — `vitalforge` PR #39 adds `client_id` + `captured_at` support. Residual gap on pre-existing rows whose original delivery was itself delayed documented in §4.4, not silently closed | Done; WP-22 still unimplemented |
+| **A6, second question** — *which* timestamp does VitalForge store, and which one should replay join on? Bascule now holds both `capturedAtMillis` (phone clock at `EMITTED`) and `scaleTimestampMillis` (the frame's own). If Atlas delivered the same weigh-in under the scale's clock, a join on `captured_at` misses and replay duplicates | **Resolved alongside A6** — VitalForge stores whatever the client sends and has no opinion; `V2Shaper` sends `capturedAtMillis`, matching §3.3's local dedup | Done |
 | **A7** — does v1 `/api/weight` ignore unknown fields? | Confirm against Track A contract doc, **not** by probing with a real reading | Before WP-17 merges |
 | **A5** — does `GET /api/weight/recent` exist? | ADR-003 degrades gracefully either way | WP-20 |
 | V2 exact field names | Pinned from Track A contract doc; `V2Shaper` written, key strings blank | WP-17 |
