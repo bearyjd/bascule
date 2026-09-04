@@ -11,12 +11,47 @@ only — `ui-modernization` plus five other fully-merged local-only stragglers
 2026-09-01 housekeeping pass, confirmed zero commits ahead of `main` each
 before deletion.
 
-**Updated 2026-09-03**: A6 resolved and merged in `vitalforge` (below), then
-WP-22 itself implemented on top of it (see that section, further below).
-**Uncommitted at the time of writing** — WP-22's diff (`ReplayMigrationWorker.kt`,
-`ReplayEligibility.kt`, the `ReadingDao`/`ConfigStore` additions they need,
-and their tests) is not yet committed to this repo. 574 tests locally (up
-from 565), detekt clean.
+**Updated 2026-09-03**: A6 resolved and merged in `vitalforge`, WP-22
+implemented on top of it (committed, `47c25cb`, 574 tests), then a
+bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
+#40, **open, not yet merged** — see the dated section below). No further
+Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
+right field names.
+
+## 2026-09-03: bmi/bmr/amr had no home anywhere in VitalForge — found, fixed
+
+Found while correcting a stale `HANDOFF.md` claim, not from a review or a
+bug report: the "V2 contract field names" open item said field names were
+"deliberately unfilled, pinned from VitalForge's Track A contract doc when
+it lands" — but that doc was never going to land; the real contract is
+whatever `vitalforge`'s actual code accepts, directly readable from the
+sibling checkout at `~/Documents/vibe-code/vitalforge`. Checking it properly
+(the same methodology A6 used) turned up a second landmine of the exact
+same shape client_id had: `V2Shaper.kt` sends `bmi`, `bmr`, and `amr`
+whenever a reading has them, but VitalForge's `WeightIn` had no fields for
+them and `weight_log` had no columns. `extra="forbid"` meant any reading
+carrying one would 422 the *entire* request — not just drop the extra
+field — the moment V2 was ever selected.
+
+Not live today (`V2_BODY_COMP` isn't selectable in Settings), but reachable
+today via `ConfigViewModel.importSettings`, which accepts it without going
+through the UI gate — so this wasn't purely theoretical housekeeping.
+
+Fixed entirely on the `vitalforge` side (`vitalforge` PR #40,
+`feat/weightin-bmi-bmr-amr`, **open, not merged**): `bmi`/`bmr`/`amr` added
+to `WeightIn` and `weight_log`, folded into the existing `COMPOSITION_FIELDS`
+machinery (enrichment, conflict-detection, and Garmin-repush-on-enrich all
+work for these three for free), and wired into `push_weight`/
+`add_body_composition`, which already supported them
+(`bmi`/`basal_met`/`active_met`) — VitalForge's own wrapper just never
+forwarded those three kwargs. `bmr`/`amr` are kcal/day on both sides, so no
+unit conversion was needed. Bascule needed **no changes** — `V2Shaper.kt`
+already had the correct field names; the gap was entirely server-side.
+688 `vitalforge` tests (669 + 19 new/expanded), ruff clean.
+
+**Corrected the record, not just the code**: the "V2 contract field names"
+item in "Known open items" below was rewritten to reflect that this is
+verified against real code, not pending a document that was never coming.
 
 ## 2026-09-03: WP-22 implemented — replay migration worker, not wired in
 
@@ -663,16 +698,27 @@ follow-up, then push and merge.
 Everything below predates this session except where noted; this session's
 round-3 review was scoped to specific findings, not a re-litigation of these.
 
-- **A6 escalation to JD, not yet sent**: v2 replay requires VitalForge to be
-  idempotent on `client_id` (or `captured_at` + weight tolerance for pre-v2
-  rows) or replay duplicates Garmin history. `01-plan.md` §6 tracks it.
+- ~~A6 escalation to JD, not yet sent~~ **Resolved 2026-09-02/03** — see the
+  dated sections above. `vitalforge` PR #39 merged; WP-22 implemented, not
+  wired in (deliberately — see that section for the residual gap).
 - **`androidx.security:security-crypto` 1.1.0's `EncryptedSharedPreferences`
   is deprecated** by the platform. Both the VitalForge token and scale
   consent codes use it. Pick a successor before v1 ships.
 - **O-08 residues**: the recovery path for a full 8-slot scale registry
   (read `2A9A` / SIG delete-user op) is unexplored.
-- **V2 contract field names** deliberately unfilled — pinned from
-  VitalForge's Track A contract doc when it lands. It was previously
+- **V2 contract field names — verified 2026-09-03, not still waiting on a
+  doc.** Re-checking this item during A6 follow-up meant reading VitalForge's
+  actual `WeightIn` model directly (`~/Documents/vibe-code/vitalforge`, a
+  sibling checkout), not a Track A contract doc that never materialized.
+  Every field name `V2Shaper.kt` already sends —
+  `body_fat_pct`/`body_water_pct`/`muscle_pct`/`bone_mass_kg`/`client_id`/`captured_at`
+  — matched exactly. Three didn't: `bmi`/`bmr`/`amr` had no home anywhere in
+  VitalForge (no `WeightIn` field, no `weight_log` column) — `extra="forbid"`
+  would have 422'd the whole request the instant a reading carrying one was
+  ever sent under V2, the identical failure shape `client_id` had before A6.
+  Fixed in `vitalforge` PR #40 (open, not yet merged) — `V2Shaper.kt` itself
+  needed no Bascule-side change, it already had the right names. It was
+  previously
   selectable in the Settings UI dropdown despite the shaper's own KDoc
   falsely claiming otherwise, but that dropdown offered exactly one
   choice (`V1_WEIGHT_ONLY`) once gated, so a later session removed the
@@ -681,8 +727,10 @@ round-3 review was scoped to specific findings, not a re-litigation of these.
   remaining gate — it now backs only `ui/ConfigViewModel.kt`'s import path
   — plus `ContractVersionSelectionTest`'s
   `exactlyOneContractVersionIsSelectableSoNoControlIsWarranted` tripwire,
-  which fails the moment a second version becomes selectable. When the
-  contract doc lands: delete the `V2_BODY_COMP` filter from
+  which fails the moment a second version becomes selectable. Now that the
+  field names are verified rather than pending — once `vitalforge` PR #40
+  merges, nothing server-side blocks V2 — enabling it is a product decision,
+  not a data-availability one: delete the `V2_BODY_COMP` filter from
   `selectableContractVersions` (do not delete the constant itself — it
   still gates `ConfigViewModel.importSettings`'s
   `imported.contractVersion in selectableContractVersions` check), update
