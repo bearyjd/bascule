@@ -32,8 +32,23 @@ if [ "$INSTALL" = "1" ]; then
   adb install -r app/build/outputs/apk/debug/app-debug.apk || { echo "install failed"; exit 1; }
   # A fresh install leaves the app stopped; the bridge service only comes back
   # once something starts the process.
+  adb logcat -c 2>/dev/null
   adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-  sleep 3
+  sleep 5
+  # The Scale screen gained a new construction path this session
+  # (CaptureAttemptLog opens SharedPreferences and registers a listener from
+  # BasculeApplication's lazy). Nothing in the JVM lane can prove that opens,
+  # so prove it here before trusting anything else this script reports.
+  if adb logcat -d -b crash -t 200 2>/dev/null | grep -q "$PKG"; then
+    echo "  !! The app CRASHED on launch. Stop here and report this:"
+    adb logcat -d -b crash -t 200 2>/dev/null | grep -A 15 "$PKG" | head -25 | sed 's/^/    /'
+    exit 1
+  fi
+  if adb shell ps -A 2>/dev/null | grep -q "$PKG"; then
+    echo "  App launched cleanly (no crash). Open the Scale tab and confirm it renders."
+  else
+    echo "  !! The app is not running after launch — check manually before continuing."
+  fi
   echo
 fi
 
