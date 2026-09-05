@@ -59,6 +59,19 @@ class CooldownDispositionTest {
     }
 
     /**
+     * The back door the `finally` in `doWork` exists to shut: a session that
+     * threw or was cancelled must still release its hold, or an unclassified
+     * failure reinstates the five-minute lockout without ever being named.
+     */
+    @Test
+    fun anUnexpectedFailureBacksOffRatherThanHolding() {
+        assertEquals(
+            CooldownDisposition.BACKOFF,
+            cooldownDispositionFor(SessionExitReason.UNEXPECTED_ERROR),
+        )
+    }
+
+    /**
      * A tripwire, not a restatement: every exit must be classified, and the two
      * treatments that can cost a weigh-in — holding for five minutes — stay
      * restricted to the two reasons that genuinely earn it. A new

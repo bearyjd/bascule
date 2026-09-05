@@ -198,4 +198,5 @@ private fun describe(outcome: CaptureOutcome): String = when (outcome) {
     CaptureOutcome.MISSED_THE_WINDOW -> "the phone missed its window — step on again"
     CaptureOutcome.NOT_READY -> "not set up to capture — check Bluetooth, permissions and your profile"
     CaptureOutcome.INCOMPATIBLE -> "that device is not a scale Bascule can read"
+    CaptureOutcome.FAILED -> "something went wrong — step on again"
 }

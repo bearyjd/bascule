@@ -23,6 +23,7 @@ import com.ventouxlabs.bascule.runNonCancelling
 import com.ventouxlabs.bascule.service.CooldownDisposition
 import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 class ScaleSessionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -37,10 +38,22 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
     override suspend fun doWork(): Result {
         // Nothing to settle without an address, and nothing claimed one either.
         val address = inputData.getString(KEY_ADDRESS) ?: return Result.failure()
-        val exit = attempt(address)
-        settleCooldown(address, cooldownDispositionFor(exit.reason))
-        recordAttempt(exit.reason)
-        return exit.result
+        // `finally`, not a plain sequence: a session that throws or is
+        // cancelled is exactly a session that would otherwise leave the address
+        // locked for the full window with no reading to show for it, which is
+        // the defect this whole path exists to close. `NonCancellable` because
+        // settling is two disk writes, and a cancelled worker cannot suspend.
+        var reason = SessionExitReason.UNEXPECTED_ERROR
+        try {
+            val exit = attempt(address)
+            reason = exit.reason
+            return exit.result
+        } finally {
+            withContext(NonCancellable) {
+                settleCooldown(address, cooldownDispositionFor(reason))
+                recordAttempt(reason)
+            }
+        }
     }
 
     private suspend fun attempt(address: String): SessionExit {
@@ -308,6 +321,14 @@ internal enum class SessionExitReason {
     DECODE_FAILURE,
     INCOMPATIBLE,
     HANDSHAKE_FAILED,
+
+    /**
+     * The session threw, or was cancelled before it could classify itself.
+     * Present so that the `finally` in [ScaleSessionWorker.doWork] always has a
+     * reason to settle with — an unclassified failure that skipped settling
+     * would reinstate the five-minute lockout by the back door.
+     */
+    UNEXPECTED_ERROR,
 }
 
 /**
@@ -341,6 +362,7 @@ internal fun cooldownDispositionFor(reason: SessionExitReason): CooldownDisposit
     SessionExitReason.MISSED,
     SessionExitReason.DECODE_FAILURE,
     SessionExitReason.HANDSHAKE_FAILED,
+    SessionExitReason.UNEXPECTED_ERROR,
     -> CooldownDisposition.BACKOFF
 }
 
@@ -378,4 +400,6 @@ internal fun captureOutcomeFor(reason: SessionExitReason): CaptureOutcome = when
     SessionExitReason.DECODE_FAILURE,
     SessionExitReason.HANDSHAKE_FAILED,
     -> CaptureOutcome.NO_READING
+
+    SessionExitReason.UNEXPECTED_ERROR -> CaptureOutcome.FAILED
 }

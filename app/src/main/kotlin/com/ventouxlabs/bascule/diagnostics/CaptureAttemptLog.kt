@@ -34,6 +34,9 @@ enum class CaptureOutcome {
 
     /** The device answered and is not a scale this app can talk to. */
     INCOMPATIBLE,
+
+    /** The attempt ended in an unexpected failure and classified itself no further. */
+    FAILED,
 }
 
 data class LastCaptureAttempt(val atMillis: Long, val outcome: CaptureOutcome)
