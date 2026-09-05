@@ -18,6 +18,74 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-05: why capture "works sometimes, at random" — found, fixed
+
+User report, verbatim: *"connections are not reliable, syncs are not
+reliable b/w app and scale."* Diagnosed from the device, not from review.
+
+**Evidence first.** The phone had exactly **two** rows in `readings` ever:
+one MANUAL (Aug 23) and one SCALE (Aug 31, 91.08kg, 21.3% fat) — both
+`SENT`. So delivery was never the problem; capture was. Meanwhile
+`scan_enqueue_cooldown.xml` held an entry for the BF720 stamped Sep 4
+13:30 and `bascule.db-shm` was touched Sep 4 13:07 — sessions ran on Sep
+4, opened the database, and wrote nothing.
+
+**Also: the installed APK was stale**, from Sep 1 07:29, predating
+`f358f99` and three later commits. Always check `lastUpdateTime` against
+`git log` before diagnosing behavior — a chunk of this session's early
+hypotheses were about code that was not on the phone.
+
+**The mechanism, two defects compounding:**
+
+1. `ScanEnqueueCooldown` stamped a 5-minute window at *enqueue* and never
+   revisited it. Any failure blocked every later advertisement for the
+   rest of that window — including the user stepping straight back on.
+   The KDoc named this cost and judged it "a larger change than the
+   defect warrants." Given the symptom, it was warranted.
+2. The worker aborts on an advertisement older than
+   `STALENESS_ABORT_MILLIS` (20s), but work is enqueued
+   `RUN_AS_NON_EXPEDITED_WORK_REQUEST`; once expedited quota is spent
+   (the jobscheduler dump showed a debit tally of 48578) ordinary
+   scheduling in Doze routinely exceeds 20s. The worker then returned
+   `Result.success()` without touching the radio.
+
+**The part worth remembering:** defect 1 *disabled the defense already
+written for defect 2*. `existingWorkPolicyFor` REPLACEs merely-queued
+work precisely so a fresh advertisement refreshes `seenAt` — but
+`dispatch()` gates on the cooldown *before* the enqueuer, so the first
+claim won and nothing reached WorkManager for five minutes. Fixing the
+cooldown brought that mitigation back online for free, which is why
+**no timing constant was changed**: `STALENESS_ABORT_MILLIS` stays at
+20s, so the next hardware run has a clean signal.
+
+**Fixed** in `609b463` and `c66b102`: the worker reports a terminal
+disposition from *every* exit (the early returns matter most — a release
+hooked into `resultFor` alone would have missed the staleness abort
+entirely), settled in a `finally` under `NonCancellable` so a throw or
+cancellation cannot reinstate the lockout. Capture or incompatible holds
+the full window; a radio-touching failure backs off 20s; a stale
+advertisement releases at once and is self-throttling, since a new claim
+needs a full worker dispatch first.
+
+**Second gap closed: the app could not say what happened.**
+`DiagnosticsCounters`' only implementation is `InMemoryDiagnosticsCounters`
+— its own KDoc calls it the test double standing in until WP-26 — so every
+counter died with the worker process, and no failure state was rendered
+anywhere. `CaptureAttemptLog` now persists the last outcome across
+processes and the Scale screen shows one line ("Last attempt: … — the
+phone missed its window — step on again"). Scoped deliberately to the
+last attempt, **not** WP-26's full counter registry, which remains open.
+
+**Still not hardware-validated.** The Pixel disconnected from USB before
+the new build could be installed, and the user deferred the live weigh-in.
+`tools/weigh-in-test.sh [--install]` runs the whole check in one command:
+preflight (Bluetooth, standby bucket, bridge service, held cooldown
+entries), a timed logcat capture around one weigh-in, then the recorded
+attempt and the readings table. **Nothing in this session's fixes has
+touched real hardware.**
+
+604 tests, detekt clean.
+
 ## 2026-09-03: bmi/bmr/amr had no home anywhere in VitalForge — found, fixed
 
 Found while correcting a stale `HANDOFF.md` claim, not from a review or a
