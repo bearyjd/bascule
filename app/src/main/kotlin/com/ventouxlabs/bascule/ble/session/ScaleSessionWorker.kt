@@ -17,15 +17,45 @@ import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
+import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.runNonCancelling
+import com.ventouxlabs.bascule.service.CooldownDisposition
+import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class ScaleSessionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    /**
+     * Every exit from here settles the scan cooldown this session's
+     * advertisement claimed. That is the whole point of the indirection through
+     * [SessionExit]: the exits that matter most are the early ones — a stale
+     * advertisement above all — and a release hooked into [resultFor] alone
+     * would leave exactly those paths holding the address down for the full
+     * five-minute window, which is the lockout the split exists to end.
+     */
     override suspend fun doWork(): Result {
+        // Nothing to settle without an address, and nothing claimed one either.
         val address = inputData.getString(KEY_ADDRESS) ?: return Result.failure()
+        val exit = attempt(address)
+        settleCooldown(address, cooldownDispositionFor(exit.reason))
+        recordAttempt(exit.reason)
+        return exit.result
+    }
+
+    private suspend fun attempt(address: String): SessionExit {
         val seenAt = inputData.getLong(KEY_SEEN_AT, 0L)
-        if (seenAt <= 0L || System.currentTimeMillis() - seenAt > STALENESS_ABORT_MILLIS) return Result.success()
-        if (!hasConnectPermission()) return Result.failure()
+        if (seenAt <= 0L || System.currentTimeMillis() - seenAt > STALENESS_ABORT_MILLIS) {
+            // Not a scale problem: the advertisement was live when it was
+            // enqueued and went stale waiting for a dispatch slot. Releasing is
+            // what lets the next one in while the user is still standing there.
+            Log.i(TAG, "skipped: advertisement went stale before this worker was dispatched")
+            return SessionExit(Result.success(), SessionExitReason.STALE_ADVERTISEMENT)
+        }
+        if (!hasConnectPermission()) {
+            Log.w(TAG, "skipped: BLUETOOTH_CONNECT is not granted")
+            return SessionExit(Result.failure(), SessionExitReason.PERMISSION_DENIED)
+        }
         return runSession(address)
     }
 
@@ -36,14 +66,27 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
                 Manifest.permission.BLUETOOTH_CONNECT,
             ) == PackageManager.PERMISSION_GRANTED
 
-    private suspend fun runSession(address: String): Result {
+    private suspend fun runSession(address: String): SessionExit {
         val app = applicationContext as BasculeApplication
         val adapter = applicationContext.getSystemService(BluetoothManager::class.java)?.adapter
-            ?: return Result.failure()
-        if (!adapter.isEnabled) return Result.retry()
+        if (adapter == null) {
+            Log.w(TAG, "skipped: this device has no Bluetooth adapter")
+            return SessionExit(Result.failure(), SessionExitReason.NO_ADAPTER)
+        }
+        if (!adapter.isEnabled) {
+            Log.i(TAG, "skipped: Bluetooth is switched off")
+            return SessionExit(Result.retry(), SessionExitReason.ADAPTER_DISABLED)
+        }
         val profile = app.scaleProfileStore.activeProfile.value
-        if (profile == null || !profile.deviceAddress.equals(address, true)) return Result.success()
-        val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return Result.failure()
+        if (profile == null || !profile.deviceAddress.equals(address, true)) {
+            Log.i(TAG, "skipped: the advertisement is not from the active scale profile")
+            return SessionExit(Result.success(), SessionExitReason.NOT_ACTIVE_PROFILE)
+        }
+        val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
+        if (device == null) {
+            Log.w(TAG, "skipped: the active profile's address could not be resolved")
+            return SessionExit(Result.failure(), SessionExitReason.UNRESOLVABLE_DEVICE)
+        }
         // Last, after every viability gate above: the "capturing" notification
         // is a promise to the user that a session is about to happen, and a
         // stale advertisement for a non-active address used to show it and then
@@ -54,7 +97,10 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         // Best-effort in the same way DecodeFailure's is — WorkManager's 10s
         // backoff floor often lands past STALENESS_ABORT_MILLIS, at which point
         // the retry returns success() without touching the radio.
-        if (!enterForeground(app)) return Result.retry()
+        if (!enterForeground(app)) {
+            Log.w(TAG, "skipped: the platform refused a foreground start")
+            return SessionExit(Result.retry(), SessionExitReason.FOREGROUND_REFUSED)
+        }
         val session = GattSession(
             transport = AndroidGattTransport(applicationContext, device, adapter),
             decoder = BeurerDecoder(),
@@ -65,6 +111,10 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         )
         val outcome = app.scaleOperationCoordinator
             .withScale(ScaleSessionPurpose.MEASUREMENT) { session.run() }
+        // The one line that says what a weigh-in actually did. Until this
+        // existed, a session that reached the radio and came back empty was
+        // indistinguishable, from outside the process, from one that never ran.
+        Log.i(TAG, "session ended: ${describe(outcome)}")
         return resultFor(app, address, outcome)
     }
 
@@ -97,11 +147,46 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
             true
         }
 
+    /**
+     * Best-effort by construction: a cooldown that cannot be written is a
+     * missed weigh-in later, never a crashed worker now. Off the worker's
+     * dispatcher because `settle` commits synchronously to disk.
+     */
+    /**
+     * Best-effort for the same reason [settleCooldown] is, and recorded on
+     * every exit rather than only the interesting ones: an attempt that ended
+     * before it reached the radio is precisely the case the user could not
+     * otherwise distinguish from no attempt at all.
+     */
+    private suspend fun recordAttempt(reason: SessionExitReason) {
+        val log = (applicationContext as? BasculeApplication)?.captureAttemptLog ?: return
+        withContext(Dispatchers.IO) {
+            runCatching { log.record(captureOutcomeFor(reason)) }
+                .onFailure { Log.w(TAG, "could not record the capture attempt", it) }
+        }
+    }
+
+    private suspend fun settleCooldown(address: String, disposition: CooldownDisposition) {
+        withContext(Dispatchers.IO) {
+            runCatching { ScanEnqueueCooldown(applicationContext).settle(address, disposition) }
+                .onFailure { Log.w(TAG, "could not settle the scan cooldown", it) }
+        }
+    }
+
+    private fun describe(outcome: SessionOutcome): String = when (outcome) {
+        is SessionOutcome.Completed ->
+            if (outcome.reading != null) "captured a reading" else "completed with no reading"
+        is SessionOutcome.Missed -> "no reading (${outcome.reason})"
+        is SessionOutcome.DecodeFailure -> "decode failure (${outcome.malformedCount} malformed frames)"
+        SessionOutcome.Incompatible -> "device is not a compatible scale"
+        is SessionOutcome.HandshakeFailed -> "handshake failed (${outcome.detail})"
+    }
+
     private suspend fun resultFor(
         app: BasculeApplication,
         address: String,
         outcome: SessionOutcome,
-    ): Result = when (outcome) {
+    ): SessionExit = when (outcome) {
         // A null reading is a session that completed without a measurement —
         // the registration path. Unreachable from this worker, which always
         // runs with stopAfterHandshake = false, but stated rather than assumed.
@@ -110,10 +195,20 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         is SessionOutcome.Completed -> {
             outcome.reading?.let { app.readingIngestor.ingest(address, it) }
             app.deliveryScheduler.triggerImmediateDrain()
-            Result.success()
+            SessionExit(
+                Result.success(),
+                if (outcome.reading != null) {
+                    SessionExitReason.CAPTURED
+                } else {
+                    SessionExitReason.COMPLETED_WITHOUT_READING
+                },
+            )
         }
-        is SessionOutcome.Missed ->
-            if (outcome.reason == MissReason.ADAPTER_OFF) Result.retry() else Result.success()
+
+        is SessionOutcome.Missed -> SessionExit(
+            if (outcome.reason == MissReason.ADAPTER_OFF) Result.retry() else Result.success(),
+            SessionExitReason.MISSED,
+        )
 
         // Transient RF corruption during an otherwise healthy session, so it
         // gets the same treatment as ADAPTER_OFF above rather than sharing
@@ -122,17 +217,22 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         // WorkManager's backoff floor usually lands past that 20 s window — at
         // which point this returns success() without touching the radio. That
         // makes retry() the honest classification, not an effective recovery.
-        is SessionOutcome.DecodeFailure -> Result.retry()
+        // The cooldown backoff is what actually gives the next advertisement a
+        // way back in.
+        is SessionOutcome.DecodeFailure -> SessionExit(Result.retry(), SessionExitReason.DECODE_FAILURE)
 
         // A statement about the device, not about this attempt: retrying cannot
         // change it, and failure() is what feeds E4's incompatibleStreak story.
-        SessionOutcome.Incompatible -> Result.failure()
+        SessionOutcome.Incompatible -> SessionExit(Result.failure(), SessionExitReason.INCOMPATIBLE)
 
         // The scale refused or never answered Register/Consent. Not retried
         // here: E6 already ran its own ack ladder inside the session, and a
         // refused registration needs the user to re-pair, not another attempt.
-        is SessionOutcome.HandshakeFailed -> Result.failure()
+        is SessionOutcome.HandshakeFailed -> SessionExit(Result.failure(), SessionExitReason.HANDSHAKE_FAILED)
     }
+
+    /** Pairs a worker result with the reason, so [doWork] can settle on both. */
+    private data class SessionExit(val result: Result, val reason: SessionExitReason)
 
     private fun foregroundInfo(): ForegroundInfo {
         applicationContext.getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -185,4 +285,97 @@ internal fun classifyForegroundStartFailure(error: Throwable): DiagnosticsCounte
     // story for this worker), but the `when` on `error` — rather than
     // ignoring the parameter — is the seam for when that stops being true.
     else -> DiagnosticsCounterKey.MISSED_QUOTA
+}
+
+/**
+ * Every way [ScaleSessionWorker] can finish, named so the cooldown decision is
+ * a pure function of it. Kept exhaustive rather than collapsed to a boolean:
+ * the three cooldown treatments turn on *why* a session ended, and the early
+ * exits — which never reach [SessionOutcome] at all — are the ones that were
+ * silently poisoning the window.
+ */
+internal enum class SessionExitReason {
+    STALE_ADVERTISEMENT,
+    PERMISSION_DENIED,
+    NO_ADAPTER,
+    ADAPTER_DISABLED,
+    NOT_ACTIVE_PROFILE,
+    UNRESOLVABLE_DEVICE,
+    FOREGROUND_REFUSED,
+    CAPTURED,
+    COMPLETED_WITHOUT_READING,
+    MISSED,
+    DECODE_FAILURE,
+    INCOMPATIBLE,
+    HANDSHAKE_FAILED,
+}
+
+/**
+ * Which cooldown treatment each exit earns. Pure and `Context`-free for the
+ * same reason [classifyForegroundStartFailure] is: `applicationContext as
+ * BasculeApplication` keeps the worker itself out of the JVM lane, so the
+ * policy is split from the wiring to stay directly testable.
+ *
+ * [SessionExitReason.STALE_ADVERTISEMENT] is the only [CooldownDisposition.RELEASE]
+ * on purpose. It is the one exit that never reaches the radio *and* is expected
+ * to succeed on an immediate retry, because the next advertisement carries a
+ * fresh `seenAt`. Every other non-capturing exit describes a condition that
+ * will still hold a few milliseconds later, so releasing them would reconnect
+ * on every advertisement in the burst — the defect `ScanEnqueueCooldown` was
+ * written to prevent.
+ */
+internal fun cooldownDispositionFor(reason: SessionExitReason): CooldownDisposition = when (reason) {
+    SessionExitReason.STALE_ADVERTISEMENT -> CooldownDisposition.RELEASE
+
+    // A reading is already stored; a second session would only re-capture it.
+    // Incompatible is terminal for this device, so it earns the full window too.
+    SessionExitReason.CAPTURED, SessionExitReason.INCOMPATIBLE -> CooldownDisposition.HOLD
+
+    SessionExitReason.PERMISSION_DENIED,
+    SessionExitReason.NO_ADAPTER,
+    SessionExitReason.ADAPTER_DISABLED,
+    SessionExitReason.NOT_ACTIVE_PROFILE,
+    SessionExitReason.UNRESOLVABLE_DEVICE,
+    SessionExitReason.FOREGROUND_REFUSED,
+    SessionExitReason.COMPLETED_WITHOUT_READING,
+    SessionExitReason.MISSED,
+    SessionExitReason.DECODE_FAILURE,
+    SessionExitReason.HANDSHAKE_FAILED,
+    -> CooldownDisposition.BACKOFF
+}
+
+/**
+ * Collapses the exhaustive exit vocabulary into the five things a person
+ * standing on a scale can actually act on. Pure, and separate from
+ * [cooldownDispositionFor], because the two answer different questions: one is
+ * "when may we try again", the other is "what do we tell the user". They
+ * deliberately group the reasons differently — a refused foreground start earns
+ * a retry backoff but reads to the user as the phone missing its window.
+ */
+internal fun captureOutcomeFor(reason: SessionExitReason): CaptureOutcome = when (reason) {
+    SessionExitReason.CAPTURED -> CaptureOutcome.CAPTURED
+
+    // The phone's scheduler, not the scale: the advertisement was live when it
+    // was enqueued and the worker did not get a slot in time.
+    SessionExitReason.STALE_ADVERTISEMENT,
+    SessionExitReason.FOREGROUND_REFUSED,
+    -> CaptureOutcome.MISSED_THE_WINDOW
+
+    // Something the user can fix: link a scale, grant the permission, turn
+    // Bluetooth on.
+    SessionExitReason.PERMISSION_DENIED,
+    SessionExitReason.NO_ADAPTER,
+    SessionExitReason.ADAPTER_DISABLED,
+    SessionExitReason.NOT_ACTIVE_PROFILE,
+    SessionExitReason.UNRESOLVABLE_DEVICE,
+    -> CaptureOutcome.NOT_READY
+
+    SessionExitReason.INCOMPATIBLE -> CaptureOutcome.INCOMPATIBLE
+
+    // Reached the scale, came back empty.
+    SessionExitReason.COMPLETED_WITHOUT_READING,
+    SessionExitReason.MISSED,
+    SessionExitReason.DECODE_FAILURE,
+    SessionExitReason.HANDSHAKE_FAILED,
+    -> CaptureOutcome.NO_READING
 }

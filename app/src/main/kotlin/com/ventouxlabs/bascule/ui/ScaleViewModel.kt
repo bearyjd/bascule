@@ -8,6 +8,8 @@ import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ScaleProfile
+import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
+import com.ventouxlabs.bascule.diagnostics.LastCaptureAttempt
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +40,13 @@ data class ScaleUiState(
     val isLoading: Boolean = true,
     /** True while a [ScaleViewModel.weighNow] window is running. */
     val weighNowActive: Boolean = false,
+    /**
+     * The most recent automatic capture attempt, successful or not. Distinct
+     * from [lastCaptureMillis], which only ever moves on success: the gap
+     * between the two is the whole point, because an attempt that reached the
+     * scale and came back empty used to be indistinguishable from no attempt.
+     */
+    val lastAttempt: LastCaptureAttempt? = null,
 )
 
 private data class ScaleCaptureSnapshot(
@@ -70,6 +79,7 @@ class ScaleViewModel(
     private val onArm: suspend () -> Boolean,
     private val onDisarm: () -> Unit,
     private val bridgeService: BridgeServiceController,
+    captureAttempts: CaptureAttemptLog,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     /**
@@ -101,7 +111,8 @@ class ScaleViewModel(
         profiles.profiles,
         captureState,
         mutableWeighNowActive,
-    ) { all, capture, weighNowActive ->
+        captureAttempts.last,
+    ) { all, capture, weighNowActive, lastAttempt ->
         ScaleUiState(
             profiles = all,
             automaticCaptureEnabled = capture.automaticCaptureEnabled,
@@ -111,6 +122,7 @@ class ScaleViewModel(
             diagnostic = capture.diagnostic,
             isLoading = false,
             weighNowActive = weighNowActive,
+            lastAttempt = lastAttempt,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), ScaleUiState())
 
@@ -239,6 +251,7 @@ class ScaleViewModel(
                     app.configStore, app.scaleProfileStore, app.database.readingDao(),
                     onArm = app.scaleScanner::arm, onDisarm = app.scaleScanner::disarm,
                     bridgeService = app.bridgeServiceController,
+                    captureAttempts = app.captureAttemptLog,
                 )
             }
         }

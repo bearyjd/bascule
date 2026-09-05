@@ -34,7 +34,9 @@ class ScanEnqueueCooldownTest {
     private fun cooldown() = ScanEnqueueCooldown(
         context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE),
         WINDOW_MILLIS,
-    ) { now }
+        { now },
+        BACKOFF_MILLIS,
+    )
 
     @Test
     fun theFirstSightingOfAnAddressIsClaimed() {
@@ -139,8 +141,101 @@ class ScanEnqueueCooldownTest {
         assertTrue("an address still inside its own window must not be pruned", keys.contains(ADDRESS))
     }
 
+    /**
+     * The lockout this whole mechanism existed to cause, now closed. A session
+     * that never reached the radio — the staleness abort, overwhelmingly — used
+     * to hold the address for the full five minutes, so the user standing on
+     * the scale generated advertisements that could not enqueue anything and
+     * saw nothing happen until long after they had stepped off.
+     */
+    @Test
+    fun releasingLetsTheVeryNextAdvertisementThrough() {
+        cooldown.claim(ADDRESS)
+
+        cooldown.settle(ADDRESS, CooldownDisposition.RELEASE)
+
+        assertTrue("a released address must be claimable immediately", cooldown.claim(ADDRESS))
+    }
+
+    /** A release must also leave no entry behind, for the pruning reason above. */
+    @Test
+    fun releasingRemovesTheEntryFromDisk() {
+        cooldown.claim(ADDRESS)
+
+        cooldown.settle(ADDRESS, CooldownDisposition.RELEASE)
+
+        val keys = context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE).all.keys
+        assertFalse(keys.contains(ADDRESS))
+    }
+
+    /**
+     * A session that did reach the radio and failed must not be reconnected to
+     * on the next packet of the same burst — that is the 2-10/s reconnect storm
+     * this file exists to prevent.
+     */
+    @Test
+    fun aBackoffStillSuppressesTheRestOfTheAdvertisementBurst() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS - 1
+
+        assertFalse(cooldown.claim(ADDRESS))
+    }
+
+    /**
+     * ...but it must expire in seconds rather than minutes, so stepping off,
+     * waiting, and stepping back on is a real second attempt.
+     */
+    @Test
+    fun aBackoffExpiresLongBeforeTheFullWindowWould() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS
+
+        assertTrue("a failed session must not cost the full window", cooldown.claim(ADDRESS))
+    }
+
+    /** A captured reading keeps the full window: re-running would only re-capture it. */
+    @Test
+    fun holdingKeepsTheFullWindow() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.HOLD)
+        now += WINDOW_MILLIS - 1
+
+        assertFalse(cooldown.claim(ADDRESS))
+    }
+
+    /** A backoff longer than the window itself must not resurrect a claim early. */
+    @Test
+    fun aBackoffLongerThanTheWindowIsClampedToIt() {
+        val clamped = ScanEnqueueCooldown(
+            context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE),
+            WINDOW_MILLIS,
+            { now },
+            WINDOW_MILLIS * 10,
+        )
+        clamped.claim(ADDRESS)
+
+        clamped.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += WINDOW_MILLIS - 1
+
+        assertFalse(clamped.claim(ADDRESS))
+    }
+
+    /** Settling one address must not disturb another's window. */
+    @Test
+    fun settlingOneAddressLeavesAnotherUntouched() {
+        cooldown.claim(ADDRESS)
+        cooldown.claim(OTHER_ADDRESS)
+
+        cooldown.settle(ADDRESS, CooldownDisposition.RELEASE)
+
+        assertFalse(cooldown.claim(OTHER_ADDRESS))
+    }
+
     private companion object {
         const val WINDOW_MILLIS = 5L * 60 * 1_000
+        const val BACKOFF_MILLIS = 20L * 1_000
         const val ADDRESS = "AA:BB:CC:DD:EE:FF"
         const val OTHER_ADDRESS = "11:22:33:44:55:66"
     }

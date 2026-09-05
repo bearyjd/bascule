@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ScaleProfile
+import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
 import androidx.compose.ui.platform.LocalContext
 import java.text.DateFormat
 import java.util.Date
@@ -61,6 +62,13 @@ fun ScaleScreen(
                 )
                 Text("Pending deliveries: ${state.pendingDeliveries}")
                 Text("Last successful capture: ${state.lastCaptureMillis?.let(::formatTime) ?: "Never"}")
+                // The line that answers "I stepped on the scale and nothing
+                // happened". Rendered only once an attempt has actually been
+                // recorded, so a fresh install shows nothing rather than a
+                // reassuring-looking "Never".
+                state.lastAttempt?.let { attempt ->
+                    Text("Last attempt: ${formatTime(attempt.atMillis)} — ${describe(attempt.outcome)}")
+                }
                 state.diagnostic?.let { Text(it) }
             }
         }
@@ -177,3 +185,17 @@ private val TIME_FORMAT: DateFormat = DateFormat.getDateTimeInstance()
 private val PROFILE_SPINNER_SIZE = 24.dp
 
 private fun formatTime(millis: Long): String = TIME_FORMAT.format(Date(millis))
+
+/**
+ * Says what happened and, where there is one, what the user can do about it.
+ * [CaptureOutcome.MISSED_THE_WINDOW] deliberately does not blame the scale: the
+ * phone's scheduler dropped that one, and telling someone to re-pair a scale
+ * that is working fine is worse than saying nothing.
+ */
+private fun describe(outcome: CaptureOutcome): String = when (outcome) {
+    CaptureOutcome.CAPTURED -> "reading captured"
+    CaptureOutcome.NO_READING -> "reached your scale but got no reading — step on again"
+    CaptureOutcome.MISSED_THE_WINDOW -> "the phone missed its window — step on again"
+    CaptureOutcome.NOT_READY -> "not set up to capture — check Bluetooth, permissions and your profile"
+    CaptureOutcome.INCOMPATIBLE -> "that device is not a scale Bascule can read"
+}

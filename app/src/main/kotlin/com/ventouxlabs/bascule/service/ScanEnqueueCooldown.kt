@@ -9,16 +9,21 @@ import android.content.SharedPreferences
  * fresh GATT connect/handshake cycle the moment the previous one finishes,
  * because `ExistingWorkPolicy` only suppresses work that is actually in flight.
  *
- * The window is stamped when a session is *enqueued* rather than when it ends:
- * the terminal outcome is known only inside `ScaleSessionWorker`, one process
- * hop away from both callers. It is sized well past `SessionBudget`'s 90s hard
- * ceiling so that even a session running to that ceiling leaves several minutes
- * of quiet behind it. Known cost of stamping early: a session that aborts in
- * milliseconds — a transient adapter-off, say — still holds the address down
- * for the full window, so the next step-on is missed. Closing that would mean
- * reporting the outcome back from the worker, which is a larger change than the
- * defect warrants; the adapter-off case already returns `Result.retry()` and so
- * re-attempts without needing a fresh advertisement.
+ * The window is *claimed* when a session is enqueued and [settle]d when that
+ * session ends. It is sized well past `SessionBudget`'s 90s hard ceiling so
+ * that even a session running to that ceiling leaves several minutes of quiet
+ * behind it.
+ *
+ * Stamping at enqueue alone used to hold a failed address down for the whole
+ * window, so a session that aborted in milliseconds swallowed every retry for
+ * five minutes — including the user stepping straight back on the scale, which
+ * is the only recovery they actually have. Worse, it gated the defense
+ * `ScaleSessionWorker` already had against scheduler latency:
+ * `existingWorkPolicyFor` REPLACEs merely-queued work so that a fresh
+ * advertisement refreshes `seenAt`, but while the window was shut no
+ * advertisement ever reached the enqueuer, so a staleness abort could not be
+ * recovered from at all. The worker now reports its terminal disposition back
+ * here, and the three cases are genuinely different — see [CooldownDisposition].
  *
  * Backed by [SharedPreferences] rather than a field, because the two callers
  * cannot share memory reliably: `ScanBroadcastReceiver` is manifest-declared,
@@ -32,6 +37,7 @@ internal class ScanEnqueueCooldown(
     private val store: SharedPreferences,
     private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val failureBackoffMillis: Long = DEFAULT_FAILURE_BACKOFF_MILLIS,
 ) {
     constructor(context: Context) : this(
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
@@ -68,8 +74,71 @@ internal class ScanEnqueueCooldown(
         return true
     }
 
+    /**
+     * Reports how the session that [claim]ed [address] actually ended, so the
+     * window reflects the outcome instead of the mere attempt.
+     *
+     * Writes with `commit()` for the same reason [claim] does: this runs at the
+     * tail of a worker whose process the platform may reap as soon as it
+     * returns, and a release still sitting in the async write queue is a
+     * release the next advertisement does not see — precisely the lockout this
+     * method exists to end.
+     *
+     * [CooldownDisposition.BACKOFF] is expressed by back-dating the existing
+     * claim rather than by storing an expiry, so the stored format stays "the
+     * instant this address was claimed" and [claim]'s clock-correction guard
+     * keeps working unchanged.
+     */
+    @Synchronized
+    fun settle(address: String, disposition: CooldownDisposition) {
+        when (disposition) {
+            CooldownDisposition.HOLD -> Unit
+            CooldownDisposition.RELEASE -> store.edit().remove(address).commit()
+            CooldownDisposition.BACKOFF -> {
+                val remaining = failureBackoffMillis.coerceIn(0, windowMillis)
+                store.edit().putLong(address, clock() - (windowMillis - remaining)).commit()
+            }
+        }
+    }
+
     companion object {
         const val DEFAULT_WINDOW_MILLIS = 5L * 60 * 1_000
+
+        /**
+         * How long an address stays quiet after a session that reached the
+         * radio and failed. Long enough that a failing scale is not reconnected
+         * to on every advertisement — the burst rate is 2-10/s — and short
+         * enough that a user who steps off, waits, and steps back on gets a
+         * real second attempt rather than silence.
+         */
+        const val DEFAULT_FAILURE_BACKOFF_MILLIS = 20L * 1_000
         private const val PREFS_NAME = "scan_enqueue_cooldown"
     }
+}
+
+/**
+ * How a finished scale session should leave the cooldown window it claimed.
+ *
+ * Three cases, because they are genuinely different situations and collapsing
+ * any two of them reintroduces a real defect:
+ *
+ * - [HOLD] earned the full window. A reading landed, so a second session would
+ *   only re-capture what is already stored; or the device answered and proved
+ *   incompatible, which retrying cannot change.
+ * - [BACKOFF] reached the radio and came back empty, or was refused by a
+ *   condition that will not change within a few advertisements — a missing
+ *   permission, a mismatched profile, a refused foreground start. Reconnecting
+ *   on every advertisement would be the original defect this file exists to
+ *   prevent; never retrying loses the weigh-in.
+ * - [RELEASE] never reached the radio, so there is nothing to back off from.
+ *   Reserved for the staleness abort, where releasing is exactly what lets the
+ *   *next* advertisement enqueue with a fresh `seenAt` and actually connect. It
+ *   is self-throttling despite the name: a fresh claim needs a full worker
+ *   dispatch first, so the loop runs at the scheduler's rate rather than the
+ *   advertisement rate.
+ */
+internal enum class CooldownDisposition {
+    HOLD,
+    BACKOFF,
+    RELEASE,
 }

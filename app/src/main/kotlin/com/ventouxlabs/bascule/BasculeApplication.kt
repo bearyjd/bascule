@@ -21,7 +21,9 @@ import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.delivery.DeliveryScheduler
 import com.ventouxlabs.bascule.delivery.WorkManagerDeliveryScheduler
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
+import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
+import com.ventouxlabs.bascule.diagnostics.SharedPreferencesCaptureAttemptLog
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
@@ -90,6 +92,13 @@ class BasculeApplication : Application() {
      * and the UI observe the same counts, not independent copies.
      */
     val diagnosticsCounters: DiagnosticsCounters by lazy { InMemoryDiagnosticsCounters() }
+
+    /**
+     * Durable, unlike [diagnosticsCounters], and for exactly that reason: the
+     * counters live only as long as the process that incremented them, so
+     * "I stepped on the scale and nothing happened" had no answer anywhere.
+     */
+    val captureAttemptLog: CaptureAttemptLog by lazy { SharedPreferencesCaptureAttemptLog(this) }
 
     private val _alwaysOnBridgingStartFailed = MutableStateFlow(false)
 

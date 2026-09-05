@@ -1,7 +1,10 @@
 package com.ventouxlabs.bascule.ui
 
 import com.ventouxlabs.bascule.data.ScaleProfile
+import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
+import com.ventouxlabs.bascule.diagnostics.LastCaptureAttempt
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
+import com.ventouxlabs.bascule.ui.fake.FakeCaptureAttemptLog
 import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
@@ -82,6 +85,7 @@ class ScaleViewModelTest {
         profiles: FakeScaleProfileStore = FakeScaleProfileStore(),
         dao: FakeReadingDao = FakeReadingDao(),
         recorder: Recorder = Recorder(),
+        captureAttempts: FakeCaptureAttemptLog = FakeCaptureAttemptLog(),
     ) = ScaleViewModel(
         config = config,
         profiles = profiles,
@@ -89,6 +93,7 @@ class ScaleViewModelTest {
         onArm = recorder::arm,
         onDisarm = recorder::disarm,
         bridgeService = recorder,
+        captureAttempts = captureAttempts,
         ioDispatcher = mainDispatcherRule.dispatcher,
     )
 
@@ -676,4 +681,28 @@ class ScaleViewModelTest {
             recorder.bridgeCalls,
         )
     }
+    /**
+     * The gap this surfaces is the point: `lastCaptureMillis` only ever moves
+     * on success, so without this a failed attempt and no attempt at all look
+     * identical on screen — which is exactly how "I stepped on the scale and
+     * nothing happened" became undiagnosable.
+     */
+    @Test
+    fun aFailedAttemptIsSurfacedEvenThoughTheLastSuccessfulCaptureIsUnchanged() = runTest {
+        val attempts = FakeCaptureAttemptLog()
+        val vm = collecting(viewModel(captureAttempts = attempts))
+
+        attempts.record(CaptureOutcome.MISSED_THE_WINDOW, atMillis = 7_000L)
+        advanceUntilIdle()
+
+        assertEquals(
+            LastCaptureAttempt(7_000L, CaptureOutcome.MISSED_THE_WINDOW),
+            vm.uiState.value.lastAttempt,
+        )
+        assertNull(
+            "a failed attempt must not be mistaken for a successful capture",
+            vm.uiState.value.lastCaptureMillis,
+        )
+    }
+
 }
