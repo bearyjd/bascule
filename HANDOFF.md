@@ -49,6 +49,35 @@ same. A `pairingObserved` flag catches a pairing that began before the
 wait did, and a landed bond clears it so later timeouts stay ordinary.
 Five JVM tests; mutation-checked. 626 tests, detekt clean.
 
+**Then the wait did not engage on hardware, and that was a second bug
+(`149403d`):** the stack logged `BONDING` 100 ms into the write and the
+session still timed out at 2 s. `AndroidGattTransport` registered its
+bond/adapter receiver `RECEIVER_NOT_EXPORTED`; on Android 14+ that only
+admits broadcasts from the app's own uid or the system uid, and
+`BOND_STATE_CHANGED` comes from the Bluetooth stack's uid. Exported now —
+both actions are protected broadcasts, so nothing forgeable gets in. This
+also means the adapter-off path (`ADAPTER_OFF`) had been unreachable in
+production on current Android.
+
+**Proven end to end on the bench, 19:52:27–33:** `bond state 11` →
+"scale requested pairing; waiting up to 30s" → dialog tapped → `bond
+state 12` → "pairing wait ended: Bonded" → "handshake complete
+(consented)" → "subscribed; listening for a weigh-in for up to 8m". One
+session, one human tap. The Pixel 10 is **now bonded** — to re-test the
+fresh-phone path, Forget BF720 in its Bluetooth settings first.
+
+Two hardware details for whoever touches this next:
+- The BF720 sometimes drops the link ~10 s into an unanswered pairing
+  request (19:39:14 → 19:39:23) and sometimes holds it the full 30 s. The
+  reconnect path covers the drop; the human still has to be quick.
+- After the bond lands, the held Current Time write's completion is *not*
+  redelivered (logged "unanswered after 2s") — tolerated by design, and
+  the UCP subscribe that follows goes through on the encrypted link.
+- Android shows the pairing request as a full-screen dialog when the
+  screen is on and unlocked, and as a notification ("Pair & connect")
+  otherwise. The BF720 does **not** appear in Settings' "Pair new
+  device" list, so pairing can only be initiated by the app's write.
+
 **Product consequence worth stating plainly:** the Pixel 9 is bonded, so
 it never needed this; but registration/link on any other phone was
 impossible until now, and the failure was silent (2 s, `HandshakeFailed`,
