@@ -233,6 +233,118 @@ class ScanEnqueueCooldownTest {
         assertFalse(cooldown.claim(OTHER_ADDRESS))
     }
 
+    /**
+     * Observed on hardware before this existed: a scale that advertises
+     * continuously with no measurement to give (the phone is near it, nobody is
+     * standing on it) was reconnected to every ~70s indefinitely — the
+     * reconnect storm this file exists to prevent, merely slower.
+     */
+    @Test
+    fun consecutiveFailuresBackOffProgressively() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS
+        assertTrue("the first retry must stay quick", cooldown.claim(ADDRESS))
+
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS
+        assertFalse("a second straight failure must wait longer than the first", cooldown.claim(ADDRESS))
+
+        now += BACKOFF_MILLIS
+        assertTrue(cooldown.claim(ADDRESS))
+    }
+
+    /** A success ends the streak: the next failure is a first failure again. */
+    @Test
+    fun aCaptureResetsTheEscalation() {
+        cooldown.claim(ADDRESS)
+        repeat(3) {
+            cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+            now += WINDOW_MILLIS
+            cooldown.claim(ADDRESS)
+        }
+
+        cooldown.settle(ADDRESS, CooldownDisposition.HOLD)
+        now += WINDOW_MILLIS
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS
+
+        assertTrue("a failure after a capture must back off as a first failure", cooldown.claim(ADDRESS))
+    }
+
+    /** However long the streak, the quiet period never exceeds the full window. */
+    @Test
+    fun escalationIsCappedAtTheFullWindow() {
+        cooldown.claim(ADDRESS)
+        repeat(12) {
+            cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+            now += WINDOW_MILLIS
+            cooldown.claim(ADDRESS)
+        }
+
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += WINDOW_MILLIS
+
+        assertTrue("backoff must never outlast the window itself", cooldown.claim(ADDRESS))
+    }
+
+    /**
+     * The escape hatch. "Weigh now" means the user is on the scale right now,
+     * and a throttle earned by earlier failures must not be what stops it.
+     */
+    @Test
+    fun clearingLetsAThrottledAddressThroughImmediately() {
+        cooldown.claim(ADDRESS)
+        repeat(4) {
+            cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+            now += WINDOW_MILLIS
+            cooldown.claim(ADDRESS)
+        }
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+
+        cooldown.clear(ADDRESS)
+
+        assertTrue("an explicit weigh-now must never be throttled", cooldown.claim(ADDRESS))
+    }
+
+    /** Clearing must also end the streak, not just the current window. */
+    @Test
+    fun clearingAlsoResetsTheEscalation() {
+        cooldown.claim(ADDRESS)
+        repeat(4) {
+            cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+            now += WINDOW_MILLIS
+            cooldown.claim(ADDRESS)
+        }
+
+        cooldown.clear(ADDRESS)
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS
+
+        assertTrue("a cleared address must back off as a first failure", cooldown.claim(ADDRESS))
+    }
+
+    /**
+     * The streak counters share the file with the claim stamps, and [claim]'s
+     * pruning pass reads every other key as a timestamp — so they must not be
+     * mistaken for one, nor survive the address they belong to.
+     */
+    @Test
+    fun streakCountersDoNotDisturbPruningAndDoNotOutliveTheirAddress() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += WINDOW_MILLIS
+
+        cooldown.claim(OTHER_ADDRESS)
+
+        val keys = context.getSharedPreferences("scan_enqueue_cooldown", Context.MODE_PRIVATE).all.keys
+        assertFalse("the expired address must be pruned", keys.contains(ADDRESS))
+        assertFalse("its streak must be pruned with it", keys.contains("fails:$ADDRESS"))
+        assertTrue(keys.contains(OTHER_ADDRESS))
+    }
+
     private companion object {
         const val WINDOW_MILLIS = 5L * 60 * 1_000
         const val BACKOFF_MILLIS = 20L * 1_000

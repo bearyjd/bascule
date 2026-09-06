@@ -67,8 +67,15 @@ internal class ScanEnqueueCooldown(
         if (last != Long.MIN_VALUE && now - last in 0 until windowMillis) return false
         store.edit().apply {
             store.all.keys
+                .filter { !it.startsWith(FAIL_PREFIX) }
                 .filter { it != address && now - store.getLong(it, Long.MIN_VALUE) !in 0 until windowMillis }
-                .forEach(::remove)
+                .forEach { stale ->
+                    remove(stale)
+                    // The streak is meaningless once its address is gone, and
+                    // left behind it would be indistinguishable from a real one
+                    // when that scale is next seen.
+                    remove(FAIL_PREFIX + stale)
+                }
             putLong(address, now)
         }.commit()
         return true
@@ -92,13 +99,51 @@ internal class ScanEnqueueCooldown(
     @Synchronized
     fun settle(address: String, disposition: CooldownDisposition) {
         when (disposition) {
-            CooldownDisposition.HOLD -> Unit
-            CooldownDisposition.RELEASE -> store.edit().remove(address).commit()
+            // A capture earns the full window, and ends whatever streak
+            // preceded it: the next failure after a success is a first failure.
+            CooldownDisposition.HOLD -> store.edit().remove(FAIL_PREFIX + address).commit()
+            CooldownDisposition.RELEASE -> clear(address)
             CooldownDisposition.BACKOFF -> {
-                val remaining = failureBackoffMillis.coerceIn(0, windowMillis)
-                store.edit().putLong(address, clock() - (windowMillis - remaining)).commit()
+                val streak = store.getLong(FAIL_PREFIX + address, 0L) + 1
+                val remaining = backoffFor(streak)
+                store.edit()
+                    .putLong(address, clock() - (windowMillis - remaining))
+                    .putLong(FAIL_PREFIX + address, streak)
+                    .commit()
             }
         }
+    }
+
+    /**
+     * Drops the window and the streak for [address] outright.
+     *
+     * The escape hatch for explicit user intent: someone who has just pressed
+     * "Weigh now" is standing on the scale, and a throttle earned by earlier
+     * failures must not be what stops that from working. Without it the
+     * escalation below would eventually block the one control the user has.
+     */
+    @Synchronized
+    fun clear(address: String) {
+        store.edit().remove(address).remove(FAIL_PREFIX + address).commit()
+    }
+
+    /**
+     * Doubles per consecutive failure — 20s, 40s, 80s, … — capped at the full
+     * window.
+     *
+     * A flat backoff is wrong at both ends. A scale that advertises
+     * continuously and has no measurement to give (the phone is near it, nobody
+     * is standing on it) would be reconnected to every ~70s forever, which is
+     * the reconnect storm this file exists to prevent, merely slower. A flat
+     * *long* backoff loses the retry that makes stepping back on work. Doubling
+     * keeps the first retry quick, where it is nearly always the one that
+     * matters, and decays to the old five-minute quiet if the scale genuinely
+     * has nothing to say.
+     */
+    private fun backoffFor(streak: Long): Long {
+        val shift = (streak - 1).coerceIn(0, MAX_BACKOFF_DOUBLINGS)
+        val scaled = failureBackoffMillis shl shift.toInt()
+        return scaled.coerceIn(0, windowMillis)
     }
 
     companion object {
@@ -112,7 +157,20 @@ internal class ScanEnqueueCooldown(
          * real second attempt rather than silence.
          */
         const val DEFAULT_FAILURE_BACKOFF_MILLIS = 20L * 1_000
+
+        /**
+         * Five doublings takes 20s past the 5-minute window, so the cap is the
+         * window itself and further failures cannot extend it.
+         */
+        const val MAX_BACKOFF_DOUBLINGS = 5L
         private const val PREFS_NAME = "scan_enqueue_cooldown"
+
+        /**
+         * Namespaces the consecutive-failure counters so they cannot be
+         * mistaken for claim stamps by [claim]'s pruning pass, which reads
+         * every other key as a timestamp.
+         */
+        private const val FAIL_PREFIX = "fails:"
     }
 }
 

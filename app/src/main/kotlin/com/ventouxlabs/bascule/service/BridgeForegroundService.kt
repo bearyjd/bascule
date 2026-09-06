@@ -109,6 +109,11 @@ class BridgeForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
         if (boundMillis <= 0) return START_STICKY
+        // A bounded start is "Weigh now": the user is standing on the scale
+        // right now, so any backoff earned by earlier failures has to go. It is
+        // the one control they have, and a throttle that can block it is worse
+        // than no throttle at all.
+        activeAddressProvider()?.let(cooldown::clear)
         boundStopScheduler(boundMillis) { stopSelf(startId) }
         return START_NOT_STICKY
     }
