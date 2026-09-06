@@ -985,6 +985,24 @@ follow-up, then push and merge.
 
 ## Known open items (carried forward, still genuinely open — don't silently resolve)
 
+- **`GattSession.kt` is 1055 lines** (was 917 before 2026-09-05), past the
+  800-line ceiling in the user's style rules. The 2026-09-06 additions —
+  the E5 bond wait, the pairing-aware write/subscribe awaits, the
+  injected log sink — belong together and would extract cleanly as a
+  `HandshakeSecurity`/`PairingWait` collaborator; the measurement loop
+  (`awaitMeasureStep`/`settle`/`finishEmission`) is the other natural
+  seam. Deliberately not done at the tail of a long hardware session: it
+  is a refactor of the one file every hardware finding this month touched,
+  and it deserves its own review pass with the tests as the safety net.
+- **The first step-on after the scale sleeps is a race** the long listen
+  does not cover: scale wakes → advertises → dispatch → connect (~5 s) →
+  consent → subscribe, against the scale emitting its single live
+  indication ~8-15 s in. A `MISSED_THE_WINDOW` was recorded at 22:28 on
+  the Pixel 10 with nobody on the scale, so dispatch latency is real even
+  with the battery exemption. Needs one observed weigh-in to size; the
+  stored-measurement path over Beurer's proprietary service is the
+  structural answer if it bites.
+
 Everything below predates this session except where noted; this session's
 round-3 review was scoped to specific findings, not a re-litigation of these.
 
