@@ -1031,6 +1031,24 @@ scale-admin/hands-off-capture work.
 
 ## Hardware
 
+**Two phones as of 2026-09-06.** The Pixel 9 Pro Fold (`4A111FDKD0000C`)
+holds the real data — the `jd` slot-1 profile, the VitalForge login, and
+the two readings — and is the one the user carries to the scale, which is
+why it drops off USB every time they go to weigh in. A **Pixel 10 Pro
+Fold (`57211FDCG0023C`, Android 17)** was handed over as a development
+bench: Bascule installed, permissions granted via `pm grant`, and linked
+to the scale's **existing slot 2 with consent code 1234** (the Aug 22
+probe registration, still on the scale; the `bryn` entry the Pixel 9 had
+for it was deliberately removed the same day). No new scale slot was
+used. No VitalForge login on the Pixel 10 — captures there will sit
+`PENDING`, which is fine for proving capture; delivery was proven on the
+Pixel 9. **The two phones contend for the scale's single link**: only one
+can be connected at a time, and each holds it for up to 8 min, so expect
+alternating sessions and `MISSED` outcomes on whichever loses the race.
+Slot 2's body-composition profile (height/DoB/gender) is the probe's, not
+`jd`'s — weight is right, body-fat will not be.
+
+
 Physical unit: Beurer BF720, MAC `E7:DB:51:F1:36:91`, already registered
 with the app-chosen identity **scaleIndex=2, consent code 1234** — reusable,
 don't re-register blindly, it burns one of 8 scale profile slots.
