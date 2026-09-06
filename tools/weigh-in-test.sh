@@ -8,6 +8,8 @@
 #
 #   ./tools/weigh-in-test.sh [seconds-to-watch]   (default 120)
 #   ./tools/weigh-in-test.sh --install [seconds]   builds and installs first
+#   ANDROID_SERIAL=<serial> ./tools/weigh-in-test.sh   when more than one phone is attached
+#     (Pixel 10 Pro Fold — the bridge — is 57211FDCG0023C; the retired Pixel 9 is 4A111FDKD0000C)
 #
 # --install uses `adb install -r`, which preserves app data. Never uninstall:
 # the encrypted stores are keyed to the install, so uninstalling destroys the
@@ -24,6 +26,9 @@ OUT=$(mktemp -d)
 trap 'kill "${LOGCAT_PID:-}" 2>/dev/null' EXIT
 
 command -v adb >/dev/null || { echo "adb not found on PATH"; exit 1; }
+if [ -z "${ANDROID_SERIAL:-}" ] && [ "$(adb devices | awk 'NR>1 && $2=="device"' | wc -l)" -gt 1 ]; then
+  echo "More than one phone is attached. Set ANDROID_SERIAL=<serial> (adb devices lists them)."; exit 1
+fi
 adb get-state >/dev/null 2>&1 || { echo "No device. Plug the phone in and enable USB debugging."; exit 1; }
 
 if [ "$INSTALL" = "1" ]; then
