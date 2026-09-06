@@ -898,20 +898,27 @@ background capture is currently OFF, always-on foreground fallback is ON.
    thing on a real drain. **§8.6's re-login recovery** (`ReadingDao.kt:61`)
    is likewise now confirmed against real data rather than a fixture.
 
-## Where things actually are
+## Where things actually are (refreshed 2026-09-06)
 
-- **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0).
-  **`main` now has everything** — the VitalForge connectivity/login feature,
-  its two prior review-and-fix rounds, and this session's round-3
-  multi-agent review plus fix pipeline. Head is `1b6db33` (merge commit for
-  PR #1, now closed/merged).
-- **PR #1 is merged, not open.** The `vitalforge-connectivity-and-login`
-  branch it lived on is deleted, both locally and on origin. There is
-  nothing further to push for this feature.
-- **Test count: 524**, all green on `main`. `detekt`: 0 issues. CI (GitHub
-  Actions, `.github/workflows/ci.yml`) passed on the merge commit.
-- **Process doc:** `docs/prp/bascule-agent-prompt.md` governs phases/gates.
-  **PRP:** `docs/prp/bascule-prp.md` governs requirements, wins on conflict.
+- **Repo:** https://github.com/bearyjd/bascule (public, AGPL-3.0). `main`
+  carries everything; **the 2026-09-05/06 commits are not pushed** — the
+  user has to say so. 641 tests, detekt 0.
+- **The Pixel 10 Pro Fold (`57211FDCG0023C`) is the bridge.** Bonded to
+  the BF720, `jd`/slot-1 profile active, VitalForge login migrated and
+  verified ("✓ Connected — credential accepted"), both capture toggles
+  on, battery-optimization exempt, Tailscale up. The Pixel 9 is retired
+  from capture (both toggles off) and must stay that way.
+- **What is proven on hardware:** scanning wakes sessions on both scan
+  paths; connect, consent handshake, and subscription succeed; sessions
+  hold 8 minutes and re-link within ~40 s; the scale's own idle drops
+  are ridden through; a phone the scale has never met pairs through the
+  app's own 30 s wait; failures are recorded durably, shown on the Scale
+  tab, and (when a human is needed) notified.
+- **What is not yet proven:** one live weigh-in captured by this build.
+  Every observed session was an idle scale. The user has to step on.
+- **Process docs:** `docs/prp/bascule-agent-prompt.md` governs
+  phases/gates; `docs/prp/bascule-prp.md` governs requirements. The dated
+  sections above are the operational history; read them newest-first.
 
 ## What actually happened this session (chronological)
 

@@ -166,13 +166,20 @@ is no instrumented test lane at present, which is a known gap rather than an ove
 
 ## Status
 
-Pre-v1. The build is green and the test suite passes, but the app has not been validated
-end-to-end against physical hardware since the most recent round of fixes.
+Pre-v1, hardware-validated on the current `main` as of 2026-09-06 against a
+physical BF720: background scanning, the consent handshake, long-lived listening
+sessions, first-time pairing on a fresh phone, durable failure reporting, and
+delivery to VitalForge are each confirmed on device. What has not yet been
+observed on this build is a live weigh-in end to end — every watched session was
+an idle scale.
 
-Known open work is tracked in `HANDOFF.md` and `docs/prp/01-plan.md`. The larger items:
-replay/idempotency semantics on the VitalForge side, a successor to the now-deprecated
-`EncryptedSharedPreferences`, and the recovery path for a scale whose 8 user slots are
-all taken.
+Two things to know before relying on it: the BF720 only reports a weigh-in
+*live*, to a phone already connected to it, so Bascule stays connected in
+8-minute stretches while the scale is awake (the scale's battery cost of that is
+unmeasured); and the scale requires Bluetooth pairing on first contact, which
+Android surfaces as a request you have a few seconds to accept.
+
+Known open work is tracked in `HANDOFF.md` and `docs/prp/01-plan.md`.
 
 ## Documentation
 
