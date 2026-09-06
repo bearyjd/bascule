@@ -1115,6 +1115,20 @@ picker on Android 17 opens on "Recent files" and an adb-pushed file only
 appears via "Search this device" (or after a MEDIA_SCANNER_SCAN_FILE
 broadcast).
 
+**Delivery from the Pixel 10 needs Tailscale.** `weight.grepon.cc`
+resolves to a tailnet address (`fd7a:115c:a1e0::be33:ce0f`; VitalForge
+runs on `atlas`, 100.77.15.80). Right after the import the app's "Test
+connection" read "✗ network error" — Tailscale was installed on the
+Pixel 10 but its tunnel was down. Opening the Tailscale app brought it
+up ("Connected", tailnet beary.us); the test then read "✓ Connected —
+credential accepted". If the tunnel drops, readings queue locally and
+the delivery retry ladder handles it, but nothing syncs until it is
+back — Android's Always-on VPN for Tailscale is the durable fix, and it
+can only be set from the phone's own Settings, not over adb. The app was
+also added to the battery-optimization allowlist over adb (standby
+bucket now EXEMPTED), which is what protects WorkManager dispatch
+latency — the source of the "advertisement went stale" aborts.
+
 (Earlier that day, superseded:) **Two phones as of 2026-09-06.** The Pixel 9 Pro Fold (`4A111FDKD0000C`)
 holds the real data — the `jd` slot-1 profile, the VitalForge login, and
 the two readings — and is the one the user carries to the scale, which is
