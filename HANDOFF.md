@@ -18,6 +18,86 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-06: the real failure model, from the wire — sessions now listen for minutes
+
+Continuation on hardware with the user present. The headline reverses an
+assumption every design doc carried: **the BF720 does not deliver a stored
+weigh-in on the SIG Weight Scale path.** It advertises continuously while
+awake and indicates a measurement only *live*, to a client that is already
+connected, consented and subscribed at the moment someone steps on.
+
+**Evidence, in order:**
+
+- 105 consecutive idle sessions overnight (the new `fails:` streak counter
+  made that countable), one every ~6 min — so the scale advertises at
+  least that often, all night, with nobody near it.
+- Every session reached the radio and completed the handshake: the stack
+  log shows `GATTC_SendHandleValueConfirm` immediately after the User
+  Control Point subscription — that is the consent ack arriving. Then
+  nothing for 45 s, then teardown. **Connect and handshake reliability was
+  never the problem.**
+- The two captures that ever worked (Aug 22 probe, Aug 31 app) both had
+  the client connected and consented *before* the user stepped on
+  (`03-hardware-validation.md` §5: the reading's timestamp matched the
+  Current Time written moments earlier). The same doc records the BF720
+  holding a link open 2-15 min.
+- The user confirmed they had not been standing on the scale during the
+  first two watched windows, so those `NO_MEASUREMENT`s are correct.
+
+So `FIRST_INDICATION_TIMEOUT = 45 s` — chosen on the assumption a session
+begins when the user steps on — turned capture into a lottery: sessions
+begin whenever the phone reconnects, and a step-on had to land inside a
+45 s window opening every 5-6 min. About one chance in seven. That is the
+whole of "works sometimes, at random".
+
+**Fixed in `cca7722`.** Sessions listen 8 min; `HARD_SESSION_CEILING` and
+`BONDING_SESSION_BUDGET` are now *derived* from that so
+`SessionBudgetTest`'s invariants keep holding (the chained-handshake worst
+case must still overrun the ceiling — the headroom is the value that
+satisfies both bounds, not a round number). Under WorkManager's 10-min
+worker limit regardless of the foreground exemption. Link drops to
+`CONNECTION_PRIORITY_LOW_POWER` once subscribed. Cooldown window grows to
+10 min so a session's own advertisements cannot re-enqueue mid-listen. An
+idle listen is a new `IDLE` exit → new `PAUSE` disposition (flat 20 s,
+streak-neutral): the escalating backoff from `57ffdff` was right for
+failures and exactly wrong for idle listens, where it would have opened
+ever-longer coverage gaps. Notification now reads "Listening to your scale
+— step on any time".
+
+**Also on hardware this session:**
+- `weighNow` under always-on returned early ("nothing more to start"),
+  making the throttle escape hatch unreachable in the user's actual
+  configuration. Now clears the throttle either way.
+- `GattSession` has an injected log sink (JVM lane cannot see
+  `android.util.Log`), wired to logcat by the worker: handshake result,
+  every frame, decoded reading. `BluetoothGatt`'s own `VDBG` is a
+  compile-time constant on this platform — `setprop log.tag.BluetoothGatt
+  VERBOSE` does nothing — so this is the only visibility there is.
+- User-directed config: "Automatic background capture" switched **on**
+  (was off; `ScaleScanner.arm()` returns false when it is, so the
+  PendingIntent scan had never been registered). The `bryn` profile
+  (slot 2, same MAC) removed at the user's request — it was leftover, and
+  `ReadingIngestor` would have stranded a slot-2 reading as
+  `HELD_CONFIRM`.
+
+**Still not proven: an end-to-end capture on the long-listen build.** The
+phone dropped off USB mid-capture (second time this session — the Pixel's
+USB link is flaky over long sessions; keep captures short and re-check
+`adb devices` between steps). What the partial capture shows: the worker
+alive 90 s in, the link never dropped, no frame in the first 3.5 min. The
+user had been told to step on at any point in the 8 min; whether they did
+inside the captured 3.5 min is unknown.
+
+**The battery question is real and unmeasured.** A phone connected to the
+scale for most of the day, even at the low-power interval, costs the
+scale's AAAs something. Nothing here characterises how much. The
+alternative — fetching *stored* measurements over the proprietary
+`0xFFFF`/`0xFF00` services, which openScale's Beurer handler is understood
+to use — would let sessions be seconds long again, and is the right next
+design conversation if battery turns out to matter. Not attempted.
+
+616 tests, detekt clean.
+
 ## 2026-09-05, later: live on hardware — fix confirmed, one regression caught
 
 The Pixel came back on USB, so this session got the hardware checkpoint
