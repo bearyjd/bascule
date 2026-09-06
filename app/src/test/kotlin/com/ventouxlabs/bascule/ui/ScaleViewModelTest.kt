@@ -9,6 +9,7 @@ import com.ventouxlabs.bascule.ui.fake.FakeConfigStore
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
 import com.ventouxlabs.bascule.ui.fake.MainDispatcherRule
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -87,6 +88,8 @@ class ScaleViewModelTest {
         recorder: Recorder = Recorder(),
         captureAttempts: FakeCaptureAttemptLog = FakeCaptureAttemptLog(),
         clearCaptureThrottle: () -> Unit = {},
+        bridgeStartFailed: MutableStateFlow<Boolean> = MutableStateFlow(false),
+        startupFailure: MutableStateFlow<Throwable?> = MutableStateFlow(null),
     ) = ScaleViewModel(
         config = config,
         profiles = profiles,
@@ -96,6 +99,8 @@ class ScaleViewModelTest {
         bridgeService = recorder,
         captureAttempts = captureAttempts,
         clearCaptureThrottle = clearCaptureThrottle,
+        bridgeStartFailed = bridgeStartFailed,
+        startupFailure = startupFailure,
         ioDispatcher = mainDispatcherRule.dispatcher,
     )
 
@@ -738,6 +743,33 @@ class ScaleViewModelTest {
         runCurrent()
 
         assertEquals(1, cleared)
+    }
+
+    /**
+     * Both flows existed on `BasculeApplication` with nothing rendering them:
+     * a phone whose always-on bridge silently failed to start looked exactly
+     * like one that had started.
+     */
+    @Test
+    fun aFailedBridgeStartIsSurfaced() = runTest {
+        val bridge = MutableStateFlow(false)
+        val vm = collecting(viewModel(bridgeStartFailed = bridge))
+
+        bridge.value = true
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.bridgeStartFailed)
+    }
+
+    @Test
+    fun aStartupFailureIsSurfacedByItsMessage() = runTest {
+        val failure = MutableStateFlow<Throwable?>(null)
+        val vm = collecting(viewModel(startupFailure = failure))
+
+        failure.value = IllegalStateException("keystore unavailable")
+        advanceUntilIdle()
+
+        assertEquals("keystore unavailable", vm.uiState.value.startupFailure)
     }
 
 }

@@ -48,7 +48,17 @@ data class ScaleUiState(
      * scale and came back empty used to be indistinguishable from no attempt.
      */
     val lastAttempt: LastCaptureAttempt? = null,
+    /**
+     * `BasculeApplication.onCreate` could not bring the always-on bridge up,
+     * or one of its startup steps threw. Both flows existed with no screen
+     * rendering them, so a phone that silently never started capturing looked
+     * identical to one that had.
+     */
+    val bridgeStartFailed: Boolean = false,
+    val startupFailure: String? = null,
 )
+
+private data class StartupProblems(val bridgeStartFailed: Boolean, val startupFailure: String?)
 
 private data class ScaleCaptureSnapshot(
     val automaticCaptureEnabled: Boolean,
@@ -88,6 +98,8 @@ class ScaleViewModel(
      * `ScanEnqueueCooldown.clear`.
      */
     private val clearCaptureThrottle: () -> Unit = {},
+    bridgeStartFailed: StateFlow<Boolean> = MutableStateFlow(false),
+    startupFailure: StateFlow<Throwable?> = MutableStateFlow(null),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     /**
@@ -115,12 +127,17 @@ class ScaleViewModel(
     private val mutableWeighNowActive = MutableStateFlow(false)
     private var weighNowJob: Job? = null
 
+    private val startupProblems = combine(bridgeStartFailed, startupFailure) { bridge, failure ->
+        StartupProblems(bridge, failure?.let { it.message ?: it::class.simpleName })
+    }
+
     val uiState: StateFlow<ScaleUiState> = combine(
         profiles.profiles,
         captureState,
         mutableWeighNowActive,
         captureAttempts.last,
-    ) { all, capture, weighNowActive, lastAttempt ->
+        startupProblems,
+    ) { all, capture, weighNowActive, lastAttempt, startup ->
         ScaleUiState(
             profiles = all,
             automaticCaptureEnabled = capture.automaticCaptureEnabled,
@@ -131,6 +148,8 @@ class ScaleViewModel(
             isLoading = false,
             weighNowActive = weighNowActive,
             lastAttempt = lastAttempt,
+            bridgeStartFailed = startup.bridgeStartFailed,
+            startupFailure = startup.startupFailure,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), ScaleUiState())
 
@@ -276,6 +295,8 @@ class ScaleViewModel(
                         app.scaleProfileStore.activeProfile.value?.deviceAddress
                             ?.let { ScanEnqueueCooldown(app).clear(it) }
                     },
+                    bridgeStartFailed = app.alwaysOnBridgingStartFailed,
+                    startupFailure = app.startupFailure,
                 )
             }
         }

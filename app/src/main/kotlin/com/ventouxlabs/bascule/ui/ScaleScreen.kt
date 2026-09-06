@@ -70,6 +70,12 @@ fun ScaleScreen(
                     Text("Last attempt: ${formatTime(attempt.atMillis)} — ${describe(attempt.outcome)}")
                 }
                 state.diagnostic?.let { Text(it) }
+                if (state.bridgeStartFailed) {
+                    Text("Always-on bridging could not start. Toggle it off and on, or restart the app.")
+                }
+                state.startupFailure?.let {
+                    Text("A startup step failed: $it. Restart the app; if it persists, re-install.")
+                }
             }
         }
         RegisteredScaleSection(

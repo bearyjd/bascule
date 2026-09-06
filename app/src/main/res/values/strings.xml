@@ -10,4 +10,6 @@
     <string name="scale_capture_channel">Scale capture</string>
     <string name="scale_capture_title">Listening to your scale</string>
     <string name="scale_capture_text">Step on any time — the reading will be captured</string>
+
+    <string name="capture_attention_channel">Needs your attention</string>
 </resources>

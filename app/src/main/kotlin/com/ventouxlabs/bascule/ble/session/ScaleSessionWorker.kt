@@ -18,8 +18,10 @@ import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
 import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
+import com.ventouxlabs.bascule.diagnostics.attentionTransition
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.runNonCancelling
+import com.ventouxlabs.bascule.service.CaptureAttentionNotifier
 import com.ventouxlabs.bascule.service.CooldownDisposition
 import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import kotlinx.coroutines.Dispatchers
@@ -174,9 +176,15 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
      */
     private suspend fun recordAttempt(reason: SessionExitReason) {
         val log = (applicationContext as? BasculeApplication)?.captureAttemptLog ?: return
+        val outcome = captureOutcomeFor(reason)
         withContext(Dispatchers.IO) {
-            runCatching { log.record(captureOutcomeFor(reason)) }
-                .onFailure { Log.w(TAG, "could not record the capture attempt", it) }
+            runCatching {
+                // Read before write: the transition is from what the user was
+                // last told to what just happened.
+                val previous = log.last.value?.outcome
+                log.record(outcome)
+                CaptureAttentionNotifier(applicationContext).apply(attentionTransition(previous, outcome))
+            }.onFailure { Log.w(TAG, "could not record the capture attempt", it) }
         }
     }
 
