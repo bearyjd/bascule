@@ -8,6 +8,6 @@
     <string name="scale_bridge_text">Waiting for the configured scale</string>
 
     <string name="scale_capture_channel">Scale capture</string>
-    <string name="scale_capture_title">Connecting to scale</string>
-    <string name="scale_capture_text">Capturing a measurement</string>
+    <string name="scale_capture_title">Listening to your scale</string>
+    <string name="scale_capture_text">Step on any time — the reading will be captured</string>
 </resources>

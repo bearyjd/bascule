@@ -2,6 +2,7 @@ package com.ventouxlabs.bascule.ble.session
 
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -59,8 +60,21 @@ object SessionBudget {
      */
     val OPENING_WRITE_COMPLETE_TIMEOUT: Duration = 2.seconds
 
-    /** E7: first measurement indication, counted from `SUBSCRIBED`. */
-    val FIRST_INDICATION_TIMEOUT: Duration = 45.seconds
+    /**
+     * E7: how long a subscribed session listens for a measurement.
+     *
+     * Was 45 s, on the assumption that a session begins when the user steps
+     * on. Hardware showed the opposite: the BF720 advertises continuously
+     * while awake, so sessions begin whenever the phone happens to reconnect,
+     * and it only ever indicates a *live* weigh-in to a client that is already
+     * consented and subscribed — nothing stored is forwarded on the SIG path.
+     * A 45 s listen every few minutes therefore made capture a lottery on
+     * whether the user stepped on inside the window (observed: 105 straight
+     * idle sessions, one capture ever). Coverage — the fraction of time a
+     * session is connected — is what decides whether stepping on works, and
+     * the scale itself holds a link open for minutes.
+     */
+    val FIRST_INDICATION_TIMEOUT: Duration = 8.minutes
 
     /** E7: consecutive `NoMeasurement` sessions that raise a re-pairing notice. */
     const val NO_MEASUREMENT_STREAK_NOTIFY_THRESHOLD: Int = 3
@@ -82,12 +96,28 @@ object SessionBudget {
     val POST_EMISSION_IDLE: Duration = 10.seconds
 
     /**
+     * Sized so the ceiling still contains connect + discovery + handshake +
+     * the full listen + post-emission idle (`SessionBudgetTest`), while the
+     * *chained* worst case — three independently-acked handshake steps ahead
+     * of a full listen — still runs past it, which is what keeps the ceiling
+     * load-bearing rather than decorative. Both bounds are asserted; the
+     * headroom is the value that satisfies them, not a round number.
+     *
+     * The whole budget stays under WorkManager's 10-minute worker limit. The
+     * worker runs as a foreground service, which lifts that limit, but a
+     * session that fits inside it regardless is one fewer platform behaviour
+     * to depend on.
+     */
+    private val CEILING_HEADROOM: Duration = 50.seconds
+
+    /**
      * Unconditional teardown from worker start. Counts radio time only — the
      * bond wait is excluded and the ceiling's clock is suspended while a bond is
      * pending (§2.5); [BONDING_SESSION_BUDGET] governs that path instead.
      */
-    val HARD_SESSION_CEILING: Duration = 90.seconds
+    val HARD_SESSION_CEILING: Duration = FIRST_INDICATION_TIMEOUT + CEILING_HEADROOM
 
     /** Sessions that enter `BONDING` are governed by this budget instead of the hard ceiling. */
-    val BONDING_SESSION_BUDGET: Duration = 150.seconds
+    val BONDING_SESSION_BUDGET: Duration = HARD_SESSION_CEILING + BOND_WAIT + 30.seconds
+
 }

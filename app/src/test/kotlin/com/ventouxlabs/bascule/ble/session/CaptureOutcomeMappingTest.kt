@@ -55,6 +55,12 @@ class CaptureOutcomeMappingTest {
         assertEquals(false, sameDisposition)
     }
 
+    /** An idle listen must not read as a fault the user would try to fix. */
+    @Test
+    fun anIdleListenReadsAsIdleNotAsAFailure() {
+        assertEquals(CaptureOutcome.IDLE, captureOutcomeFor(SessionExitReason.IDLE))
+    }
+
     @Test
     fun reachingTheScaleAndGettingNothingReadsAsNoReading() {
         listOf(

@@ -59,6 +59,18 @@ class CooldownDispositionTest {
     }
 
     /**
+     * The BF720 advertises continuously and only ever indicates a live
+     * weigh-in to a client already connected and consented, so the fraction
+     * of time a session is connected *is* the capture rate. An idle listen is
+     * therefore not a failure, and escalating on it would open ever-longer
+     * gaps in exactly the coverage the listen exists to provide.
+     */
+    @Test
+    fun anIdleListenPausesBrieflyRatherThanBackingOff() {
+        assertEquals(CooldownDisposition.PAUSE, cooldownDispositionFor(SessionExitReason.IDLE))
+    }
+
+    /**
      * The back door the `finally` in `doWork` exists to shut: a session that
      * threw or was cancelled must still release its hold, or an unclassified
      * failure reinstates the five-minute lockout without ever being named.

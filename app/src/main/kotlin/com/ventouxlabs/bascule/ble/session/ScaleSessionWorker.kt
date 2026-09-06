@@ -121,6 +121,7 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
             deviceAddress = address,
             diagnostics = app.diagnosticsCounters,
             purpose = ScaleSessionPurpose.MEASUREMENT,
+            log = { Log.i(TAG, it) },
         )
         val outcome = app.scaleOperationCoordinator
             .withScale(ScaleSessionPurpose.MEASUREMENT) { session.run() }
@@ -218,10 +219,13 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
             )
         }
 
-        is SessionOutcome.Missed -> SessionExit(
-            if (outcome.reason == MissReason.ADAPTER_OFF) Result.retry() else Result.success(),
-            SessionExitReason.MISSED,
-        )
+        // NO_MEASUREMENT after a full listen is the scale idling, not the
+        // session failing — the two need different cooldown treatment.
+        is SessionOutcome.Missed -> when (outcome.reason) {
+            MissReason.NO_MEASUREMENT -> SessionExit(Result.success(), SessionExitReason.IDLE)
+            MissReason.ADAPTER_OFF -> SessionExit(Result.retry(), SessionExitReason.MISSED)
+            else -> SessionExit(Result.success(), SessionExitReason.MISSED)
+        }
 
         // Transient RF corruption during an otherwise healthy session, so it
         // gets the same treatment as ADAPTER_OFF above rather than sharing
@@ -317,6 +321,9 @@ internal enum class SessionExitReason {
     FOREGROUND_REFUSED,
     CAPTURED,
     COMPLETED_WITHOUT_READING,
+
+    /** Listened for the whole budget and nobody stepped on. Not a failure. */
+    IDLE,
     MISSED,
     DECODE_FAILURE,
     INCOMPATIBLE,
@@ -347,6 +354,12 @@ internal enum class SessionExitReason {
  */
 internal fun cooldownDispositionFor(reason: SessionExitReason): CooldownDisposition = when (reason) {
     SessionExitReason.STALE_ADVERTISEMENT -> CooldownDisposition.RELEASE
+
+    // Reconnect promptly and keep listening. The BF720 advertises whenever it
+    // is awake and only ever indicates a *live* weigh-in to an already
+    // consented client, so coverage — the fraction of time a session is
+    // connected — is what decides whether stepping on works.
+    SessionExitReason.IDLE -> CooldownDisposition.PAUSE
 
     // A reading is already stored; a second session would only re-capture it.
     // Incompatible is terminal for this device, so it earns the full window too.
@@ -393,6 +406,8 @@ internal fun captureOutcomeFor(reason: SessionExitReason): CaptureOutcome = when
     -> CaptureOutcome.NOT_READY
 
     SessionExitReason.INCOMPATIBLE -> CaptureOutcome.INCOMPATIBLE
+
+    SessionExitReason.IDLE -> CaptureOutcome.IDLE
 
     // Reached the scale, came back empty.
     SessionExitReason.COMPLETED_WITHOUT_READING,

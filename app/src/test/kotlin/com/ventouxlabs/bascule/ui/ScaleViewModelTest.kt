@@ -86,6 +86,7 @@ class ScaleViewModelTest {
         dao: FakeReadingDao = FakeReadingDao(),
         recorder: Recorder = Recorder(),
         captureAttempts: FakeCaptureAttemptLog = FakeCaptureAttemptLog(),
+        clearCaptureThrottle: () -> Unit = {},
     ) = ScaleViewModel(
         config = config,
         profiles = profiles,
@@ -94,6 +95,7 @@ class ScaleViewModelTest {
         onDisarm = recorder::disarm,
         bridgeService = recorder,
         captureAttempts = captureAttempts,
+        clearCaptureThrottle = clearCaptureThrottle,
         ioDispatcher = mainDispatcherRule.dispatcher,
     )
 
@@ -703,6 +705,39 @@ class ScaleViewModelTest {
             "a failed attempt must not be mistaken for a successful capture",
             vm.uiState.value.lastCaptureMillis,
         )
+    }
+
+    /**
+     * Found on hardware: with always-on enabled, Weigh now used to return
+     * early with "nothing more to start" — but always-on's scan gates on the
+     * same cooldown, and a continuously-advertising scale has usually earned a
+     * long backoff by the time anyone steps on. In that configuration clearing
+     * the throttle is the button's entire value, and it must not be skipped.
+     */
+    @Test
+    fun weighNowClearsTheCaptureThrottleEvenWhenAlwaysOnIsScanning() = runTest {
+        var cleared = 0
+        val config = FakeConfigStore().apply { saveAlwaysOnBridging(true) }
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(config = config, profiles = profiles, clearCaptureThrottle = { cleared++ }))
+
+        vm.weighNow()
+        runCurrent()
+
+        assertEquals(1, cleared)
+        assertTrue("the window must still show as active so the user gets feedback", vm.uiState.value.weighNowActive)
+    }
+
+    @Test
+    fun weighNowClearsTheCaptureThrottleOnTheBoundedPathToo() = runTest {
+        var cleared = 0
+        val profiles = FakeScaleProfileStore(listOf(profile()))
+        val vm = collecting(viewModel(profiles = profiles, clearCaptureThrottle = { cleared++ }))
+
+        vm.weighNow()
+        runCurrent()
+
+        assertEquals(1, cleared)
     }
 
 }

@@ -37,6 +37,9 @@ enum class CaptureOutcome {
 
     /** The attempt ended in an unexpected failure and classified itself no further. */
     FAILED,
+
+    /** Connected and listened for the whole window; nobody stepped on. */
+    IDLE,
 }
 
 data class LastCaptureAttempt(val atMillis: Long, val outcome: CaptureOutcome)

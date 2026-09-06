@@ -39,6 +39,15 @@ interface GattTransport {
     fun createBond()
     fun disconnect()
     fun close()
+
+    /**
+     * Asks the link for a low-duty connection interval. Called once the
+     * measurement subscriptions are in place and the session settles in to
+     * listen — possibly for minutes — so the scale's radio is not held at the
+     * aggressive connect-phase cadence for the whole wait. Default no-op:
+     * a transport that cannot honour it loses nothing but battery.
+     */
+    fun requestLowPower() = Unit
 }
 
 sealed interface TransportEvent {

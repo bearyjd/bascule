@@ -48,6 +48,14 @@ class GattSession(
     private val stopAfterHandshake: Boolean = false,
     /** Injected so the Current Time write is deterministic in a JVM test. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * A sink rather than `android.util.Log` directly: this class runs in the
+     * plain JVM lane, where `Log` is unmocked and throws. The worker wires it
+     * to logcat. Until this existed the session was a black box from outside —
+     * a weigh-in that reached the radio and produced nothing was
+     * indistinguishable from one the scale never answered.
+     */
+    private val log: (String) -> Unit = {},
 ) {
 
     /**
@@ -439,6 +447,7 @@ class GattSession(
 
                 is HandshakeDirective.Complete -> {
                     current.credential?.let(::rememberCredential)
+                    log("handshake complete (consented); subscribing for measurement")
                     if (stopAfterHandshake) return SessionOutcome.Completed(null)
                     return subscribeAndMeasure(events)
                 }
@@ -447,6 +456,7 @@ class GattSession(
                     if (current.registrationRejected) {
                         diagnostics.increment(DiagnosticsCounterKey.REGISTRATION_REJECTED)
                     }
+                    log("handshake aborted: ${current.reason}")
                     return SessionOutcome.HandshakeFailed(current.reason)
                 }
             }
@@ -533,6 +543,10 @@ class GattSession(
             val decoded = decoder.onNotification(frame.char, frame.value)
             if (decoded is DecodeEvent.Stable) return finishEmission(events, decoded.reading)
         }
+        // Settling in to listen, possibly for minutes: drop to a low-duty
+        // interval so the wait costs the scale's batteries as little as possible.
+        transport.requestLowPower()
+        log("subscribed; listening for a weigh-in for up to ${SessionBudget.FIRST_INDICATION_TIMEOUT}")
         return awaitMeasurement(events)
     }
 
@@ -591,7 +605,16 @@ class GattSession(
     private fun decodeMeasurementFrame(
         event: TransportEvent.CharacteristicChanged,
         onMalformed: () -> Unit,
-    ): MeasureStep? = when (val decoded = decoder.onNotification(event.char, event.value)) {
+    ): MeasureStep? {
+        val decoded = decoder.onNotification(event.char, event.value)
+        // Every frame, not just the interesting ones: "the scale sent nothing"
+        // and "the scale sent something we did not understand" are different
+        // diagnoses, and this is the only place that can tell them apart.
+        log("frame on ${event.char} (${event.value.size} bytes) -> ${decoded::class.simpleName}")
+        return classifyDecoded(decoded, onMalformed)
+    }
+
+    private fun classifyDecoded(decoded: DecodeEvent, onMalformed: () -> Unit): MeasureStep? = when (decoded) {
         is DecodeEvent.Stable -> MeasureStep.Reading(decoded.reading)
 
         is DecodeEvent.Malformed -> {
@@ -644,7 +667,10 @@ class GattSession(
         step: MeasureStep,
         fallback: () -> SessionOutcome,
     ): SessionOutcome = when (step) {
-        is MeasureStep.Reading -> finishEmission(events, step.reading)
+        is MeasureStep.Reading -> {
+            log("stable reading decoded: ${step.reading.weightKg} kg, user ${step.reading.userIndex}")
+            finishEmission(events, step.reading)
+        }
         MeasureStep.AdapterOff -> flushOrElse(SessionOutcome.Missed(MissReason.ADAPTER_OFF))
         MeasureStep.Dropped -> reconnectOnce(events)
         MeasureStep.Pending -> flushOrElse(fallback())

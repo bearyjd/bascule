@@ -10,6 +10,7 @@ import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
 import com.ventouxlabs.bascule.diagnostics.LastCaptureAttempt
+import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -80,6 +81,13 @@ class ScaleViewModel(
     private val onDisarm: () -> Unit,
     private val bridgeService: BridgeServiceController,
     captureAttempts: CaptureAttemptLog,
+    /**
+     * Drops any retry throttle held against the active scale. "Weigh now"
+     * means the user is standing on it *right now*, and a backoff earned by
+     * earlier idle sessions must not be what delays that — see
+     * `ScanEnqueueCooldown.clear`.
+     */
+    private val clearCaptureThrottle: () -> Unit = {},
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     /**
@@ -199,12 +207,19 @@ class ScaleViewModel(
                 diagnostic.value = "Link or register a profile before using Weigh now."
                 return@launch
             }
-            if (config.alwaysOnBridging.first()) {
-                diagnostic.value = "Always-on foreground fallback is already scanning — nothing more to start."
-                return@launch
-            }
+            // Always-on already holds a scan open, so there is no service to
+            // start — but that scan gates on the same cooldown a bounded start
+            // clears, and a scale that advertises continuously (the BF720 does)
+            // has usually earned a long backoff by the time anyone steps on.
+            // Clearing it is the whole value of the button in this mode.
+            val alwaysOn = config.alwaysOnBridging.first()
+            withContext(ioDispatcher) { clearCaptureThrottle() }
             mutableWeighNowActive.value = true
-            bridgeService.startBounded(WEIGH_NOW_DURATION_MILLIS)
+            if (alwaysOn) {
+                diagnostic.value = "Always-on is already scanning — retry throttle cleared, step on now."
+            } else {
+                bridgeService.startBounded(WEIGH_NOW_DURATION_MILLIS)
+            }
             delay(WEIGH_NOW_DURATION_MILLIS)
             mutableWeighNowActive.value = false
         }
@@ -240,7 +255,12 @@ class ScaleViewModel(
         private const val MAX_LABEL_LENGTH = 40
         private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
 
-        /** Past `SessionBudget.HARD_SESSION_CEILING` (90s), with margin for discovery time ahead of that session. */
+        /**
+         * Only the *scan* is bounded by this; the session it enqueues runs in
+         * `ScaleSessionWorker` for its own budget regardless. So this needs to
+         * outlast scan-to-enqueue latency and give the user time to step on,
+         * not contain a whole session — which is now minutes long.
+         */
         const val WEIGH_NOW_DURATION_MILLIS = 120_000L
         const val REGISTRY_UNREADABLE_MESSAGE =
             "Your saved scale registrations could not be read and were reset. Re-link or re-register your scale."
@@ -252,6 +272,10 @@ class ScaleViewModel(
                     onArm = app.scaleScanner::arm, onDisarm = app.scaleScanner::disarm,
                     bridgeService = app.bridgeServiceController,
                     captureAttempts = app.captureAttemptLog,
+                    clearCaptureThrottle = {
+                        app.scaleProfileStore.activeProfile.value?.deviceAddress
+                            ?.let { ScanEnqueueCooldown(app).clear(it) }
+                    },
                 )
             }
         }

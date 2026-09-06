@@ -326,6 +326,39 @@ class ScanEnqueueCooldownTest {
         assertTrue("a cleared address must back off as a first failure", cooldown.claim(ADDRESS))
     }
 
+    /** A pause is short and flat — the next listen must start promptly. */
+    @Test
+    fun aPauseExpiresAfterOneBackoffRegardlessOfHistory() {
+        cooldown.claim(ADDRESS)
+        repeat(4) {
+            cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+            now += WINDOW_MILLIS
+            cooldown.claim(ADDRESS)
+        }
+
+        cooldown.settle(ADDRESS, CooldownDisposition.PAUSE)
+        now += BACKOFF_MILLIS
+
+        assertTrue("an idle listen must not inherit an escalated backoff", cooldown.claim(ADDRESS))
+    }
+
+    /** ...and it must not feed the streak either way. */
+    @Test
+    fun aPauseLeavesTheEscalationStreakUntouched() {
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += WINDOW_MILLIS
+        cooldown.claim(ADDRESS)
+        cooldown.settle(ADDRESS, CooldownDisposition.PAUSE)
+        now += WINDOW_MILLIS
+        cooldown.claim(ADDRESS)
+
+        cooldown.settle(ADDRESS, CooldownDisposition.BACKOFF)
+        now += BACKOFF_MILLIS * 2
+
+        assertTrue("a pause between two failures must not have counted as a third", cooldown.claim(ADDRESS))
+    }
+
     /**
      * The streak counters share the file with the claim stamps, and [claim]'s
      * pruning pass reads every other key as a timestamp — so they must not be

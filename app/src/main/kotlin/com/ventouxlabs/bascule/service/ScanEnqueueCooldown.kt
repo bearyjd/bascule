@@ -10,9 +10,9 @@ import android.content.SharedPreferences
  * because `ExistingWorkPolicy` only suppresses work that is actually in flight.
  *
  * The window is *claimed* when a session is enqueued and [settle]d when that
- * session ends. It is sized well past `SessionBudget`'s 90s hard ceiling so
- * that even a session running to that ceiling leaves several minutes of quiet
- * behind it.
+ * session ends. It is sized past `SessionBudget.HARD_SESSION_CEILING` so that
+ * a session running to the ceiling cannot have its own advertisements re-enqueue
+ * against it — see [DEFAULT_WINDOW_MILLIS].
  *
  * Stamping at enqueue alone used to hold a failed address down for the whole
  * window, so a session that aborted in milliseconds swallowed every retry for
@@ -103,6 +103,11 @@ internal class ScanEnqueueCooldown(
             // preceded it: the next failure after a success is a first failure.
             CooldownDisposition.HOLD -> store.edit().remove(FAIL_PREFIX + address).commit()
             CooldownDisposition.RELEASE -> clear(address)
+            // Flat and streak-neutral: an idle listen is not a failure, and
+            // escalating on it would open ever-longer gaps in exactly the
+            // coverage a long-lived session exists to provide.
+            CooldownDisposition.PAUSE ->
+                store.edit().putLong(address, clock() - (windowMillis - backoffFor(1))).commit()
             CooldownDisposition.BACKOFF -> {
                 val streak = store.getLong(FAIL_PREFIX + address, 0L) + 1
                 val remaining = backoffFor(streak)
@@ -137,7 +142,7 @@ internal class ScanEnqueueCooldown(
      * the reconnect storm this file exists to prevent, merely slower. A flat
      * *long* backoff loses the retry that makes stepping back on work. Doubling
      * keeps the first retry quick, where it is nearly always the one that
-     * matters, and decays to the old five-minute quiet if the scale genuinely
+     * matters, and decays to the full window if the scale genuinely
      * has nothing to say.
      */
     private fun backoffFor(streak: Long): Long {
@@ -147,7 +152,14 @@ internal class ScanEnqueueCooldown(
     }
 
     companion object {
-        const val DEFAULT_WINDOW_MILLIS = 5L * 60 * 1_000
+        /**
+         * Must exceed `SessionBudget.HARD_SESSION_CEILING`: the claim is what
+         * stops the 2-10/s advertisement burst from re-enqueueing against a
+         * session that is still running. A window shorter than the session
+         * would expire mid-listen and turn every remaining packet into a
+         * WorkManager query that resolves to KEEP — thousands of them.
+         */
+        const val DEFAULT_WINDOW_MILLIS = 10L * 60 * 1_000
 
         /**
          * How long an address stays quiet after a session that reached the
@@ -159,7 +171,7 @@ internal class ScanEnqueueCooldown(
         const val DEFAULT_FAILURE_BACKOFF_MILLIS = 20L * 1_000
 
         /**
-         * Five doublings takes 20s past the 5-minute window, so the cap is the
+         * Five doublings takes 20s to 640s, past the window, so the cap is the
          * window itself and further failures cannot extend it.
          */
         const val MAX_BACKOFF_DOUBLINGS = 5L
@@ -199,4 +211,13 @@ internal enum class CooldownDisposition {
     HOLD,
     BACKOFF,
     RELEASE,
+
+    /**
+     * A short, flat, streak-neutral pause. For a session that listened its
+     * whole budget and heard nothing: not a failure, so it must not escalate —
+     * the point of a long listen is to be connected when the user steps on,
+     * and an escalating gap between listens is exactly the coverage hole that
+     * made capture a lottery.
+     */
+    PAUSE,
 }

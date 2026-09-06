@@ -148,6 +148,11 @@ class AndroidGattTransport(
         gatt?.disconnect()
     }
 
+    @SuppressLint("MissingPermission")
+    override fun requestLowPower() {
+        gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
+    }
+
     override fun close() {
         gatt?.close()
         gatt = null
