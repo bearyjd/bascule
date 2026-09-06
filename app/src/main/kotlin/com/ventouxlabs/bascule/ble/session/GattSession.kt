@@ -385,10 +385,28 @@ class GattSession(
         for (op in decoder.openingSequence(discovered, clock())) {
             if (op !is GattOp.Write) continue
             issueHandshakeWrite(events, op)
-            val adapterOff = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+            var outcome = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
                 awaitWriteComplete(events, op.char)
-            } == WriteOutcome.AdapterOff
-            if (adapterOff) return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+            }
+            if (outcome == WriteOutcome.Bonding || (outcome == null && pairingObserved)) {
+                // The stack is holding this write behind pairing. Once bonded it
+                // retries the write itself, so wait for that completion afresh.
+                when (awaitBond(events)) {
+                    BondWait.Bonded -> outcome = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+                        awaitWriteComplete(events, op.char)
+                    }
+                    BondWait.Refused, BondWait.TimedOut -> return SessionOutcome.PairingRequired
+                    BondWait.Dropped -> return reconnectOnce(events)
+                    BondWait.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                }
+            }
+            if (outcome == WriteOutcome.AdapterOff) return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+            // Tolerated, but no longer silent: an unanswered write here is the
+            // first sign of a scale that is not talking to *this* phone, and
+            // the subscribe that follows will time out the same way.
+            if (outcome == null) {
+                log("opening write to ${op.char} unanswered after ${SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT}")
+            }
         }
         return null
     }
@@ -397,19 +415,73 @@ class GattSession(
         while (true) {
             when (val event = events.receive()) {
                 is TransportEvent.AdapterOff -> return WriteOutcome.AdapterOff
-                is TransportEvent.WriteComplete -> if (event.char == char) return WriteOutcome.Completed
+                is TransportEvent.WriteComplete -> if (event.char == char) {
+                    log("write to ${event.char} completed, status ${event.status}")
+                    return WriteOutcome.Completed
+                }
+                is TransportEvent.BondStateChanged -> if (event.state == BOND_BONDING) {
+                    pairingObserved = true
+                    return WriteOutcome.Bonding
+                }
                 is TransportEvent.ConnectionStateChanged,
                 is TransportEvent.ServicesDiscovered,
                 is TransportEvent.CharacteristicChanged,
                 is TransportEvent.SubscriptionEnabled,
                 is TransportEvent.MtuChanged,
-                is TransportEvent.BondStateChanged,
                 -> continue // not relevant to this write's completion
             }
         }
     }
 
-    private enum class WriteOutcome { Completed, AdapterOff }
+    private enum class WriteOutcome { Completed, AdapterOff, Bonding }
+
+    /**
+     * E5 (`00-design.md` §2.3): the BF720 requires an encrypted link for its
+     * writes. On a phone it has never met, the first write makes the Android
+     * stack start pairing and hold the operation until the user accepts the
+     * system's "Pair with BF720?" request — which takes as long as a human
+     * takes, not the 2 s a write is otherwise allowed. Found on a fresh Pixel:
+     * every session failed "could not enable User Control Point indications"
+     * exactly 2 s after the pairing request appeared, while the original phone,
+     * bonded since the first hardware session in August, never saw it.
+     *
+     * Set by whichever wait first sees `BOND_BONDING`, and consulted on a
+     * timeout so a pairing that started before the wait began is still
+     * recognised as one.
+     */
+    private var pairingObserved = false
+
+    private enum class BondWait { Bonded, Refused, TimedOut, Dropped, AdapterOff }
+
+    private suspend fun awaitBond(events: Channel<TransportEvent>): BondWait {
+        log("scale requested pairing; waiting up to ${SessionBudget.BOND_WAIT} for the user to accept")
+        val outcome = withTimeoutOrNull(SessionBudget.BOND_WAIT) { receiveBondOutcome(events) } ?: BondWait.TimedOut
+        log("pairing wait ended: $outcome")
+        // A bond that landed is consumed: a later timeout is a plain timeout
+        // again, not a second 30 s wait for a pairing that already happened.
+        if (outcome == BondWait.Bonded) pairingObserved = false
+        return outcome
+    }
+
+    /** A function, not a lambda, for the reason [receiveSubscriptionOutcome] gives. */
+    private suspend fun receiveBondOutcome(events: Channel<TransportEvent>): BondWait {
+        while (true) {
+            when (val event = events.receive()) {
+                is TransportEvent.AdapterOff -> return BondWait.AdapterOff
+                is TransportEvent.ConnectionStateChanged -> if (!event.connected) return BondWait.Dropped
+                is TransportEvent.BondStateChanged -> when (event.state) {
+                    BOND_BONDED -> return BondWait.Bonded
+                    BOND_NONE -> return BondWait.Refused
+                }
+                is TransportEvent.ServicesDiscovered,
+                is TransportEvent.CharacteristicChanged,
+                is TransportEvent.WriteComplete,
+                is TransportEvent.SubscriptionEnabled,
+                is TransportEvent.MtuChanged,
+                -> Unit // the held operation completes after the bond, not during it
+            }
+        }
+    }
 
     /**
      * Drives `beginHandshake`/`onHandshakeEvent` (ADR-007, RISK-1) — one step
@@ -477,6 +549,9 @@ class GattSession(
         return when (awaitSubscription(events, responseChar)) {
             SubscriptionOutcome.Enabled -> null
             SubscriptionOutcome.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+            SubscriptionOutcome.PairingRequired -> SessionOutcome.PairingRequired
+            SubscriptionOutcome.Dropped -> reconnectOnce(events)
+            SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
             SubscriptionOutcome.Failed -> SessionOutcome.HandshakeFailed(
                 "could not enable User Control Point indications",
             )
@@ -487,9 +562,26 @@ class GattSession(
         events: Channel<TransportEvent>,
         char: UUID,
         deferredFrames: MutableList<TransportEvent.CharacteristicChanged>? = null,
-    ): SubscriptionOutcome = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
-        receiveSubscriptionOutcome(events, char, deferredFrames)
-    } ?: SubscriptionOutcome.Failed
+    ): SubscriptionOutcome {
+        val first = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+            receiveSubscriptionOutcome(events, char, deferredFrames)
+        }
+        if (first == SubscriptionOutcome.Bonding || (first == null && pairingObserved)) {
+            // Same shape as the opening write: the CCCD write is held behind
+            // pairing and completes on its own once the link is encrypted.
+            return when (awaitBond(events)) {
+                BondWait.Bonded -> withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+                    receiveSubscriptionOutcome(events, char, deferredFrames)
+                } ?: SubscriptionOutcome.Failed.also { log("subscription to $char unanswered even after bonding") }
+                BondWait.Refused, BondWait.TimedOut -> SubscriptionOutcome.PairingRequired
+                BondWait.Dropped -> SubscriptionOutcome.Dropped
+                BondWait.AdapterOff -> SubscriptionOutcome.AdapterOff
+            }
+        }
+        return first ?: SubscriptionOutcome.Failed.also {
+            log("subscription to $char unanswered after ${SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT}")
+        }
+    }
 
     /**
      * Split out of [awaitSubscription] rather than living inside its
@@ -512,20 +604,29 @@ class GattSession(
                 is TransportEvent.SubscriptionEnabled ->
                     if (event.char == char) return subscriptionOutcome(event.status)
                 is TransportEvent.CharacteristicChanged -> deferredFrames?.add(event)
+                is TransportEvent.BondStateChanged -> if (event.state == BOND_BONDING) {
+                    pairingObserved = true
+                    return SubscriptionOutcome.Bonding
+                }
                 is TransportEvent.ConnectionStateChanged,
                 is TransportEvent.ServicesDiscovered,
                 is TransportEvent.WriteComplete,
                 is TransportEvent.MtuChanged,
-                is TransportEvent.BondStateChanged,
                 -> continue // not relevant to this subscription
             }
         }
     }
 
-    private fun subscriptionOutcome(status: Int): SubscriptionOutcome =
-        if (status == 0) SubscriptionOutcome.Enabled else SubscriptionOutcome.Failed
+    private fun subscriptionOutcome(status: Int): SubscriptionOutcome {
+        if (status != 0) log("subscription refused, status $status")
+        return if (status == 0) SubscriptionOutcome.Enabled else SubscriptionOutcome.Failed
+    }
 
-    private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff }
+    /**
+     * [Bonding] is internal to [awaitSubscription], which resolves it into one
+     * of the others before any caller sees it.
+     */
+    private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff, Bonding, PairingRequired, Dropped }
 
     private suspend fun subscribeAndMeasure(events: Channel<TransportEvent>): SessionOutcome {
         val deferredFrames = mutableListOf<TransportEvent.CharacteristicChanged>()
@@ -534,6 +635,9 @@ class GattSession(
             when (awaitSubscription(events, characteristic, deferredFrames)) {
                 SubscriptionOutcome.Enabled -> Unit
                 SubscriptionOutcome.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                SubscriptionOutcome.PairingRequired -> return SessionOutcome.PairingRequired
+                SubscriptionOutcome.Dropped -> return reconnectOnce(events)
+                SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
                 SubscriptionOutcome.Failed -> return SessionOutcome.HandshakeFailed(
                     "could not enable a measurement indication",
                 )
@@ -934,6 +1038,11 @@ class GattSession(
     }
 
     private companion object {
+        /** Mirror `BluetoothDevice.BOND_*` — kept local so this class needs no Android import in the JVM lane. */
+        const val BOND_NONE = 10
+        const val BOND_BONDING = 11
+        const val BOND_BONDED = 12
+
         /** Android's catch-all `GATT_ERROR` (E2). */
         const val STATUS_GATT_ERROR = 133
 

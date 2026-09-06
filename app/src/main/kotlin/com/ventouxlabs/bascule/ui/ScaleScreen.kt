@@ -200,4 +200,6 @@ private fun describe(outcome: CaptureOutcome): String = when (outcome) {
     CaptureOutcome.INCOMPATIBLE -> "that device is not a scale Bascule can read"
     CaptureOutcome.FAILED -> "something went wrong — step on again"
     CaptureOutcome.IDLE -> "listened to your scale, nobody stepped on"
+    CaptureOutcome.NEEDS_PAIRING ->
+        "your scale wants to pair with this phone — accept the Bluetooth pairing request, then step on again"
 }

@@ -194,6 +194,7 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         is SessionOutcome.DecodeFailure -> "decode failure (${outcome.malformedCount} malformed frames)"
         SessionOutcome.Incompatible -> "device is not a compatible scale"
         is SessionOutcome.HandshakeFailed -> "handshake failed (${outcome.detail})"
+        SessionOutcome.PairingRequired -> "pairing required (the Bluetooth pairing request was not accepted)"
     }
 
     private suspend fun resultFor(
@@ -243,6 +244,11 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         // here: E6 already ran its own ack ladder inside the session, and a
         // refused registration needs the user to re-pair, not another attempt.
         is SessionOutcome.HandshakeFailed -> SessionExit(Result.failure(), SessionExitReason.HANDSHAKE_FAILED)
+
+        // Needs the user, not a retry — but the system re-raises its pairing
+        // request on the next session, so backing off (rather than holding)
+        // keeps giving them chances at a widening interval.
+        SessionOutcome.PairingRequired -> SessionExit(Result.failure(), SessionExitReason.PAIRING_REQUIRED)
     }
 
     /** Pairs a worker result with the reason, so [doWork] can settle on both. */
@@ -329,6 +335,9 @@ internal enum class SessionExitReason {
     INCOMPATIBLE,
     HANDSHAKE_FAILED,
 
+    /** The scale asked to pair and nobody accepted Android's request in time. */
+    PAIRING_REQUIRED,
+
     /**
      * The session threw, or was cancelled before it could classify itself.
      * Present so that the `finally` in [ScaleSessionWorker.doWork] always has a
@@ -400,6 +409,7 @@ internal fun cooldownDispositionFor(reason: SessionExitReason): CooldownDisposit
     SessionExitReason.MISSED,
     SessionExitReason.DECODE_FAILURE,
     SessionExitReason.HANDSHAKE_FAILED,
+    SessionExitReason.PAIRING_REQUIRED,
     SessionExitReason.UNEXPECTED_ERROR,
     -> CooldownDisposition.BACKOFF
 }
@@ -442,4 +452,6 @@ internal fun captureOutcomeFor(reason: SessionExitReason): CaptureOutcome = when
     -> CaptureOutcome.NO_READING
 
     SessionExitReason.UNEXPECTED_ERROR -> CaptureOutcome.FAILED
+
+    SessionExitReason.PAIRING_REQUIRED -> CaptureOutcome.NEEDS_PAIRING
 }

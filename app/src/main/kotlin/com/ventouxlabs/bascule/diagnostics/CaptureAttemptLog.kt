@@ -40,6 +40,9 @@ enum class CaptureOutcome {
 
     /** Connected and listened for the whole window; nobody stepped on. */
     IDLE,
+
+    /** The scale asked this phone to pair and nobody accepted Android's request. Needs the user. */
+    NEEDS_PAIRING,
 }
 
 data class LastCaptureAttempt(val atMillis: Long, val outcome: CaptureOutcome)

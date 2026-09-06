@@ -95,6 +95,16 @@ class CooldownDispositionTest {
     }
 
     /**
+     * Needs the user, not a retry; but Android re-raises its pairing request on
+     * the next session, so a widening backoff keeps offering chances without a
+     * five-minute lockout between them.
+     */
+    @Test
+    fun aPairingThatNeedsTheUserBacksOffRatherThanHolding() {
+        assertEquals(CooldownDisposition.BACKOFF, cooldownDispositionFor(SessionExitReason.PAIRING_REQUIRED))
+    }
+
+    /**
      * The back door the `finally` in `doWork` exists to shut: a session that
      * threw or was cancelled must still release its hold, or an unclassified
      * failure reinstates the five-minute lockout without ever being named.

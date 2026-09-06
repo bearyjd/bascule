@@ -104,6 +104,8 @@ class AndroidScaleRegistrar(
         return ScaleRegistrationResult.Failure(
             when (outcome) {
                 is SessionOutcome.HandshakeFailed -> outcome.detail
+                SessionOutcome.PairingRequired ->
+                    "The scale asked to pair with this phone. Accept the Bluetooth pairing request, then try again."
                 SessionOutcome.Incompatible -> "The discovered device is not a compatible BF720"
                 is SessionOutcome.Missed -> "Registration did not complete (${outcome.reason.name.lowercase()})"
                 is SessionOutcome.DecodeFailure -> "The scale returned an unreadable registration response"

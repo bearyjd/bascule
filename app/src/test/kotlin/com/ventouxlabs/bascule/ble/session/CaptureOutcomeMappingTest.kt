@@ -61,6 +61,12 @@ class CaptureOutcomeMappingTest {
         assertEquals(CaptureOutcome.IDLE, captureOutcomeFor(SessionExitReason.IDLE))
     }
 
+    /** The one outcome whose recovery is entirely in the user's hands must say so. */
+    @Test
+    fun aPairingThatNeedsTheUserReadsAsNeedsPairing() {
+        assertEquals(CaptureOutcome.NEEDS_PAIRING, captureOutcomeFor(SessionExitReason.PAIRING_REQUIRED))
+    }
+
     @Test
     fun reachingTheScaleAndGettingNothingReadsAsNoReading() {
         listOf(

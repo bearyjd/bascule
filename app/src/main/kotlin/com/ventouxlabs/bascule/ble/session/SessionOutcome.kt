@@ -18,6 +18,15 @@ sealed interface SessionOutcome {
     data class Missed(val reason: MissReason) : SessionOutcome
     data object Incompatible : SessionOutcome
     data class HandshakeFailed(val detail: String) : SessionOutcome
+
+    /**
+     * E5b: the scale demanded pairing and the user did not accept the system's
+     * request within `SessionBudget.BOND_WAIT` (or refused it). Its own outcome
+     * rather than a [HandshakeFailed] detail string because the recovery is
+     * unique — it needs the user, in Android's Bluetooth UI, not a retry — and
+     * the worker and registrar both have to say so in words.
+     */
+    data object PairingRequired : SessionOutcome
     data class DecodeFailure(val malformedCount: Int) : SessionOutcome
 }
 

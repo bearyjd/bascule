@@ -29,6 +29,11 @@ class FakeGattTransport(
     private val connectOutcomes: List<ConnectOutcome> = listOf(ConnectOutcome.Success),
     private val discoverOutcome: DiscoverOutcome = DiscoverOutcome.Success,
     /**
+     * Subscriptions whose `SubscriptionEnabled` is withheld until
+     * [completeSubscription] — models a CCCD write held behind pairing.
+     */
+    private val suppressSubscriptionFor: Set<UUID> = emptySet(),
+    /**
      * Characteristics whose write never gets a `WriteComplete` — for proving a
      * best-effort write (the Current Time opening write, §4.4) truly doesn't
      * block or fail the session it's part of.
@@ -132,7 +137,17 @@ class FakeGattTransport(
     private fun subscribe(char: UUID, kind: SubscriptionKind) {
         _callOrder += "subscribe:$char"
         subscribedCharacteristics[char] = kind
-        emit(TransportEvent.SubscriptionEnabled(char, kind, status = 0))
+        if (char !in suppressSubscriptionFor) emit(TransportEvent.SubscriptionEnabled(char, kind, status = 0))
+    }
+
+    /** The held CCCD write finally completing — what the stack does once the link is encrypted. */
+    fun completeSubscription(char: UUID) {
+        emit(TransportEvent.SubscriptionEnabled(char, subscribedCharacteristics.getValue(char), status = 0))
+    }
+
+    /** A `BOND_STATE_CHANGED` broadcast for the device, as the real transport relays it. */
+    fun bondStateChanged(state: Int) {
+        emit(TransportEvent.BondStateChanged(state))
     }
 
     override fun requestMtu(mtu: Int) {
