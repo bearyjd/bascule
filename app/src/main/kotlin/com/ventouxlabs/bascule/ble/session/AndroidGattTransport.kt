@@ -13,6 +13,7 @@ import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -163,6 +164,18 @@ class AndroidGattTransport(
         }
     }
 
+    /**
+     * `RECEIVER_EXPORTED`, deliberately. On Android 14+ a non-exported
+     * context-registered receiver only hears broadcasts from its own app or
+     * the system uid, and `ACTION_BOND_STATE_CHANGED` is sent by the Bluetooth
+     * stack under its own uid — found on hardware, where the stack's
+     * `bond_state_changed → BONDING` was logged 100 ms into a write and this
+     * receiver never fired, so the session's E5 wait never engaged. Both
+     * actions here are protected broadcasts (declared in the framework
+     * manifest), which only privileged senders can emit, so exporting the
+     * receiver admits nothing an app could forge; and it only ever relays
+     * events for the one device this transport was built for.
+     */
     private fun registerAdapterReceiver() {
         if (receiverRegistered) return
         ContextCompat.registerReceiver(
@@ -171,7 +184,7 @@ class AndroidGattTransport(
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED).apply {
                 addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             },
-            ContextCompat.RECEIVER_NOT_EXPORTED,
+            ContextCompat.RECEIVER_EXPORTED,
         )
         receiverRegistered = true
     }
@@ -192,12 +205,13 @@ class AndroidGattTransport(
                         @Suppress("DEPRECATION")
                         intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                     }
+                    val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+                    // Low volume (a handful of transitions per pairing) and the
+                    // only evidence, from outside the process, that the E5 path
+                    // is being fed at all.
+                    Log.i(TAG, "bond state $state for ${changedDevice?.address} (this transport: ${device.address})")
                     if (changedDevice?.address == device.address) {
-                        emit(
-                            TransportEvent.BondStateChanged(
-                                intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE),
-                            ),
-                        )
+                        emit(TransportEvent.BondStateChanged(state))
                     }
                 }
             }
@@ -263,6 +277,7 @@ class AndroidGattTransport(
     private companion object {
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         const val EVENT_REPLAY = 128
+        private const val TAG = "AndroidGattTransport"
         const val STATUS_OPERATION_NOT_STARTED = -1
         const val STATUS_DESCRIPTOR_MISSING = -2
 
