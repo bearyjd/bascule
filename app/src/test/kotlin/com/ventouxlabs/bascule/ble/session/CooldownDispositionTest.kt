@@ -71,6 +71,30 @@ class CooldownDispositionTest {
     }
 
     /**
+     * Found on hardware: the BF720 drops an idle link on its own timer and keeps
+     * advertising. Treating that as a failure fed the escalating backoff and
+     * opened 80 s+ gaps between listens — the scale's idle timer became a
+     * capture gap. `DROPPED` is only ever produced after subscribing.
+     */
+    @Test
+    fun theScaleDroppingAnIdleLinkIsIdleNotAFailure() {
+        assertEquals(SessionExitReason.IDLE, exitReasonFor(MissReason.DROPPED))
+        assertEquals(SessionExitReason.IDLE, exitReasonFor(MissReason.NO_MEASUREMENT))
+    }
+
+    /** A miss before the session could hear anything is still a real miss. */
+    @Test
+    fun aMissBeforeSubscribingIsStillAMiss() {
+        listOf(
+            MissReason.CONNECT_TIMEOUT,
+            MissReason.GATT_ERROR,
+            MissReason.DISCOVERY_FAILED,
+            MissReason.GRACEFUL_DISCONNECT,
+            MissReason.ADAPTER_OFF,
+        ).forEach { assertEquals("$it", SessionExitReason.MISSED, exitReasonFor(it)) }
+    }
+
+    /**
      * The back door the `finally` in `doWork` exists to shut: a session that
      * threw or was cancelled must still release its hold, or an unclassified
      * failure reinstates the five-minute lockout without ever being named.

@@ -27,13 +27,15 @@ import org.junit.Test
  * `disconnectDuringMeasurementReconnectsOnce`). See
  * `.claude/PRPs/plans/scale-admin-testing-completeness.plan.md` Task 1.
  *
- * That E8 divergence has since been closed: the session now makes exactly one
- * reconnect attempt within [SessionBudget.RECONNECT_ONCE_WINDOW] and re-runs
+ * That E8 divergence has since been closed: the session reconnects after a
+ * drop — one attempt per drop, inside [SessionBudget.RECONNECT_ONCE_WINDOW],
+ * up to [SessionBudget.RECONNECT_MAX_ATTEMPTS] drops per session — and re-runs
  * the whole post-connect sequence, because neither the CCCD subscriptions nor
  * the UDS consent survive the link. The test that pinned the old
  * no-reconnect behaviour is replaced by
- * `disconnectDuringMeasurementReconnectsOnce` and
- * `aFailedReconnectGivesUpWithDropped`.
+ * `disconnectDuringMeasurementReconnectsOnce`,
+ * `aFailedReconnectGivesUpWithDropped` and
+ * `theSessionRidesThroughRepeatedIdleDropsUpToTheLimit`.
  *
  * Also discovered while writing these tests: `MeasurementCorrelator`'s
  * `MAX_EMISSIONS_PER_SESSION = 1` latch means a second `Stable` decode is
@@ -167,7 +169,7 @@ class GattSessionMeasureTest {
         // that only re-opened the link would pass an outcome-only check and
         // then receive nothing from a real scale, whose CCCDs and UDS consent
         // did not survive the drop. The second subscribe is the proof.
-        assertEquals("E8 allows exactly one reconnect attempt", 2, transport.connectCallCount)
+        assertEquals("one drop earns one reconnect", 2, transport.connectCallCount)
         assertEquals(
             "the reconnected leg must re-subscribe, not just reconnect",
             2,
@@ -186,6 +188,39 @@ class GattSessionMeasureTest {
         )
     }
 
+    /**
+     * Found on hardware: the BF720 ends an idle link on its own timer and keeps
+     * advertising. A session that listens for minutes must ride through that
+     * — each drop is one reconnect, and only past the limit does it give up.
+     */
+    @Test
+    fun theSessionRidesThroughRepeatedIdleDropsUpToTheLimit() = runTest {
+        val transport = consentedTransport()
+        val deferred = async { session(transport).run() }
+        runCurrent()
+
+        repeat(SessionBudget.RECONNECT_MAX_ATTEMPTS) {
+            transport.dropConnection()
+            runCurrent()
+        }
+        assertEquals(
+            "one reconnect per drop, for every drop inside the limit",
+            1 + SessionBudget.RECONNECT_MAX_ATTEMPTS,
+            transport.connectCallCount,
+        )
+        assertTrue("still listening after the last permitted reconnect", deferred.isActive)
+
+        transport.dropConnection()
+        advanceUntilIdle()
+
+        assertEquals(SessionOutcome.Missed(MissReason.DROPPED), deferred.await())
+        assertEquals(
+            "the drop past the limit must not reconnect again",
+            1 + SessionBudget.RECONNECT_MAX_ATTEMPTS,
+            transport.connectCallCount,
+        )
+    }
+
     @Test
     fun aFailedReconnectGivesUpWithDropped() = runTest {
         val transport = consentedTransport(listOf(ConnectOutcome.Success, ConnectOutcome.Timeout))
@@ -201,7 +236,11 @@ class GattSessionMeasureTest {
         advanceUntilIdle()
 
         assertEquals(SessionOutcome.Missed(MissReason.DROPPED), deferred.await())
-        assertEquals("exactly one reconnect, then give up", 2, transport.connectCallCount)
+        assertEquals(
+            "a reconnect whose connect fails ends the session; no second try inside the window",
+            2,
+            transport.connectCallCount,
+        )
     }
 
     /**

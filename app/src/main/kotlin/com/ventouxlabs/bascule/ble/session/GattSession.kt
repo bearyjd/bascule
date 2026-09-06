@@ -714,10 +714,13 @@ class GattSession(
         (decoder.flush() as? DecodeEvent.Stable)?.reading
 
     /**
-     * E8 (`00-design.md` §2.3): a disconnect while `MEASURING` gets exactly one
-     * reconnect attempt inside [SessionBudget.RECONNECT_ONCE_WINDOW] before the
-     * session gives up — the scale is often still powered and still under the
-     * user's feet.
+     * E8 (`00-design.md` §2.3): a disconnect while `MEASURING` gets up to
+     * [SessionBudget.RECONNECT_MAX_ATTEMPTS] reconnects, each inside
+     * [SessionBudget.RECONNECT_ONCE_WINDOW], before the session gives up. The
+     * design's original "exactly one" assumed the drop meant the scale was
+     * powering down; on the BF720 it is the scale's own idle timer ending a
+     * link it will happily re-accept seconds later, and a session that listens
+     * for minutes has to ride through that or the timer becomes a capture gap.
      *
      * The whole post-connect sequence runs again, not just the wait loop:
      * neither the CCCD subscriptions nor the User Data Service consent survive

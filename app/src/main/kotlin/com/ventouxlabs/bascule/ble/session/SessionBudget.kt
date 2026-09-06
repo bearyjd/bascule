@@ -80,14 +80,25 @@ object SessionBudget {
     const val NO_MEASUREMENT_STREAK_NOTIFY_THRESHOLD: Int = 3
 
     /**
-     * E8: the window for the single reconnect attempt allowed after the link
-     * drops mid-`MEASURING`. The scale is usually still powered at that point,
-     * which is why one attempt is worth making and a second is not.
+     * E8: the window for each reconnect attempt after the link drops
+     * mid-`MEASURING`.
+     *
+     * Was 5 s, which hardware showed is shorter than a routine connect to the
+     * BF720 (4-6 s observed), so the single reconnect the old design allowed
+     * nearly always "failed" and the session ended `DROPPED`. Now matches the
+     * first-connect attempt timeout: a reconnect is the same operation.
      */
-    val RECONNECT_ONCE_WINDOW: Duration = 5.seconds
+    val RECONNECT_ONCE_WINDOW: Duration = CONNECT_ATTEMPT_TIMEOUT
 
-    /** E8: "exactly one" reconnect attempt before the session gives up. */
-    const val RECONNECT_MAX_ATTEMPTS: Int = 1
+    /**
+     * E8: reconnects allowed per session. The BF720 drops an idle link on its
+     * own timer (2-15 min, inconsistent) and keeps advertising, so a session
+     * that listens for minutes should expect to be dropped and reconnect —
+     * ending the session on the first drop is what turns the scale's idle
+     * timer into a capture gap. Three keeps a genuinely gone scale from
+     * looping; the hard ceiling bounds the whole session regardless.
+     */
+    const val RECONNECT_MAX_ATTEMPTS: Int = 3
 
     /** E17: correlation window for a buffered Weight Measurement. */
     val BODY_COMPOSITION_CORRELATION_WINDOW: Duration = 4.seconds

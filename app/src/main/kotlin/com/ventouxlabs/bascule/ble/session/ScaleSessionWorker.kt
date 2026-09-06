@@ -219,13 +219,10 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
             )
         }
 
-        // NO_MEASUREMENT after a full listen is the scale idling, not the
-        // session failing — the two need different cooldown treatment.
-        is SessionOutcome.Missed -> when (outcome.reason) {
-            MissReason.NO_MEASUREMENT -> SessionExit(Result.success(), SessionExitReason.IDLE)
-            MissReason.ADAPTER_OFF -> SessionExit(Result.retry(), SessionExitReason.MISSED)
-            else -> SessionExit(Result.success(), SessionExitReason.MISSED)
-        }
+        is SessionOutcome.Missed -> SessionExit(
+            if (outcome.reason == MissReason.ADAPTER_OFF) Result.retry() else Result.success(),
+            exitReasonFor(outcome.reason),
+        )
 
         // Transient RF corruption during an otherwise healthy session, so it
         // gets the same treatment as ADAPTER_OFF above rather than sharing
@@ -322,7 +319,10 @@ internal enum class SessionExitReason {
     CAPTURED,
     COMPLETED_WITHOUT_READING,
 
-    /** Listened for the whole budget and nobody stepped on. Not a failure. */
+    /**
+     * Listened and nobody stepped on — the budget ran out, or the scale ended
+     * the link on its own idle timer. Not a failure either way.
+     */
     IDLE,
     MISSED,
     DECODE_FAILURE,
@@ -336,6 +336,31 @@ internal enum class SessionExitReason {
      * would reinstate the five-minute lockout by the back door.
      */
     UNEXPECTED_ERROR,
+}
+
+/**
+ * Which exit a miss is. Pure, for the same testability reason as the two
+ * mappings below it.
+ *
+ * Two misses are the scale idling rather than the session failing, and must
+ * not feed the escalating backoff: `NO_MEASUREMENT` is a listen that ran its
+ * whole budget, and `DROPPED` is the scale ending the link on its own idle
+ * timer — [GattSession.reconnectOnce] is the only producer of `DROPPED`, and it
+ * is reachable only from `MEASURING`, so a `DROPPED` is always post-subscribe.
+ * Every other miss happened before the session was in a position to hear a
+ * weigh-in at all.
+ */
+internal fun exitReasonFor(reason: MissReason): SessionExitReason = when (reason) {
+    MissReason.NO_MEASUREMENT, MissReason.DROPPED -> SessionExitReason.IDLE
+    MissReason.CONNECT_TIMEOUT,
+    MissReason.CONTENTION,
+    MissReason.QUOTA,
+    MissReason.BOND_FAILED,
+    MissReason.ADAPTER_OFF,
+    MissReason.GATT_ERROR,
+    MissReason.DISCOVERY_FAILED,
+    MissReason.GRACEFUL_DISCONNECT,
+    -> SessionExitReason.MISSED
 }
 
 /**
