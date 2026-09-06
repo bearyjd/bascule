@@ -18,6 +18,61 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-05, later: live on hardware — fix confirmed, one regression caught
+
+The Pixel came back on USB, so this session got the hardware checkpoint
+every previous one lacked. Build installed with `adb install -r`
+(profiles intact), launches clean, Scale screen renders.
+
+**The cooldown fix is confirmed working, observed not inferred.** A
+session ended `NO_READING` at 22:39:45 and a new one was claimed at
+22:40:24 — 39s later. Under the old code that retry was impossible until
+22:44:45. Three further sessions ran during a watched window (22:41:13,
+22:42:47, 22:44:15), each retrying ~34s after the last.
+
+**The BLE path is healthy.** `dumpsys bluetooth_manager` shows repeated
+`GATT_CH_OPEN` to `…:36:91`, and every session reached
+`NO_MEASUREMENT` — which is the *connected, subscribed, waited out
+FIRST_INDICATION_TIMEOUT* outcome, not a connect or handshake failure.
+Connect/handshake reliability is not the problem it was assumed to be.
+**The user confirmed they were not standing on the scale**, so these are
+the scale idling and `NO_MEASUREMENT` is correct for them.
+
+**That immediately exposed a regression this session introduced.** A flat
+20s backoff meant the phone reconnected to an idle-but-advertising scale
+every ~70s indefinitely — the reconnect storm `ScanEnqueueCooldown`
+exists to prevent, merely slower. Fixed in `57ffdff`: the backoff doubles
+per consecutive failure (20s, 40s, 80s …) capped at the window, and a
+capture resets the streak. Worth noting how this was found — a flat
+backoff looks obviously correct in review and is obviously wrong after
+four minutes of watching real hardware.
+
+**And that escalation would have broken "Weigh now."**
+`BridgeForegroundService`'s scan gates on `claim`, and `weighNow` reaches
+the radio through exactly that path, so a long enough backoff would have
+swallowed a deliberate press — the one control the user has. A bounded
+start now clears the address outright.
+
+**Config changed at the user's request** (not silently): "Automatic
+background capture" was OFF, so `ScaleScanner.arm()` was returning false
+and the low-power PendingIntent scan was never registered — the app was
+running entirely on the always-on service's active scan. Now on; the
+scan is registered with the stack and History's "Automatic capture is
+off" nag is gone.
+
+**Two open items found on-device, neither fixed:**
+
+- **Two profiles share one MAC**: `bryn` (slot 2) and `jd` (slot 1), both
+  `E7:DB:51:F1:36:91`. `jd` is active. `ReadingIngestor` marks a reading
+  `PENDING` only when the matched profile *is* the active one, else
+  `HELD_CONFIRM` — stored and never delivered. No row has hit that path
+  yet, but a measurement attributed to slot 2 would silently never sync,
+  and would read exactly as "syncs are unreliable".
+- **Still no confirmed end-to-end capture on this build.** Every session
+  observed was an idle scale. One real weigh-in is still owed.
+
+610 tests, detekt clean.
+
 ## 2026-09-05: why capture "works sometimes, at random" — found, fixed
 
 User report, verbatim: *"connections are not reliable, syncs are not
