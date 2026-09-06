@@ -80,6 +80,19 @@ ever-longer coverage gaps. Notification now reads "Listening to your scale
   `ReadingIngestor` would have stranded a slot-2 reading as
   `HELD_CONFIRM`.
 
+**Then the long-listen build ran for an hour and showed its own flaw
+(`1e8b4de`).** `fails:` hit 3 and every attempt read `NO_READING`, not
+`IDLE`: sessions were not reaching their 8-minute budget. The BF720 ends
+an idle link on its own timer, and E8's single reconnect ran in a 5 s
+window — shorter than this scale's 4-6 s connect — so it nearly always
+"failed", the session ended `DROPPED`, and the escalating backoff turned
+the scale's idle timer into 20/40/80 s capture gaps. Now: reconnect window
+= `CONNECT_ATTEMPT_TIMEOUT`, up to 3 drops per session, and `DROPPED`
+classifies as `IDLE` (it is only ever produced post-subscribe). A full
+cycle was then observed on device: subscribed 11:14:37 → `NO_MEASUREMENT`
+at exactly 11:22:37 → recorded `IDLE` → 20 s pause → new session
+subscribed 11:23:16. A 39 s gap per 8 min ≈ 95% coverage.
+
 **Still not proven: an end-to-end capture on the long-listen build.** The
 phone dropped off USB mid-capture (second time this session — the Pixel's
 USB link is flaky over long sessions; keep captures short and re-check
@@ -96,7 +109,7 @@ alternative — fetching *stored* measurements over the proprietary
 to use — would let sessions be seconds long again, and is the right next
 design conversation if battery turns out to matter. Not attempted.
 
-616 tests, detekt clean.
+619 tests, detekt clean.
 
 ## 2026-09-05, later: live on hardware — fix confirmed, one regression caught
 
