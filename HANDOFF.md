@@ -18,6 +18,44 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-06, later: a fresh phone could never pair — E5 implemented (`1519970`)
+
+The user handed over a second phone (Pixel 10 Pro Fold, a dev bench) and
+the very first session on it exposed the bug that would have hit **every
+new install**: connect, discover, then `HandshakeFailed("could not enable
+User Control Point indications")` — three for three, with the app's new
+write/subscribe logging showing both the Current Time write and the UCP
+CCCD write simply unanswered for their 2 s each.
+
+The stack log had the answer 30 ms after `onSearchComplete`:
+`bond_state_changed → BT_BOND_STATE_BONDING (LE_LEGACY)` and
+`sendPairingRequestIntent … variant=3`, and a **"Pairing request — Tap to
+pair with BF720"** notification sitting in the phone's shade. The BF720
+demands an encrypted link for its writes; on a phone it has never met the
+Android stack starts pairing on the first write and holds the operation
+until a human accepts. The Pixel 9 never showed any of this because it
+has been bonded since the August hardware session — which is also why
+three review rounds and a design doc that *names this case (E5/E5b)*
+never caught that it was unimplemented: `createBond` existed in the
+transport and nothing called it.
+
+Fix: `GattSession` recognises `BOND_BONDING` during an opening write or a
+subscription, waits up to `BOND_WAIT` (30 s), and re-awaits the held
+operation after `BOND_BONDED` (the stack retries it itself once the link
+is encrypted). Refused/unanswered → new `SessionOutcome.PairingRequired`
+→ `CaptureOutcome.NEEDS_PAIRING` ("your scale wants to pair with this
+phone — accept the Bluetooth pairing request"); the registrar says the
+same. A `pairingObserved` flag catches a pairing that began before the
+wait did, and a landed bond clears it so later timeouts stay ordinary.
+Five JVM tests; mutation-checked. 626 tests, detekt clean.
+
+**Product consequence worth stating plainly:** the Pixel 9 is bonded, so
+it never needed this; but registration/link on any other phone was
+impossible until now, and the failure was silent (2 s, `HandshakeFailed`,
+escalating backoff). The pairing request is only answerable by a human —
+the right moment to raise it is during registration, when the user is
+holding the phone; the background worker's 30 s wait is the fallback.
+
 ## 2026-09-06: the real failure model, from the wire — sessions now listen for minutes
 
 Continuation on hardware with the user present. The headline reverses an
