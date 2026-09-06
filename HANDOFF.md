@@ -914,8 +914,16 @@ background capture is currently OFF, always-on foreground fallback is ON.
   are ridden through; a phone the scale has never met pairs through the
   app's own 30 s wait; failures are recorded durably, shown on the Scale
   tab, and (when a human is needed) notified.
-- **What is not yet proven:** one live weigh-in captured by this build.
-  Every observed session was an idle scale. The user has to step on.
+- **End-to-end capture is now proven on this build (2026-09-06 17:02 EDT).**
+  The user stepped on; the log on the Pixel 10 reads: Current Time write
+  completed 17:02:16 → handshake complete (consented) 17:02:17 →
+  subscribed 17:02:18 → Weight Measurement frame (2A9D, 15 B) buffered for
+  correlation 17:02:26 → Body Composition frame (2A9C, 14 B) → Stable →
+  87.81 kg, user 1, 20.5% fat, 17:02:27 → "captured a reading" 17:02:37.
+  Row status `SENT`, attemptCount 1 — delivered to VitalForge on the first
+  try. The reading arrived 8 s after subscribing, in a session that had
+  begun 11 s before the step-on: the 20 s pause between listens was short
+  enough that the phone was already connected when the scale woke.
 - **Process docs:** `docs/prp/bascule-agent-prompt.md` governs
   phases/gates; `docs/prp/bascule-prp.md` governs requirements. The dated
   sections above are the operational history; read them newest-first.

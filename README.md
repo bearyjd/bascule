@@ -169,9 +169,8 @@ is no instrumented test lane at present, which is a known gap rather than an ove
 Pre-v1, hardware-validated on the current `main` as of 2026-09-06 against a
 physical BF720: background scanning, the consent handshake, long-lived listening
 sessions, first-time pairing on a fresh phone, durable failure reporting, and
-delivery to VitalForge are each confirmed on device. What has not yet been
-observed on this build is a live weigh-in end to end — every watched session was
-an idle scale.
+delivery to VitalForge are each confirmed on device, including one live weigh-in
+captured and delivered end to end on the first attempt.
 
 Two things to know before relying on it: the BF720 only reports a weigh-in
 *live*, to a phone already connected to it, so Bascule stays connected in
