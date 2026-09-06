@@ -1098,7 +1098,24 @@ scale-admin/hands-off-capture work.
 
 ## Hardware
 
-**Two phones as of 2026-09-06.** The Pixel 9 Pro Fold (`4A111FDKD0000C`)
+**Phone switch, 2026-09-06 afternoon — the Pixel 10 is now THE phone.**
+The user does not want two phones contending, and wants the Pixel 10 to
+run everything. Done via the app's own encrypted settings backup, driven
+through both phones' UIs over adb: exported on the Pixel 9 ("Settings
+backup exported."), pulled, pushed, imported on the Pixel 10 ("Settings
+restored.") — server `https://weight.grepon.cc`, Pounds, the
+username/password session, the **slot-1 (`jd`) credential**, both
+capture toggles. The Pixel 10's Scale tab now reads "Registered as user
+slot 1" with `jd` active; the bench slot-2 profile is gone. The backup
+file was deleted from both phones and the host afterwards (passphrase
+was `bascule-move-2026`; nothing left that uses it). **The Pixel 9's
+capture toggles are both off**, its bridge service stopped and scan
+unregistered — it no longer touches the scale. Note the settings-backup
+picker on Android 17 opens on "Recent files" and an adb-pushed file only
+appears via "Search this device" (or after a MEDIA_SCANNER_SCAN_FILE
+broadcast).
+
+(Earlier that day, superseded:) **Two phones as of 2026-09-06.** The Pixel 9 Pro Fold (`4A111FDKD0000C`)
 holds the real data — the `jd` slot-1 profile, the VitalForge login, and
 the two readings — and is the one the user carries to the scale, which is
 why it drops off USB every time they go to weigh in. A **Pixel 10 Pro
