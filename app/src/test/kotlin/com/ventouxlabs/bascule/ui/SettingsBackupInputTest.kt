@@ -112,17 +112,63 @@ class SettingsBackupInputTest {
         assertFalse(isPassphraseValid(short, short, confirmRequired = true))
     }
 
+    /**
+     * The export half of this case moved out: the floor below is the
+     * *unlock* floor now, and choosing a new passphrase is held to
+     * [SettingsBackupCodec.isPassphraseStrongEnough] instead — see
+     * [acceptsANewPassphraseSittingOnBothExportFloors].
+     */
     @Test
     fun acceptsAPassphraseOfExactlyTheFloor() {
         val exact = "x".repeat(SettingsBackupCodec.MIN_PASSPHRASE_LENGTH)
 
         assertTrue(isPassphraseValid(exact, exact, confirmRequired = false))
-        assertTrue(isPassphraseValid(exact, exact, confirmRequired = true))
     }
 
     @Test
     fun rejectsAnEmptyPassphrase() {
         assertFalse(isPassphraseValid("", "", confirmRequired = false))
+    }
+
+    // --- `confirmRequired` marks the export dialog, the one place a
+    // passphrase is *chosen*. What it protects is a live VitalForge credential
+    // and every scale's consent code, in a file the user can save to any
+    // SAF-reachable location, so choosing is held to a stronger rule than
+    // unlocking a file the app already wrote.
+
+    @Test
+    fun rejectsAnEightCharacterPassphraseForANewBackup() {
+        assertFalse(
+            "8 characters is ~2^38 candidates offline, whatever the KDF cost",
+            isPassphraseValid("hunter22", "hunter22", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun rejectsANewPassphraseBuiltFromTooFewDistinctCharacters() {
+        assertFalse(
+            "16 characters of two alternating letters is a search space length alone hides",
+            isPassphraseValid("abababababababab", "abababababababab", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun acceptsANewPassphraseSittingOnBothExportFloors() {
+        assertTrue(
+            "12 characters over 5 distinct ones is the boundary, and must not be over-rejected",
+            isPassphraseValid("abcdeabcdeab", "abcdeabcdeab", confirmRequired = true),
+        )
+    }
+
+    /**
+     * The stronger rule applies to choosing, never to unlocking: every backup
+     * written before it is protected by a passphrase it would reject, and the
+     * import dialog's disabled button would be the user's only clue that their
+     * own file had become unopenable.
+     */
+    @Test
+    fun stillUnlocksABackupWrittenUnderTheOlderEightCharacterFloor() {
+        assertTrue(isPassphraseValid("hunter22", "", confirmRequired = false))
     }
 
     /**

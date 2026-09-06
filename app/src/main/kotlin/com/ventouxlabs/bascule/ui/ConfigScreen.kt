@@ -52,6 +52,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ContractVersion
 import kotlinx.coroutines.flow.SharedFlow
@@ -725,7 +726,16 @@ private fun PassphraseDialog(
         title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },
         text = {
             Column {
-                Text("Use at least 8 characters. This passphrase cannot be recovered.")
+                Text(
+                    if (confirmPassphrase) {
+                        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH} varied characters — a few " +
+                            "unrelated words work well. The file holds your sign-in credential and every scale's " +
+                            "consent code, so keep it out of cloud-synced folders. This passphrase cannot be " +
+                            "recovered."
+                    } else {
+                        "Enter the passphrase this backup was created with."
+                    },
+                )
                 OutlinedTextField(
                     value = passphrase,
                     onValueChange = { passphrase = it },

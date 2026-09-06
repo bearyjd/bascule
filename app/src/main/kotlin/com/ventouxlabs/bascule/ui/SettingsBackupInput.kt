@@ -33,10 +33,19 @@ internal fun InputStream.readSettingsBackup(): ByteArray {
 /**
  * The app's only passphrase validation. [confirmation] is only consulted when
  * [confirmRequired] — the import dialog has one field, the export dialog two.
+ *
+ * [confirmRequired] therefore also marks the one dialog that *chooses* a
+ * passphrase, and choosing is what
+ * [SettingsBackupCodec.isPassphraseStrongEnough] governs. Unlocking keeps the
+ * old floor: the strength rule must never be the reason a user cannot open a
+ * backup this app itself wrote.
  */
 internal fun isPassphraseValid(
     passphrase: String,
     confirmation: String,
     confirmRequired: Boolean,
-): Boolean = passphrase.length >= SettingsBackupCodec.MIN_PASSPHRASE_LENGTH &&
-    (!confirmRequired || passphrase == confirmation)
+): Boolean = if (confirmRequired) {
+    SettingsBackupCodec.isPassphraseStrongEnough(passphrase) && passphrase == confirmation
+} else {
+    passphrase.length >= SettingsBackupCodec.MIN_PASSPHRASE_LENGTH
+}
