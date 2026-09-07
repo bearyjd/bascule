@@ -81,6 +81,13 @@ jobs:
       - name: Assemble release
         run: ./gradlew assembleRelease
 
+      # Every run states which key signed the artifact, so a swapped or
+      # missing key is visible in the log rather than discovered on install.
+      - name: Print signer
+        run: |
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$BT/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | grep -E 'Verifies|SHA-256' || echo "unsigned build (no keystore secrets)"
+
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:

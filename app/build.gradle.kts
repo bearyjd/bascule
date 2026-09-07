@@ -132,7 +132,12 @@ dependencies {
  */
 fun releaseKeystoreProperties(): Properties? {
     val candidates = listOfNotNull(
-        System.getenv("KEYSTORE_PROPERTIES")?.let(::File),
+        // An env var that is *set* is a statement of intent: a dangling path
+        // must fail loudly rather than quietly produce an unsigned APK that
+        // uploads under a green check.
+        System.getenv("KEYSTORE_PROPERTIES")?.let { path ->
+            File(path).also { require(it.isFile) { "KEYSTORE_PROPERTIES is set but $path is not a file" } }
+        },
         File(System.getProperty("user.home"), ".config/bascule/keystore.properties"),
         rootProject.file("keystore.properties"),
     )
