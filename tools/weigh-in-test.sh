@@ -57,6 +57,12 @@ if [ "$INSTALL" = "1" ]; then
   echo
 fi
 
+# A release build is not debuggable, so `run-as` (the app's private files)
+# is off limits; everything the script reads that way degrades to a note.
+# logcat and the app's own Scale tab still say what happened.
+RUN_AS_OK=1
+adb shell run-as "$PKG" true >/dev/null 2>&1 || { RUN_AS_OK=0; echo "note: non-debuggable build — on-device files are not readable, showing logcat only"; }
+
 echo "=== Preflight ==="
 adb shell dumpsys package "$PKG" | grep -q "versionName" || { echo "$PKG is not installed."; exit 1; }
 BT=$(adb shell settings get global bluetooth_on | tr -d '\r')
@@ -68,8 +74,8 @@ else
   echo "  Bridge service: NOT running — open the app once, or enable always-on bridging."
 fi
 echo "  Cooldown entries currently held (an entry here blocks new sessions for that address):"
-adb shell run-as "$PKG" cat "/data/data/$PKG/shared_prefs/scan_enqueue_cooldown.xml" 2>/dev/null \
-  | grep -o 'name="[^"]*"' | sed 's/^/    /' || echo "    (none)"
+[ "$RUN_AS_OK" = 1 ] && { adb shell run-as "$PKG" cat "/data/data/$PKG/shared_prefs/scan_enqueue_cooldown.xml" 2>/dev/null \
+  | grep -o 'name="[^"]*"' | sed 's/^/    /' || echo "    (none)"; } || echo "    (not readable on this build)"
 
 echo
 echo "=== Recording ==="
@@ -92,11 +98,12 @@ grep -E "ScaleSessionWorker|ScanBroadcastReceiver|BasculeApplication|BridgeForeg
 
 echo
 echo "=== Last recorded capture attempt (survives the worker process) ==="
-adb shell run-as "$PKG" cat "/data/data/$PKG/shared_prefs/capture_attempts.xml" 2>/dev/null \
-  | grep -E "last_outcome|last_at_millis" | sed 's/^/  /' || echo "  (no attempt has ever been recorded)"
+[ "$RUN_AS_OK" = 1 ] && { adb shell run-as "$PKG" cat "/data/data/$PKG/shared_prefs/capture_attempts.xml" 2>/dev/null \
+  | grep -E "last_outcome|last_at_millis" | sed 's/^/  /' || echo "  (no attempt has ever been recorded)"; } || echo "  (not readable on this build — open the Scale tab: 'Last attempt')"
 
 echo
 echo "=== Stored readings ==="
+[ "$RUN_AS_OK" = 1 ] || { echo "  (not readable on this build — open History)"; echo; echo "Full log: $OUT/full.log"; trap - EXIT; exit 0; }
 adb shell "run-as $PKG cat /data/data/$PKG/databases/bascule.db"     > "$OUT/bascule.db"     2>/dev/null
 adb shell "run-as $PKG cat /data/data/$PKG/databases/bascule.db-wal" > "$OUT/bascule.db-wal" 2>/dev/null
 if command -v sqlite3 >/dev/null; then

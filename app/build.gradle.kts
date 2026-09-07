@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     // AGP 9 has built-in Kotlin support; the standalone
     // org.jetbrains.kotlin.android plugin must not be applied alongside it.
@@ -18,6 +20,25 @@ android {
         versionName = "0.1.0"
     }
 
+    // Release signing is configured from a properties file that lives OUTSIDE
+    // the repository — `~/.config/bascule/keystore.properties` on a developer
+    // machine, or the path in $KEYSTORE_PROPERTIES (CI materialises one from
+    // secrets). Absent, the release build is left unsigned rather than failing,
+    // so a fork or a CI run without secrets still proves the build compiles and
+    // R8 succeeds. The keystore itself is never committed: lose it and the app
+    // can never be updated in place again, so back it up somewhere durable.
+    val keystoreProperties = releaseKeystoreProperties()
+    signingConfigs {
+        if (keystoreProperties != null) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -25,6 +46,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (keystoreProperties != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -101,4 +123,19 @@ dependencies {
     // .claude/PRPs/plans/scale-admin-testing-completeness.plan.md Task 2.
     testImplementation(libs.androidx.test.junit)
     testImplementation(libs.androidx.work.testing)
+}
+
+/**
+ * The first readable keystore.properties among: `$KEYSTORE_PROPERTIES`,
+ * `~/.config/bascule/keystore.properties`, and `keystore.properties` at the
+ * repository root (gitignored). Null when none exists.
+ */
+fun releaseKeystoreProperties(): Properties? {
+    val candidates = listOfNotNull(
+        System.getenv("KEYSTORE_PROPERTIES")?.let(::File),
+        File(System.getProperty("user.home"), ".config/bascule/keystore.properties"),
+        rootProject.file("keystore.properties"),
+    )
+    val found = candidates.firstOrNull { it.isFile } ?: return null
+    return Properties().apply { found.inputStream().use(::load) }
 }
