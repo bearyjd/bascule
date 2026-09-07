@@ -65,14 +65,6 @@ class GattSession(
      */
     private var reconnectAttempts = 0
 
-    /**
-     * Set the moment [MeasurementCorrelator][com.ventouxlabs.bascule.ble.decoders.MeasurementCorrelator]
-     * produces a reading, before [finishEmission]'s idle wait. Once that has
-     * happened the decoder has nothing left to flush, so the reading exists
-     * only here — see [outcomeAtCeiling].
-     */
-    private var emittedReading: com.ventouxlabs.bascule.ble.ScaleReading? = null
-
     init {
         // The two are independent parameters kept consistent by hand, and only
         // registration has a reason to stop once the handshake lands — a
@@ -109,7 +101,7 @@ class GattSession(
         // event from an earlier step; (2) a late event from an already-closed
         // attempt (a post-close 133 callback, say) could otherwise sit in the
         // channel and be misread as the *next* attempt's outcome — see
-        // [drainStaleEvents], called after every mid-retry close().
+        // [ConnectLadder.drainStaleEvents], called after every mid-retry close().
         //
         // Depends on `transport.events` replaying at least the in-flight
         // script to a subscriber that starts collecting after emission — see
@@ -118,7 +110,7 @@ class GattSession(
         val forwarder = launch { transport.events.collect { events.trySend(it) } }
         try {
             withTimeoutOrNull(SessionBudget.HARD_SESSION_CEILING) { connectAndDiscover(events) }
-                ?: outcomeAtCeiling()
+                ?: measurement.outcomeAtCeiling()
         } finally {
             forwarder.cancel()
             // 00-design.md §8.10: every terminal path calls close() exactly
@@ -131,7 +123,7 @@ class GattSession(
     private suspend fun connectAndDiscover(events: Channel<TransportEvent>): SessionOutcome {
         var ladderInProgress = MissReason.CONNECT_TIMEOUT
         val phaseResult = withTimeoutOrNull(SessionBudget.CONNECT_PHASE_BUDGET) {
-            connectWithRetries(events) { ladderInProgress = it }
+            ladder.connectWithRetries(events) { ladderInProgress = it }
         } ?: ConnectPhaseResult.Failed(ladderInProgress)
 
         return when (phaseResult) {
@@ -139,181 +131,6 @@ class GattSession(
             ConnectPhaseResult.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
             ConnectPhaseResult.Connected -> discover(events)
         }
-    }
-
-    private suspend fun connectWithRetries(
-        events: Channel<TransportEvent>,
-        onLadderEntered: (MissReason) -> Unit,
-    ): ConnectPhaseResult {
-        var timeoutRetries = 0
-        var status133Retries = 0
-        var contentionRetries = 0
-
-        while (true) {
-            transport.connect()
-            val outcome = withTimeoutOrNull(SessionBudget.CONNECT_ATTEMPT_TIMEOUT) {
-                receiveConnectOutcome(events)
-            }
-
-            when {
-                outcome is ConnectAttempt.AdapterOff -> return ConnectPhaseResult.AdapterOff
-
-                outcome is ConnectAttempt.Connected -> return ConnectPhaseResult.Connected
-
-                outcome is ConnectAttempt.Failed && outcome.status == STATUS_GATT_ERROR -> {
-                    // E2: full teardown before any retry — reusing the transport
-                    // after 133 is the classic Android leak. §2.3 specifies
-                    // disconnect() -> close() -> null the ref; this abstraction
-                    // has no "ref" to null, but disconnect() then close() is
-                    // still both calls, in order.
-                    onLadderEntered(MissReason.GATT_ERROR)
-                    transport.disconnect()
-                    transport.close()
-                    if (status133Retries >= SessionBudget.STATUS_133_MAX_RETRIES) {
-                        return ConnectPhaseResult.Failed(MissReason.GATT_ERROR)
-                    }
-                    delay(SessionBudget.STATUS_133_RETRY_DELAYS[status133Retries])
-                    // Drained only after a real suspension (the delay above),
-                    // not before: draining before any suspension point can run
-                    // before the forwarder coroutine has relayed disconnect()'s
-                    // own event out of the SharedFlow, in which case there is
-                    // nothing yet to find and the stale event corrupts the next
-                    // attempt's classification instead.
-                    drainStaleEvents(events)
-                    status133Retries++
-                }
-
-                outcome is ConnectAttempt.Failed && outcome.status in CONTENTION_STATUSES -> {
-                    // E3: deliberately non-aggressive — one retry (ADR-003 fixes
-                    // the retry *count*, not the teardown).
-                    onLadderEntered(MissReason.CONTENTION)
-                    if (contentionRetries >= SessionBudget.CONTENTION_MAX_RETRIES) {
-                        return ConnectPhaseResult.Failed(MissReason.CONTENTION)
-                    }
-                    contentionRetries++
-                    // Same teardown-before-retry discipline as E1/E2 (§2.3,
-                    // §8.10). Looping back to connect() without it leaves the
-                    // previous BluetoothGatt client registered — the per-app
-                    // client table is finite, and exhausting it produces
-                    // permanent status-133 until the process is killed.
-                    transport.close()
-                    delay(SessionBudget.CONTENTION_RETRY_DELAY)
-                    drainStaleEvents(events)
-                }
-
-                else -> {
-                    // E1 (no event within the attempt timeout) and any unclassified
-                    // failure status share the same recovery: close, wait, retry once.
-                    // TODO(WP-09): status 5/15 (GATT_INSUFFICIENT_AUTHENTICATION/
-                    //  _ENCRYPTION) falls here today and reports as a connect
-                    //  timeout; once bonding lands it must route to BONDING (E5)
-                    //  instead.
-                    val reason = disconnectReason(outcome)
-                    onLadderEntered(reason)
-                    transport.close()
-                    if (timeoutRetries >= SessionBudget.CONNECT_TIMEOUT_MAX_RETRIES) {
-                        return ConnectPhaseResult.Failed(reason)
-                    }
-                    timeoutRetries++
-                    delay(SessionBudget.CONNECT_TIMEOUT_RETRY_DELAY)
-                    drainStaleEvents(events)
-                }
-            }
-        }
-    }
-
-    /**
-     * A disconnect carrying `GATT_SUCCESS` is the peer closing the link
-     * deliberately, not a radio failure that never completed — reporting it as
-     * `CONNECT_TIMEOUT` hides a scale that accepted the connection and then
-     * hung up. The recovery is the same (E1's close-wait-retry-once ladder);
-     * only the reason it is reported under differs.
-     */
-    private fun disconnectReason(outcome: ConnectAttempt?): MissReason =
-        if (outcome is ConnectAttempt.Failed && outcome.status == STATUS_GATT_SUCCESS) {
-            MissReason.GRACEFUL_DISCONNECT
-        } else {
-            MissReason.CONNECT_TIMEOUT
-        }
-
-    private suspend fun receiveConnectOutcome(events: Channel<TransportEvent>): ConnectAttempt {
-        while (true) {
-            when (val event = events.receive()) {
-                is TransportEvent.AdapterOff -> return ConnectAttempt.AdapterOff
-                is TransportEvent.ConnectionStateChanged ->
-                    return if (event.connected) {
-                        connectedOrImmediateDrop(events)
-                    } else {
-                        ConnectAttempt.Failed(event.status)
-                    }
-                // Exhaustive rather than `else`, at every dispatch on
-                // TransportEvent in this class: these loops exit only on an
-                // explicit return or their enclosing timeout, so a subtype that
-                // fell through a catch-all would not raise an error — it would
-                // hang the step until its budget expired. A ninth event must be
-                // a compile failure here, not a silent stall.
-                is TransportEvent.ServicesDiscovered,
-                is TransportEvent.CharacteristicChanged,
-                is TransportEvent.WriteComplete,
-                is TransportEvent.SubscriptionEnabled,
-                is TransportEvent.MtuChanged,
-                is TransportEvent.BondStateChanged,
-                -> continue // not relevant to the connect wait step
-            }
-        }
-    }
-
-    /**
-     * E3's second shape (`00-design.md` §2.3): "`CONNECTED` then immediate
-     * disconnect with status 8/19/22" — Atlas contention that only reveals
-     * itself after the connect callback fires. A scripted fake emits both
-     * events back-to-back with no delay, so if the drop is genuinely
-     * "immediate" it is already queued behind `CONNECTED` by the time this
-     * runs; treat that queued drop as the whole attempt's outcome rather than
-     * reporting `Connected` and letting discovery misclassify it as E4
-     * (`01-plan.md`'s `device_busy.scale` fixture is exactly this shape).
-     *
-     * [TransportEvent.AdapterOff] has to be classified here too, not just the
-     * drop: the peek consumes whatever is queued, so discarding an adapter-off
-     * left the session reporting `Connected` and then running discovery's full
-     * 5 s against a dead adapter, ending as `Incompatible` — a statement about
-     * the *device*, which also feeds `INCOMPATIBLE_STREAK` — instead of
-     * `Missed(ADAPTER_OFF)`. Anything else is stale by construction at an
-     * attempt boundary and discarded, as in [drainStaleEvents].
-     */
-    private fun connectedOrImmediateDrop(events: Channel<TransportEvent>): ConnectAttempt = when (
-        val queued = events.tryReceive().getOrNull()
-    ) {
-        is TransportEvent.AdapterOff -> ConnectAttempt.AdapterOff
-        is TransportEvent.ConnectionStateChanged ->
-            if (queued.connected) ConnectAttempt.Connected else ConnectAttempt.Failed(queued.status)
-        else -> ConnectAttempt.Connected
-    }
-
-    /**
-     * A callback from an attempt this session already closed (a post-close 133,
-     * say) can still be sitting in the channel when the next `connect()` is
-     * about to run. Discard it — the next wait-step must only ever see events
-     * from the attempt it is actually waiting on.
-     *
-     * [TransportEvent.AdapterOff] is the one thing never discarded here: it is
-     * global session state, not an artifact of any particular attempt or
-     * write, so draining it away would let a real adapter-off go unnoticed and
-     * have the session misclassify the resulting failure as a plain timeout
-     * instead of `Missed(ADAPTER_OFF)`. Put back rather than dropped, and the
-     * drain stops there — anything behind it in the channel is necessarily
-     * older than the adapter-off and moot regardless.
-     */
-    private fun drainStaleEvents(events: Channel<TransportEvent>) {
-        val adapterOff = generateSequence { events.tryReceive().getOrNull() }
-            .firstOrNull { it is TransportEvent.AdapterOff }
-            ?: return
-        // events is Channel.UNLIMITED (see run()), so trySend here cannot fail
-        // on capacity — it exists to put back what tryReceive just took, not
-        // to enqueue new work. Everything drained before it is discarded as
-        // intended; anything still behind it in the channel is necessarily
-        // older than the adapter-off and moot regardless, so this stops here.
-        check(events.trySend(adapterOff).isSuccess) { "unreachable: UNLIMITED channel send failed" }
     }
 
     private suspend fun discover(events: Channel<TransportEvent>): SessionOutcome {
@@ -450,6 +267,12 @@ class GattSession(
      * recognised as one.
      */
     private var pairingObserved = false
+
+    /** E1/E2/E3, extracted whole: see [ConnectLadder]. */
+    private val ladder = ConnectLadder(transport)
+
+    /** E7/E17/E8's listening half, extracted whole: see [MeasurementPhase]. */
+    private val measurement = MeasurementPhase(decoder, log, onDropped = ::reconnectOnce)
 
     private enum class BondWait { Bonded, Refused, TimedOut, Dropped, AdapterOff }
 
@@ -645,177 +468,14 @@ class GattSession(
         }
         for (frame in deferredFrames) {
             val decoded = decoder.onNotification(frame.char, frame.value)
-            if (decoded is DecodeEvent.Stable) return finishEmission(events, decoded.reading)
+            if (decoded is DecodeEvent.Stable) return measurement.finishEmission(events, decoded.reading)
         }
         // Settling in to listen, possibly for minutes: drop to a low-duty
         // interval so the wait costs the scale's batteries as little as possible.
         transport.requestLowPower()
         log("subscribed; listening for a weigh-in for up to ${SessionBudget.FIRST_INDICATION_TIMEOUT}")
-        return awaitMeasurement(events)
+        return measurement.run(events)
     }
-
-    /**
-     * One event loop, used for both measurement windows. They differ only in
-     * budget and in whether a frame that left the decoder holding a weight for
-     * correlation ends the wait: the first window stops there so the caller can
-     * open the shorter correlation window, the second keeps listening until
-     * something stable arrives.
-     *
-     * Returns null on timeout. [onMalformed] is a callback rather than a return
-     * value because the count accumulates across both windows.
-     */
-    private suspend fun awaitMeasureStep(
-        events: Channel<TransportEvent>,
-        budget: Duration,
-        stopAfterFirstFrame: Boolean,
-        onMalformed: () -> Unit,
-    ): MeasureStep? = withTimeoutOrNull(budget) {
-        receiveMeasureStep(events, stopAfterFirstFrame, onMalformed)
-    }
-
-    /** See [receiveSubscriptionOutcome] for why this is a function, not a lambda. */
-    private suspend fun receiveMeasureStep(
-        events: Channel<TransportEvent>,
-        stopAfterFirstFrame: Boolean,
-        onMalformed: () -> Unit,
-    ): MeasureStep {
-        while (true) {
-            when (val event = events.receive()) {
-                is TransportEvent.AdapterOff -> return MeasureStep.AdapterOff
-                is TransportEvent.ConnectionStateChanged -> if (!event.connected) return MeasureStep.Dropped
-                is TransportEvent.CharacteristicChanged -> {
-                    decodeMeasurementFrame(event, onMalformed)?.let { return it }
-                    // E7/E17: hand over to the much shorter correlation window
-                    // only once the decoder is actually holding a weight
-                    // awaiting its body-composition pair. Ending the 45 s wait
-                    // on any other frame — an unknown characteristic, a
-                    // malformed one, or a body-composition frame that merely
-                    // arrived before its weight, which is a routine ordering
-                    // and not a fault — would leave 4 s for a weigh-in the
-                    // BF720 does not report as stable until 8-15 s in.
-                    if (stopAfterFirstFrame && decoder.hasPendingCorrelation) return MeasureStep.Pending
-                }
-                is TransportEvent.ServicesDiscovered,
-                is TransportEvent.WriteComplete,
-                is TransportEvent.SubscriptionEnabled,
-                is TransportEvent.MtuChanged,
-                is TransportEvent.BondStateChanged,
-                -> Unit // transport plumbing; keeps waiting on the same budget
-            }
-        }
-    }
-
-    /** Non-null only when this frame is itself the end of the wait. */
-    private fun decodeMeasurementFrame(
-        event: TransportEvent.CharacteristicChanged,
-        onMalformed: () -> Unit,
-    ): MeasureStep? {
-        val decoded = decoder.onNotification(event.char, event.value)
-        // Every frame, not just the interesting ones: "the scale sent nothing"
-        // and "the scale sent something we did not understand" are different
-        // diagnoses, and this is the only place that can tell them apart.
-        log("frame on ${event.char} (${event.value.size} bytes) -> ${decoded::class.simpleName}")
-        return classifyDecoded(decoded, onMalformed)
-    }
-
-    private fun classifyDecoded(decoded: DecodeEvent, onMalformed: () -> Unit): MeasureStep? = when (decoded) {
-        is DecodeEvent.Stable -> MeasureStep.Reading(decoded.reading)
-
-        is DecodeEvent.Malformed -> {
-            onMalformed()
-            null
-        }
-
-        DecodeEvent.SessionComplete -> readingFromFlush()?.let { MeasureStep.Reading(it) }
-
-        // A frame the decoder consumed without completing anything: buffered
-        // for correlation, an unknown characteristic (E11), a live weight the
-        // BF720 never sends, or a handshake ack arriving after consent.
-        DecodeEvent.Ignored,
-        is DecodeEvent.Live,
-        is DecodeEvent.RegistrationResult,
-        is DecodeEvent.ConsentResult,
-        -> null
-    }
-
-    /**
-     * E7 + E17. The 45 s wait for a first frame, then — and only once the
-     * decoder is holding a weight for correlation — the short window for its
-     * body-composition pair.
-     */
-    private suspend fun awaitMeasurement(events: Channel<TransportEvent>): SessionOutcome {
-        var malformed = 0
-        val onMalformed: () -> Unit = { malformed++ }
-
-        val first = awaitMeasureStep(
-            events,
-            SessionBudget.FIRST_INDICATION_TIMEOUT,
-            stopAfterFirstFrame = true,
-            onMalformed,
-        ) ?: return flushOrElse(noMeasurement(malformed))
-
-        if (first !is MeasureStep.Pending) return settle(events, first) { noMeasurement(malformed) }
-
-        val paired = awaitMeasureStep(
-            events,
-            SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW,
-            stopAfterFirstFrame = false,
-            onMalformed,
-        ) ?: return flushOrElse(noMeasurement(malformed))
-
-        return settle(events, paired) { noMeasurement(malformed) }
-    }
-
-    private suspend fun settle(
-        events: Channel<TransportEvent>,
-        step: MeasureStep,
-        fallback: () -> SessionOutcome,
-    ): SessionOutcome = when (step) {
-        is MeasureStep.Reading -> {
-            log("stable reading decoded: ${step.reading.weightKg} kg, user ${step.reading.userIndex}")
-            finishEmission(events, step.reading)
-        }
-        MeasureStep.AdapterOff -> flushOrElse(SessionOutcome.Missed(MissReason.ADAPTER_OFF))
-        MeasureStep.Dropped -> reconnectOnce(events)
-        MeasureStep.Pending -> flushOrElse(fallback())
-    }
-
-    /**
-     * E17, and the reason [flush] is reachable from *every* terminal path out
-     * of the measurement phase rather than only from the correlation window's
-     * own timeout. A weight the decoder has already decoded and attributed is a
-     * real measurement; losing it because the link dropped 1 s into the pairing
-     * window inverts E8's "partial data is discarded" — which is about an
-     * *unstable* weight, not a complete one waiting on an optional companion
-     * frame (`02-interface-revision.md` §3: persist the weight-only row).
-     */
-    private fun flushOrElse(fallback: SessionOutcome): SessionOutcome =
-        readingFromFlush()?.let { SessionOutcome.Completed(it) } ?: fallback
-
-    /**
-     * [SessionBudget.HARD_SESSION_CEILING] wraps the *whole* session, teardown
-     * included, so it can fire after a reading has already been emitted — the
-     * post-emission idle timer is 10 s and the ceiling does not stop for it.
-     * [readingFromFlush] cannot recover that reading: the correlator consumed
-     * its buffered weight during the emission and has nothing left to release,
-     * so the ceiling would report `NO_MEASUREMENT` for a weigh-in that
-     * succeeded. [emittedReading] is where it survives.
-     *
-     * The ceiling itself deliberately still applies once a reading exists: it
-     * is an unconditional teardown bound, and cutting the idle wait short costs
-     * nothing now that the result cannot be lost with it.
-     *
-     * Falling back to [flushOrElse] keeps E17 intact for the earlier case — the
-     * ceiling firing mid-correlation-window, where the decoder *is* still
-     * holding a weight. Every phase before that holds nothing, and the fallback
-     * passes through untouched.
-     */
-    private fun outcomeAtCeiling(): SessionOutcome =
-        emittedReading?.let { SessionOutcome.Completed(it) }
-            ?: flushOrElse(SessionOutcome.Missed(MissReason.NO_MEASUREMENT))
-
-    private fun readingFromFlush(): com.ventouxlabs.bascule.ble.ScaleReading? =
-        (decoder.flush() as? DecodeEvent.Stable)?.reading
 
     /**
      * E8 (`00-design.md` §2.3): a disconnect while `MEASURING` gets up to
@@ -851,66 +511,23 @@ class GattSession(
      */
     private suspend fun reconnectOnce(events: Channel<TransportEvent>): SessionOutcome {
         if (reconnectAttempts >= SessionBudget.RECONNECT_MAX_ATTEMPTS) {
-            return flushOrElse(SessionOutcome.Missed(MissReason.DROPPED))
+            return measurement.flushOrElse(SessionOutcome.Missed(MissReason.DROPPED))
         }
         reconnectAttempts++
         // Same teardown-before-retry discipline as E1/E2: the BluetoothGatt
         // behind a dropped link is dead, and reusing it is the classic Android
-        // leak. Drained only after a real suspension — see [drainStaleEvents].
+        // leak. Drained only after a real suspension — see [ConnectLadder.drainStaleEvents].
         transport.close()
         yield()
-        drainStaleEvents(events)
+        ladder.drainStaleEvents(events)
         transport.connect()
-        val attempt = withTimeoutOrNull(SessionBudget.RECONNECT_ONCE_WINDOW) { receiveConnectOutcome(events) }
+        val attempt = withTimeoutOrNull(SessionBudget.RECONNECT_ONCE_WINDOW) { ladder.receiveConnectOutcome(events) }
         if (attempt !is ConnectAttempt.Connected) {
-            return flushOrElse(SessionOutcome.Missed(MissReason.DROPPED))
+            return measurement.flushOrElse(SessionOutcome.Missed(MissReason.DROPPED))
         }
         // The second leg terminates through the same paths as the first, so it
         // flushes a still-buffered weight on its own way out.
         return discover(events)
-    }
-
-    private fun noMeasurement(malformed: Int): SessionOutcome =
-        if (malformed > 0) SessionOutcome.DecodeFailure(malformed) else SessionOutcome.Missed(MissReason.NO_MEASUREMENT)
-
-    private suspend fun finishEmission(
-        events: Channel<TransportEvent>,
-        reading: com.ventouxlabs.bascule.ble.ScaleReading,
-    ): SessionOutcome {
-        // Recorded before the idle wait, not after it: HARD_SESSION_CEILING can
-        // fire inside that wait, and by then the decoder has nothing left to
-        // flush. See [outcomeAtCeiling].
-        emittedReading = reading
-        withTimeoutOrNull(SessionBudget.POST_EMISSION_IDLE) {
-            while (true) {
-                when (val event = events.receive()) {
-                    is TransportEvent.AdapterOff -> return@withTimeoutOrNull
-                    is TransportEvent.ConnectionStateChanged -> if (!event.connected) return@withTimeoutOrNull
-                    is TransportEvent.CharacteristicChanged -> {
-                        // Still fed to the decoder so the correlator's own
-                        // drop/duplicate counters stay accurate. It can never
-                        // decode `Stable` again — `MAX_EMISSIONS_PER_SESSION`
-                        // is a permanent one-shot latch and every emit path
-                        // clears the buffered weight first.
-                        decoder.onNotification(event.char, event.value)
-                    }
-                    is TransportEvent.ServicesDiscovered,
-                    is TransportEvent.WriteComplete,
-                    is TransportEvent.SubscriptionEnabled,
-                    is TransportEvent.MtuChanged,
-                    is TransportEvent.BondStateChanged,
-                    -> Unit // transport plumbing; keeps the idle timer running
-                }
-            }
-        }
-        return SessionOutcome.Completed(reading)
-    }
-
-    private sealed interface MeasureStep {
-        data object Pending : MeasureStep
-        data object AdapterOff : MeasureStep
-        data object Dropped : MeasureStep
-        data class Reading(val reading: com.ventouxlabs.bascule.ble.ScaleReading) : MeasureStep
     }
 
     /**
@@ -937,7 +554,7 @@ class GattSession(
      */
     private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
         yield()
-        drainStaleEvents(events)
+        ladder.drainStaleEvents(events)
         transport.write(op.char, op.bytes)
     }
 
@@ -1018,23 +635,11 @@ class GattSession(
         data class Directive(val directive: HandshakeDirective) : HandshakeStep
     }
 
-    private sealed interface ConnectAttempt {
-        data object Connected : ConnectAttempt
-        data class Failed(val status: Int) : ConnectAttempt
-        data object AdapterOff : ConnectAttempt
-    }
-
     private sealed interface DiscoveryAttempt {
         data class Discovered(val services: DiscoveredServices) : DiscoveryAttempt
         data object Missing : DiscoveryAttempt
         data class Failed(val status: Int) : DiscoveryAttempt
         data object AdapterOff : DiscoveryAttempt
-    }
-
-    private sealed interface ConnectPhaseResult {
-        data object Connected : ConnectPhaseResult
-        data class Failed(val reason: MissReason) : ConnectPhaseResult
-        data object AdapterOff : ConnectPhaseResult
     }
 
     private companion object {
@@ -1043,13 +648,5 @@ class GattSession(
         const val BOND_BONDING = 11
         const val BOND_BONDED = 12
 
-        /** Android's catch-all `GATT_ERROR` (E2). */
-        const val STATUS_GATT_ERROR = 133
-
-        /** `BluetoothGatt.GATT_SUCCESS` — on a *disconnect*, a graceful close. */
-        const val STATUS_GATT_SUCCESS = 0
-
-        /** Busy / already-connected / contention statuses (E3, `00-design.md` §2.3). */
-        val CONTENTION_STATUSES = setOf(8, 19, 22)
     }
 }
