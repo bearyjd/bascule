@@ -63,6 +63,8 @@ class FakeReadingDao(
                     lastError = null,
                     lastErrorClass = null,
                     nextAttemptMillis = null,
+                    contractVersionAtDelivery = null,
+                    permanentRejectionHttpCode = null,
                 )
             }
         }
@@ -81,6 +83,13 @@ class FakeReadingDao(
     }
 
     override suspend fun sent(): List<ReadingEntity> = _rows.value.filter { it.status == ReadingStatus.SENT }
+
+    override suspend fun failedPermanentlyUnderOtherContract(wire: Int): List<String> =
+        _rows.value
+            .filter { it.status == ReadingStatus.FAILED_PERMANENT }
+            .filter { it.permanentRejectionHttpCode == 422 }
+            .filter { it.contractVersionAtDelivery != null && it.contractVersionAtDelivery != wire }
+            .map { it.id }
 
     override suspend fun requeueForReplay(ids: List<String>, nowMillis: Long) {
         val idSet = ids.toSet()

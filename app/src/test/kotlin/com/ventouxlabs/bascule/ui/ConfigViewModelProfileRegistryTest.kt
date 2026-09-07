@@ -10,6 +10,10 @@ import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
 import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.network.AuthTokenStore
+import com.ventouxlabs.bascule.delivery.DeliveryTrigger
+import com.ventouxlabs.bascule.ui.fake.readingFixture
+import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
@@ -46,13 +50,16 @@ class ConfigViewModelProfileRegistryTest {
         scaleRegistrar: ScaleRegistrar? = null,
         scaleProfileStore: ScaleProfileStore? = null,
         rearmScanner: (suspend () -> Unit)? = null,
+        deliveryTrigger: DeliveryTrigger = FakeDeliveryTrigger(),
+        dao: FakeReadingDao = FakeReadingDao(),
+        authTokenStore: AuthTokenStore = FakeAuthTokenStore(),
     ) = ConfigViewModel(
         configStore,
-        FakeAuthTokenStore(),
+        authTokenStore,
         consentStore,
         sessionCookieStore,
-        FakeDeliveryTrigger(),
-        FakeReadingDao(),
+        deliveryTrigger,
+        dao,
         ioDispatcher = mainDispatcherRule.dispatcher,
         scaleRegistrar = scaleRegistrar,
         scaleProfileStore = scaleProfileStore,
@@ -71,12 +78,18 @@ class ConfigViewModelProfileRegistryTest {
         configStore: FakeConfigStore = FakeConfigStore(),
         sessionCookieStore: FakeSessionCookieStore = FakeSessionCookieStore(),
         rearmScanner: (suspend () -> Unit)? = null,
+        deliveryTrigger: DeliveryTrigger = FakeDeliveryTrigger(),
+        dao: FakeReadingDao = FakeReadingDao(),
+        authTokenStore: AuthTokenStore = FakeAuthTokenStore(),
     ) = viewModel(
         configStore = configStore,
         consentStore = registry,
         sessionCookieStore = sessionCookieStore,
         scaleProfileStore = registry,
         rearmScanner = rearmScanner,
+        deliveryTrigger = deliveryTrigger,
+        dao = dao,
+        authTokenStore = authTokenStore,
     )
 
     private fun profile(
@@ -231,14 +244,13 @@ class ConfigViewModelProfileRegistryTest {
     }
 
     /**
-     * M11: `V2Shaper`'s body-composition field names are placeholders, so the
-     * dropdown withholds `V2_BODY_COMP`. An ungated import would still reach it,
-     * leaving the app posting invented field names to the user's server with no
-     * way back out of the setting. The rest of the backup must still apply —
-     * one unusable field is not grounds for refusing a valid restore.
+     * The import path reads the same list the Settings selector offers, so a
+     * backup pinned to v2 restores v2 now that v2 is offered — the gate that
+     * used to withhold it (M11) is the same gate, just no longer withholding
+     * anything. The rest of the backup applies alongside it.
      */
     @Test
-    fun importingABackupPinnedToTheWithheldV2ContractSkipsThatFieldAndAppliesTheRest() = runTest {
+    fun importingABackupPinnedToV2RestoresV2AndAppliesTheRest() = runTest {
         val configStore = FakeConfigStore(initialBaseUrl = "https://original.example.com")
         val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore)
         val bytes = SettingsBackupCodec.encrypt(
@@ -253,8 +265,8 @@ class ConfigViewModelProfileRegistryTest {
         advanceUntilIdle()
 
         assertEquals(
-            "a contract the screen cannot select must not be reachable by import",
-            ContractVersion.V1_WEIGHT_ONLY,
+            "a contract the screen offers must be reachable by import too",
+            ContractVersion.V2_BODY_COMP,
             configStore.contractVersion.value,
         )
         assertEquals(
@@ -263,6 +275,162 @@ class ConfigViewModelProfileRegistryTest {
             configStore.displayUnit.value,
         )
         assertEquals("https://mine.example.com", configStore.baseUrl.value)
+    }
+
+    /**
+     * Codex review, v2-body-composition PR: a same-host restore that changes
+     * the contract used to write straight to `ConfigStore`, bypassing the
+     * recovery `saveContractVersion` gives a manual toggle — a row a v2
+     * server rejected would have stayed `FAILED_PERMANENT` forever even
+     * though the very backup being restored switches back to v1.
+     */
+    @Test
+    fun importingABackupThatChangesTheContractRequeuesRowsRejectedUnderTheOldOne() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        val configStore = FakeConfigStore(initialContractVersion = ContractVersion.V2_BODY_COMP)
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore, dao = dao, deliveryTrigger = trigger)
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings().copy(contractVersion = ContractVersion.V1_WEIGHT_ONLY),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(ContractVersion.V1_WEIGHT_ONLY, configStore.contractVersion.value)
+        assertEquals(
+            ReadingStatus.PENDING,
+            dao.rows.value.single { it.id == "rejected-under-v2" }.status,
+        )
+        assertEquals(1, trigger.triggerCount)
+    }
+
+    /**
+     * Codex review, v2-body-composition PR — a real security regression: the
+     * requeue fix above turns FAILED_PERMANENT rows back into PENDING and
+     * triggers an immediate drain. On a host change, `blockAllPendingForAuth`
+     * already parks the backlog specifically so nothing reaches the *new*
+     * host until the user takes an explicit Login/Save-token action — the
+     * recovery must not undo that by resurrecting rows straight into a drain
+     * against the host that was just switched to.
+     */
+    @Test
+    fun importingABackupThatChangesBothHostAndContractDoesNotRequeueOnAHostChange() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        val configStore = FakeConfigStore(
+            initialBaseUrl = "https://original.example.com",
+            initialContractVersion = ContractVersion.V2_BODY_COMP,
+        )
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore, dao = dao, deliveryTrigger = trigger)
+        val bytes = SettingsBackupCodec.encrypt(
+            // backupSettings()'s baseUrl (mine.example.com) differs from the
+            // configured host above — a real host change, not the same-host
+            // restore the other test covers.
+            backupSettings().copy(contractVersion = ContractVersion.V1_WEIGHT_ONLY),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(ContractVersion.V1_WEIGHT_ONLY, configStore.contractVersion.value)
+        assertEquals(
+            "a host change must leave a permanently-rejected row exactly where it was, not resubmit it " +
+                "to the new host — blockAllPendingForAuth only ever touches PENDING rows, so this recovery " +
+                "path is the only thing that could otherwise reach it",
+            ReadingStatus.FAILED_PERMANENT,
+            dao.rows.value.single { it.id == "rejected-under-v2" }.status,
+        )
+        assertEquals(
+            "no drain must fire for a host change — that is exactly what blockAllPendingForAuth exists to prevent",
+            0,
+            trigger.triggerCount,
+        )
+    }
+
+    /**
+     * Codex review, v2-body-composition PR, third pass: the requeue+drain for
+     * a same-host, contract-changing restore used to run *before*
+     * `applyImportedProfilesAndCredential`. `deliveryTrigger.triggerImmediateDrain()`
+     * schedules a WorkManager run rather than draining inline, so that ordering
+     * let the scheduled drain reach the network under whatever credential was
+     * still installed at that moment — a stale one, or another user's session
+     * — instead of the one this same backup is in the middle of installing.
+     * Pinned by recording the order two collaborators are touched in, since
+     * `FakeDeliveryTrigger`'s plain counter cannot see *when* relative to the
+     * credential write.
+     */
+    @Test
+    fun theContractRecoveryDrainIsTriggeredAfterTheImportedCredentialIsApplied() = runTest {
+        val order = mutableListOf<String>()
+        val dao = FakeReadingDao()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        val orderTrackingAuthTokenStore = object : AuthTokenStore {
+            private val delegate = FakeAuthTokenStore()
+            override fun isSet() = delegate.isSet()
+            override fun token() = delegate.token()
+            override fun save(token: String) {
+                order += "credential-applied"
+                delegate.save(token)
+            }
+            override fun clear() = delegate.clear()
+        }
+        val orderTrackingTrigger = object : DeliveryTrigger {
+            override fun triggerImmediateDrain() {
+                order += "drain-triggered"
+            }
+        }
+        val configStore = FakeConfigStore(initialContractVersion = ContractVersion.V2_BODY_COMP)
+        val vm = viewModelWithRegistry(
+            FakeScaleProfileStore(),
+            configStore,
+            dao = dao,
+            deliveryTrigger = orderTrackingTrigger,
+            authTokenStore = orderTrackingAuthTokenStore,
+        )
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings().copy(
+                contractVersion = ContractVersion.V1_WEIGHT_ONLY,
+                credentialType = BackupCredentialType.TOKEN,
+                credentialValue = "backup-token",
+            ),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        // Two drains actually fire here — unblockAuthRowsAndDrain's own, plus
+        // the contract recovery's — and both are correct to fire once the
+        // credential is in place. The invariant under test is narrower: no
+        // drain may have already run when the credential was applied.
+        assertEquals("credential-applied", order.first())
+        assertTrue("both drains must follow the credential write", order.drop(1).all { it == "drain-triggered" })
     }
 
     // --- M12: the scan registration reflects what the screen just changed.
@@ -312,4 +480,104 @@ class ConfigViewModelProfileRegistryTest {
         scaleCredential = null,
         profiles = profiles,
     )
+    @Test
+    fun choosingAContractVersionPersistsIt() = runTest {
+        val configStore = FakeConfigStore()
+        val vm = viewModel(configStore = configStore)
+
+        vm.saveContractVersion(ContractVersion.V2_BODY_COMP)
+        advanceUntilIdle()
+
+        assertEquals(ContractVersion.V2_BODY_COMP, configStore.contractVersion.value)
+    }
+
+    /**
+     * Devil's-advocate finding on the v2 PR: a 422 is classified permanent, so
+     * a reading rejected because the *server* did not yet speak the chosen
+     * contract was gone for good even after the user switched back. Switching
+     * contracts is the moment such rows earn a fresh attempt — and only such
+     * rows: one rejected under the contract now chosen was rejected on its
+     * own merits.
+     */
+    /** One [FAILED_PERMANENT][ReadingStatus.FAILED_PERMANENT] row per case this test distinguishes. */
+    private suspend fun seedFailedPermanentRows(dao: FakeReadingDao) {
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v1",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V1_WEIGHT_ONLY.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        dao.insert(
+            readingFixture().copy(
+                id = "never-sent",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = null,
+            ),
+        )
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-not-for-contract-reasons",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 404,
+            ),
+        )
+    }
+
+    @Test
+    fun switchingContractsRequeuesRowsRejectedUnderTheOtherOneOnly() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        seedFailedPermanentRows(dao)
+        val vm = viewModel(dao = dao, deliveryTrigger = trigger)
+
+        vm.saveContractVersion(ContractVersion.V1_WEIGHT_ONLY)
+        advanceUntilIdle()
+
+        val byId = dao.rows.value.associateBy { it.id }
+        assertEquals(
+            "rejected by the other contract: retried",
+            ReadingStatus.PENDING,
+            byId.getValue("rejected-under-v2").status,
+        )
+        assertEquals(
+            "rejected by this contract: stays failed",
+            ReadingStatus.FAILED_PERMANENT,
+            byId.getValue("rejected-under-v1").status,
+        )
+        assertEquals(
+            "never reached a server: untouched",
+            ReadingStatus.FAILED_PERMANENT,
+            byId.getValue("never-sent").status,
+        )
+        assertEquals(
+            "rejected for a reason a contract switch cannot fix: untouched",
+            ReadingStatus.FAILED_PERMANENT,
+            byId.getValue("rejected-not-for-contract-reasons").status,
+        )
+        assertEquals("a requeue is followed by a drain", 1, trigger.triggerCount)
+    }
+
+    /** No stranded rows, no drain — switching must not poke the network for nothing. */
+    @Test
+    fun switchingContractsWithNothingStrandedDoesNotDrain() = runTest {
+        val trigger = FakeDeliveryTrigger()
+        val vm = viewModel(deliveryTrigger = trigger)
+
+        vm.saveContractVersion(ContractVersion.V2_BODY_COMP)
+        advanceUntilIdle()
+
+        assertEquals(0, trigger.triggerCount)
+    }
+
 }

@@ -86,6 +86,16 @@ data class ReadingEntity(
     val lastErrorClass: ErrorClass?,
     @ColumnInfo(name = "deliveredFields") val deliveredFields: Set<ReadingField>,
     val contractVersionAtDelivery: Int?,
+    /**
+     * The HTTP status of the attempt that produced a [ReadingStatus.FAILED_PERMANENT]
+     * verdict, when it was one. Distinct from [ErrorClass] (which only says
+     * "permanent", not which permanent): `ResponseClassifier.PERMANENT_CODES`
+     * covers 400/404/409/413/422, and only 422 (schema/validation rejection) is
+     * something a contract switch can actually fix — a 404 or a malformed row
+     * is wrong regardless of contract. `ReadingDao.failedPermanentlyUnderOtherContract`
+     * reads this to scope its recovery to the one code a contract switch resolves.
+     */
+    val permanentRejectionHttpCode: Int? = null,
     val remoteDuplicate: Boolean,
     val source: ReadingSource,
     /** Stable local profile association. Null for manual and schema-v1 rows. */

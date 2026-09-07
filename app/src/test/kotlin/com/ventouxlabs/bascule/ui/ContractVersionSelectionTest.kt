@@ -2,58 +2,53 @@ package com.ventouxlabs.bascule.ui
 
 import com.ventouxlabs.bascule.network.ContractVersion
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Round-3 MEDIUM #11. `V2Shaper`'s KDoc asserts it "is not selectable until"
- * VitalForge's Track A contract doc lands, but the settings dropdown was the
- * actual selection mechanism and gated nothing — so the invariant was false
- * and a user could post body-composition data under placeholder field names.
- * These tests are what makes the KDoc's claim true.
+ * Round-3 MEDIUM #11 made `selectableContractVersions` the single gate for
+ * both the Settings selector and the import path. v2 was withheld there while
+ * its field names were unverified; they were checked against VitalForge's real
+ * model and the missing three added server-side (`vitalforge` PR #40), so the
+ * list is now every version. These tests pin the two things that still matter:
+ * both paths read one list, and the list is worth a control.
  */
 class ContractVersionSelectionTest {
 
     @Test
-    fun withholdsTheUnfinishedV2Contract() {
-        assertFalse(
-            "V2Shaper's body-composition field names are placeholders, not the server's",
-            ContractVersion.V2_BODY_COMP in selectableContractVersions,
-        )
+    fun offersTheBodyCompositionContract() {
+        assertTrue(ContractVersion.V2_BODY_COMP in selectableContractVersions)
     }
 
     @Test
-    fun offersTheShippedV1Contract() {
+    fun stillOffersTheWeightOnlyContract() {
         assertTrue(
-            "gating v2 must not leave the import path with no valid contract",
+            "a server older than vitalforge PR #40 needs v1 to remain reachable",
             ContractVersion.V1_WEIGHT_ONLY in selectableContractVersions,
         )
     }
 
-    /**
-     * A denylist, not an allowlist: a contract version added after this filter
-     * was written is offered by default. That is the intended direction — the
-     * one entry withheld is the one with a documented unfinished shaper, and a
-     * new version arriving with a real contract doc should not need this file
-     * edited to become reachable.
-     */
+    /** An allowlist of everything, in declaration order, so the selector's order is the enum's. */
     @Test
-    fun offersEveryContractVersionExceptTheWithheldOne() {
-        assertEquals(
-            ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP },
-            selectableContractVersions,
-        )
+    fun offersEveryContractVersionInDeclarationOrder() {
+        assertEquals(ContractVersion.entries, selectableContractVersions)
     }
 
     /**
-     * The Settings dropdown was removed because this list has exactly one
-     * entry, making it a control the user cannot change (spec §5.1). If a
-     * second version ever becomes selectable this fails, which is the signal
-     * to bring the control back — not to relax the assertion.
+     * The inverse of the tripwire that removed the Settings control: it was
+     * taken out because this list had exactly one entry (spec §5.1). With more
+     * than one, a control is warranted and `ContractSection` renders it. If
+     * this ever drops back to one, that is the signal to remove the control
+     * again — not to relax this assertion.
      */
     @Test
-    fun exactlyOneContractVersionIsSelectableSoNoControlIsWarranted() {
-        assertEquals(listOf(ContractVersion.V1_WEIGHT_ONLY), selectableContractVersions)
+    fun moreThanOneVersionIsSelectableSoTheControlIsWarranted() {
+        assertTrue(selectableContractVersions.size > 1)
+    }
+
+    /** Every offered version has a human label; the selector must never show an enum name. */
+    @Test
+    fun everySelectableVersionHasALabel() {
+        selectableContractVersions.forEach { assertTrue(contractVersionLabel(it).isNotBlank()) }
     }
 }

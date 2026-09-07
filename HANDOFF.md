@@ -914,8 +914,16 @@ background capture is currently OFF, always-on foreground fallback is ON.
   are ridden through; a phone the scale has never met pairs through the
   app's own 30 s wait; failures are recorded durably, shown on the Scale
   tab, and (when a human is needed) notified.
-- **What is not yet proven:** one live weigh-in captured by this build.
-  Every observed session was an idle scale. The user has to step on.
+- **End-to-end capture is now proven on this build (2026-09-06 17:02 EDT).**
+  The user stepped on; the log on the Pixel 10 reads: Current Time write
+  completed 17:02:16 → handshake complete (consented) 17:02:17 →
+  subscribed 17:02:18 → Weight Measurement frame (2A9D, 15 B) buffered for
+  correlation 17:02:26 → Body Composition frame (2A9C, 14 B) → Stable →
+  87.81 kg, user 1, 20.5% fat, 17:02:27 → "captured a reading" 17:02:37.
+  Row status `SENT`, attemptCount 1 — delivered to VitalForge on the first
+  try. The reading arrived 8 s after subscribing, in a session that had
+  begun 11 s before the step-on: the 20 s pause between listens was short
+  enough that the phone was already connected when the scale woke.
 - **Process docs:** `docs/prp/bascule-agent-prompt.md` governs
   phases/gates; `docs/prp/bascule-prp.md` governs requirements. The dated
   sections above are the operational history; read them newest-first.
@@ -985,6 +993,33 @@ follow-up, then push and merge.
 
 ## Known open items (carried forward, still genuinely open — don't silently resolve)
 
+- **v2 is now selectable in Settings, but the live server's deployment is
+  unverified.** `vitalforge` PR #40 (adds `bmi`/`bmr`/`amr` to `WeightIn`)
+  merged 2026-09-07T03:34Z, well before this PR; `docker.yml`'s
+  `on: push: branches: [main]` would have built and pushed a new
+  `bearyj/vitalforge-weight:latest` image since. Whether `atlas` — the
+  host actually serving `weight.grepon.cc` — has pulled and restarted on
+  that image is genuinely unknown from this machine: this session has no
+  SSH access to atlas (`user@atlas: Permission denied (publickey)`), and
+  `/health` returning `{"status":"ok"}` only proves *a* server is up, not
+  which image. Low stakes either way — v1 stays the default
+  (`DataStoreConfigStore.contractVersion` falls back to
+  `V1_WEIGHT_ONLY`), so nobody is switched to v2 without opening Settings
+  and choosing it — but confirm the deployment (or just try it and watch
+  for a 422) before relying on v2 for real data.
+- **v2's contract-switch recovery has one narrow, self-healing residual**
+  (Codex review, v2-body-composition PR, 5 rounds — 4 fixed real bugs, this
+  5th is an accepted trade-off, not an oversight). If a contract switch
+  lands in the exact instant a drain is already running,
+  `DeliveryScheduler.triggerImmediateDrain`'s `ExistingWorkPolicy.KEEP`
+  silently drops the new trigger by the same design that prevents a
+  periodic and a triggered drain from double-submitting. A row rejected in
+  that window recovers at the next periodic drain (≤15 min) or the next
+  capture, not instantly — never lost, never resubmitted twice. Closing it
+  fully would need a dedicated follow-up worker for a race narrower than
+  one drain's own runtime; documented at
+  `DeliveryDrainer.recoverRowsRejectedUnderAnotherContract`'s KDoc rather
+  than built, deliberately.
 - **`GattSession.kt` is 1055 lines** (was 917 before 2026-09-05), past the
   800-line ceiling in the user's style rules. The 2026-09-06 additions —
   the E5 bond wait, the pairing-aware write/subscribe awaits, the

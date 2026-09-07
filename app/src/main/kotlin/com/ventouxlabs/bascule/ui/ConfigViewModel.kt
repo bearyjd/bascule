@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
@@ -304,6 +305,26 @@ class ConfigViewModel(
 
     fun saveDisplayUnit(unit: WeightUnit) {
         viewModelScope.launch { configStore.saveDisplayUnit(unit) }
+    }
+
+    /**
+     * Takes effect on the next delivery: `RuntimeApiFactory` reads the stored
+     * version per request, so rows still pending go out under the new contract
+     * and rows already `SENT` are untouched (re-sending them is WP-22's job).
+     *
+     * Rows the *previous* contract's server rejected are a different matter.
+     * A 422 lands them in `FAILED_PERMANENT`, which nothing revisits — so a
+     * user who picked v2 a day before their server could accept it, noticed,
+     * and switched back would have lost that day's weigh-in for good. The
+     * rejection was of the contract, not the reading, so a switch requeues
+     * them. Best-effort: the config write is the setting; the requeue must
+     * never be the reason it did not stick.
+     */
+    fun saveContractVersion(version: ContractVersion) {
+        viewModelScope.launch {
+            configStore.saveContractVersion(version)
+            requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, version, nowMillis)
+        }
     }
 
     /** A fresh credential unblocks the backlog — see [unblockAuthRowsAndDrain]. */
@@ -613,12 +634,27 @@ class ConfigViewModel(
             // a working configuration for no benefit to the user.
             if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
             configStore.saveDisplayUnit(imported.displayUnit)
-            // V2Shaper's field names are placeholders (00-design.md §4.2); with
-            // the contract-version dropdown gone, selectableContractVersions now
-            // backs only this import-path gate, keeping V2_BODY_COMP out of a
-            // restored config even though nothing in the UI can select it either.
-            // The existing value is kept rather than forced to a default — this
-            // skips one field, it does not half-apply the import.
+            // Same list the Settings selector offers, so a version withheld
+            // there is withheld here too. The existing value is kept rather than
+            // forced to a default — this skips one field, it does not half-apply
+            // the import.
+            //
+            // Codex review, v2-body-composition PR: a same-host restore that
+            // changes the contract must recover rows rejected under the
+            // contract being switched away from, exactly like a manual toggle
+            // does — requeueRowsRejectedUnderOtherContract is shared with
+            // saveContractVersion for exactly this. The requeue+drain itself
+            // is deferred past applyImportedProfilesAndCredential below (a
+            // second review pass caught it running before that point, which
+            // let a WorkManager drain reach the network under the *previous*
+            // credential — a stale or another user's session — instead of
+            // the one the backup installs, or none at all after a host
+            // change). Also gated on keepsSameHost for the same reason
+            // unblockAuthRowsAndDrain is: on a host change, resurrecting rows
+            // straight into a drain is the exact bypass blockAllPendingForAuth
+            // above exists to prevent.
+            val shouldRecoverContractRejections = imported.contractVersion in selectableContractVersions &&
+                keepsSameHost
             if (imported.contractVersion in selectableContractVersions) {
                 configStore.saveContractVersion(imported.contractVersion)
             }
@@ -633,6 +669,9 @@ class ConfigViewModel(
             rearmScanner?.invoke()
             if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
                 unblockAuthRowsAndDrain()
+            }
+            if (shouldRecoverContractRejections) {
+                requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
             }
             if (keepsSameHost) {
                 ImportOutcome.APPLIED
@@ -753,4 +792,33 @@ class ConfigViewModel(
             }
         }
     }
+}
+
+
+private const val CONFIG_VIEW_MODEL_TAG = "ConfigViewModel"
+
+/**
+ * Rows the *previous* contract's server rejected are a different matter from
+ * rows this one rejects: a 422 is a statement about the contract, not the
+ * reading, so a switch — however it happens — is the moment such a row earns
+ * a fresh attempt. Shared by [ConfigViewModel.saveContractVersion] and
+ * [ConfigViewModel.importSettings], which both change the stored contract and
+ * both owe this recovery. Top-level rather than a member: it needs nothing
+ * from `ConfigViewModel` but its two collaborators, and the class was already
+ * at this file's function-count ceiling. Best-effort — the config write is
+ * the setting, and the requeue must never be the reason it did not stick.
+ */
+private suspend fun requeueRowsRejectedUnderOtherContract(
+    dao: ReadingDao,
+    deliveryTrigger: DeliveryTrigger,
+    version: ContractVersion,
+    nowMillis: () -> Long,
+) {
+    runCatching {
+        val stranded = dao.failedPermanentlyUnderOtherContract(version.wire)
+        if (stranded.isNotEmpty()) {
+            dao.requeueForReplay(stranded, nowMillis())
+            deliveryTrigger.triggerImmediateDrain()
+        }
+    }.onFailure { Log.w(CONFIG_VIEW_MODEL_TAG, "could not requeue rows rejected under the previous contract", it) }
 }

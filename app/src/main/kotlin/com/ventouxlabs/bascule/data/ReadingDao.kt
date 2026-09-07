@@ -109,14 +109,45 @@ interface ReadingDao {
      * window, not a continuation of whatever attempt/backoff state the
      * original `SENT` delivery left behind, since this is a new delivery
      * attempt in every sense that matters to the drain.
+     *
+     * `contractVersionAtDelivery`/`permanentRejectionHttpCode` are cleared
+     * too (Codex review, v2-body-composition PR, 4th pass): both callers —
+     * this recovery path and [ReplayMigrationWorker] — resubmit a row from
+     * scratch, and stale provenance from the *previous* attempt otherwise
+     * survives every later outcome (an expiry, an unrelated transient
+     * failure) that never re-stamps it, so a row that failed for reasons
+     * having nothing to do with the contract could still be matched by
+     * [failedPermanentlyUnderOtherContract] on some future switch.
      */
     @Query(
         """
         UPDATE readings
         SET status = 'PENDING', attemptCount = 0, retryEpochMillis = :nowMillis,
-            lastError = NULL, lastErrorClass = NULL, nextAttemptMillis = NULL
+            lastError = NULL, lastErrorClass = NULL, nextAttemptMillis = NULL,
+            contractVersionAtDelivery = NULL, permanentRejectionHttpCode = NULL
         WHERE id IN (:ids)
         """,
     )
     suspend fun requeueForReplay(ids: List<String>, nowMillis: Long)
+
+    /**
+     * Rows a server rejected for their *shape* rather than their content: a
+     * 422 under one contract version says nothing about the reading under
+     * another. Scoped to 422 specifically — `PermanentRejection` also covers
+     * 400/404/409/413 (`ResponseClassifier.PERMANENT_CODES`), and a contract
+     * switch cannot fix a malformed row or a not-found endpoint, only a
+     * schema the old contract could not satisfy (Codex review,
+     * v2-body-composition PR). `contractVersionAtDelivery` is stamped on
+     * every attempt, so a `FAILED_PERMANENT` row carrying a different version
+     * than the one now configured was refused by the old contract, and a
+     * switch is the moment it earns a fresh attempt — see
+     * `ConfigViewModel.saveContractVersion`. Rows with no stamp never reached
+     * a server and are left alone.
+     */
+    @Query(
+        "SELECT id FROM readings WHERE status = 'FAILED_PERMANENT' " +
+            "AND permanentRejectionHttpCode = 422 " +
+            "AND contractVersionAtDelivery IS NOT NULL AND contractVersionAtDelivery != :wire",
+    )
+    suspend fun failedPermanentlyUnderOtherContract(wire: Int): List<String>
 }
