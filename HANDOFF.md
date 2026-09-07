@@ -18,6 +18,48 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-07, night: v2 body composition, the GattSession split, and a signed release
+
+Three PRs, each with a devil's-advocate pass and (once the quota reset)
+a Codex review, CI green, merged in order:
+
+- **PR #3 — v2 contract offered again.** `vitalforge` PR #40 (bmi/bmr/amr)
+  was merged first. `selectableContractVersions` is now every version; the
+  Settings selector returns as its own "What Bascule sends" card with human
+  labels. Review finding worth remembering: a 422 is classified permanent
+  and nothing revisits `FAILED_PERMANENT`, so a user who picked v2 before
+  the server could accept it would have lost a day's weigh-in for good —
+  `saveContractVersion` now requeues rows stamped with the *other* contract
+  (`ReadingDao.failedPermanentlyUnderOtherContract`) and drains.
+  **The live server has not pulled the new image** — atlas has no
+  auto-deploy and this session has no SSH there (`user@atlas: Permission
+  denied (publickey)`). Until `docker compose -f docker-compose.prod.yml
+  pull && up -d` runs on atlas, leave the phone on v1.
+- **PR #4 — `GattSession` split.** `ConnectLadder` (E1/E2/E3 + stale drain)
+  and `MeasurementPhase` (E7/E17/E8 listening, emission, ceiling memory)
+  extracted verbatim; `GattSession` is 652 lines. All 60 session tests
+  unchanged. A direct `ConnectLadderTest` pins the drain invariant.
+- **PR #5 — signed release builds.** Keystore generated 2026-09-06
+  (RSA-4096, 30 years, alias `bascule`, SHA-256 `F6:DF:2B:0D…10:18`) at
+  `~/.config/bascule/bascule-release.jks` with `keystore.properties`
+  beside it (mode 600), and in the repo secrets `BASCULE_KEYSTORE_B64`,
+  `BASCULE_STORE_PASSWORD`, `BASCULE_KEY_PASSWORD`. **Back the keystore up
+  somewhere durable** — without it the app can never be updated in place.
+  CI's `release` job signs and uploads `app-release.apk` and prints the
+  signer. R8 needed four `-dontwarn` rules for Tink's ErrorProne
+  annotations. 2.4 MB against 22.6 MB debug.
+
+**The phone is still on the debug build.** Moving it to release means
+export → uninstall → install → import (signatures differ), which needs
+~2 minutes of uninterrupted screen; every attempt tonight was pre-empted
+by the user using the phone. The one locally stored reading is lost in
+that move (it is on the server); the bond and Tailscale survive. On a
+release build `run-as` no longer works — `tools/weigh-in-test.sh`
+degrades to logcat and points at the Scale tab and History.
+
+**Codex** hit its usage window (reset Sep 7 12:50 AM); the fail-closed
+gate was logged for PR #3 and the reviews re-run after the reset.
+
 ## 2026-09-06, later: a fresh phone could never pair — E5 implemented (`1519970`)
 
 The user handed over a second phone (Pixel 10 Pro Fold, a dev bench) and
