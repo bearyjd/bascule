@@ -111,6 +111,19 @@ class DeliveryDrainer(
      * `runtime.api.contract` fresh each time, the same value the batch below
      * is about to submit under, so there is no gap for a race to live in.
      * A no-op query when nothing is stranded, which is the common case.
+     *
+     * Residual, not silently closed (Codex review, v2-body-composition PR,
+     * 5th pass): if the switch lands while *this* drain is already running,
+     * `DeliveryScheduler.triggerImmediateDrain`'s `ExistingWorkPolicy.KEEP`
+     * silently drops the new trigger — a run already in flight always wins,
+     * by the same design that keeps a periodic and a triggered drain from
+     * ever running concurrently and double-submitting (see that class's own
+     * KDoc). A row rejected in that exact window recovers at the next
+     * periodic drain (15 min) or capture-triggered one, not immediately.
+     * Never lost — durably PENDING or FAILED_PERMANENT throughout — and
+     * closing the last of it would mean a dedicated follow-up worker for a
+     * race narrower than a single drain's own runtime, which is not
+     * warranted by what it costs the user: a bounded delay, not data loss.
      */
     private suspend fun recoverRowsRejectedUnderAnotherContract() {
         val stranded = dao.failedPermanentlyUnderOtherContract(runtime.api.contract.wire)

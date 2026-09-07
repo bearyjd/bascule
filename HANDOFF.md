@@ -993,6 +993,19 @@ follow-up, then push and merge.
 
 ## Known open items (carried forward, still genuinely open — don't silently resolve)
 
+- **v2's contract-switch recovery has one narrow, self-healing residual**
+  (Codex review, v2-body-composition PR, 5 rounds — 4 fixed real bugs, this
+  5th is an accepted trade-off, not an oversight). If a contract switch
+  lands in the exact instant a drain is already running,
+  `DeliveryScheduler.triggerImmediateDrain`'s `ExistingWorkPolicy.KEEP`
+  silently drops the new trigger by the same design that prevents a
+  periodic and a triggered drain from double-submitting. A row rejected in
+  that window recovers at the next periodic drain (≤15 min) or the next
+  capture, not instantly — never lost, never resubmitted twice. Closing it
+  fully would need a dedicated follow-up worker for a race narrower than
+  one drain's own runtime; documented at
+  `DeliveryDrainer.recoverRowsRejectedUnderAnotherContract`'s KDoc rather
+  than built, deliberately.
 - **`GattSession.kt` is 1055 lines** (was 917 before 2026-09-05), past the
   800-line ceiling in the user's style rules. The 2026-09-06 additions —
   the E5 bond wait, the pairing-aware write/subscribe awaits, the
