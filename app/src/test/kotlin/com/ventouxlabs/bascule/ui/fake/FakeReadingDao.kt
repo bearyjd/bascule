@@ -85,6 +85,7 @@ class FakeReadingDao(
     override suspend fun failedPermanentlyUnderOtherContract(wire: Int): List<String> =
         _rows.value
             .filter { it.status == ReadingStatus.FAILED_PERMANENT }
+            .filter { it.permanentRejectionHttpCode == 422 }
             .filter { it.contractVersionAtDelivery != null && it.contractVersionAtDelivery != wire }
             .map { it.id }
 

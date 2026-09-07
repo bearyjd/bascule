@@ -242,4 +242,48 @@ class ReadingDaoSqlTest {
             dao.pending(nowMillis = Long.MAX_VALUE, limit = DeliveryCoordinator.DRAIN_BATCH_LIMIT).size,
         )
     }
+
+    /**
+     * Codex review, v2-body-composition PR: `failedPermanentlyUnderOtherContract`
+     * backs `ConfigViewModel.saveContractVersion`'s recovery, and every test of
+     * that behaviour runs against `FakeReadingDao`, whose own hand-written
+     * `.filter {}` implementation cannot catch a mistake in the real SQL — it
+     * would agree with a wrong query as readily as a right one. Confirmed here
+     * by mutation: deleting the `permanentRejectionHttpCode = 422` clause from
+     * the `@Query` string leaves the fake's tests fully green.
+     */
+    @Test
+    fun failedPermanentlyUnderOtherContractMatchesOnlyA422StampedWithADifferentContract() = runBlocking {
+        dao.insert(
+            readingFixture(id = "recoverable").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = 2,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        dao.insert(
+            readingFixture(id = "same-contract").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = 1,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        dao.insert(
+            readingFixture(id = "not-a-schema-rejection").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = 2,
+                permanentRejectionHttpCode = 404,
+            ),
+        )
+        dao.insert(
+            readingFixture(id = "never-reached-a-server").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = null,
+                permanentRejectionHttpCode = null,
+            ),
+        )
+        dao.insert(readingFixture(id = "still-pending", status = ReadingStatus.PENDING))
+
+        assertEquals(listOf("recoverable"), dao.failedPermanentlyUnderOtherContract(wire = 1))
+    }
 }

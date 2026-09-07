@@ -643,10 +643,17 @@ class ConfigViewModel(
             // changes the contract must recover rows rejected under the
             // contract being switched away from, exactly like a manual toggle
             // does — requeueRowsRejectedUnderOtherContract is shared with
-            // saveContractVersion for exactly this.
+            // saveContractVersion for exactly this. Gated on keepsSameHost:
+            // this recovery turns FAILED_PERMANENT rows back into PENDING and
+            // triggers an immediate drain, which on a host change would
+            // resubmit them to the *new* host before blockAllPendingForAuth's
+            // gate above has been cleared by an explicit user action — the
+            // exact bypass that gate exists to prevent (Codex review).
             if (imported.contractVersion in selectableContractVersions) {
                 configStore.saveContractVersion(imported.contractVersion)
-                requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
+                if (keepsSameHost) {
+                    requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
+                }
             }
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
             configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)

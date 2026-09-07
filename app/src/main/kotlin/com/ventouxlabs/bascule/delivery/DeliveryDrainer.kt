@@ -153,6 +153,11 @@ class DeliveryDrainer(
                     // this column and would never have matched a real
                     // rejection, only the hand-stamped rows in its own tests.
                     contractVersionAtDelivery = runtime.api.contract.wire,
+                    // Which permanent code, so the same recovery query can
+                    // tell a schema rejection (422, contract-fixable) apart
+                    // from the others PermanentRejection also covers, none of
+                    // which a contract switch can do anything about.
+                    permanentRejectionHttpCode = result.httpCode,
                 ),
             )
             is SubmitResult.TransientFailure -> {
