@@ -643,17 +643,20 @@ class ConfigViewModel(
             // changes the contract must recover rows rejected under the
             // contract being switched away from, exactly like a manual toggle
             // does — requeueRowsRejectedUnderOtherContract is shared with
-            // saveContractVersion for exactly this. Gated on keepsSameHost:
-            // this recovery turns FAILED_PERMANENT rows back into PENDING and
-            // triggers an immediate drain, which on a host change would
-            // resubmit them to the *new* host before blockAllPendingForAuth's
-            // gate above has been cleared by an explicit user action — the
-            // exact bypass that gate exists to prevent (Codex review).
+            // saveContractVersion for exactly this. The requeue+drain itself
+            // is deferred past applyImportedProfilesAndCredential below (a
+            // second review pass caught it running before that point, which
+            // let a WorkManager drain reach the network under the *previous*
+            // credential — a stale or another user's session — instead of
+            // the one the backup installs, or none at all after a host
+            // change). Also gated on keepsSameHost for the same reason
+            // unblockAuthRowsAndDrain is: on a host change, resurrecting rows
+            // straight into a drain is the exact bypass blockAllPendingForAuth
+            // above exists to prevent.
+            val shouldRecoverContractRejections = imported.contractVersion in selectableContractVersions &&
+                keepsSameHost
             if (imported.contractVersion in selectableContractVersions) {
                 configStore.saveContractVersion(imported.contractVersion)
-                if (keepsSameHost) {
-                    requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
-                }
             }
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
             configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
@@ -666,6 +669,9 @@ class ConfigViewModel(
             rearmScanner?.invoke()
             if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
                 unblockAuthRowsAndDrain()
+            }
+            if (shouldRecoverContractRejections) {
+                requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
             }
             if (keepsSameHost) {
                 ImportOutcome.APPLIED

@@ -10,6 +10,8 @@ import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
 import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.network.AuthTokenStore
+import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
@@ -48,11 +50,12 @@ class ConfigViewModelProfileRegistryTest {
         scaleRegistrar: ScaleRegistrar? = null,
         scaleProfileStore: ScaleProfileStore? = null,
         rearmScanner: (suspend () -> Unit)? = null,
-        deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
+        deliveryTrigger: DeliveryTrigger = FakeDeliveryTrigger(),
         dao: FakeReadingDao = FakeReadingDao(),
+        authTokenStore: AuthTokenStore = FakeAuthTokenStore(),
     ) = ConfigViewModel(
         configStore,
-        FakeAuthTokenStore(),
+        authTokenStore,
         consentStore,
         sessionCookieStore,
         deliveryTrigger,
@@ -75,8 +78,9 @@ class ConfigViewModelProfileRegistryTest {
         configStore: FakeConfigStore = FakeConfigStore(),
         sessionCookieStore: FakeSessionCookieStore = FakeSessionCookieStore(),
         rearmScanner: (suspend () -> Unit)? = null,
-        deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
+        deliveryTrigger: DeliveryTrigger = FakeDeliveryTrigger(),
         dao: FakeReadingDao = FakeReadingDao(),
+        authTokenStore: AuthTokenStore = FakeAuthTokenStore(),
     ) = viewModel(
         configStore = configStore,
         consentStore = registry,
@@ -85,6 +89,7 @@ class ConfigViewModelProfileRegistryTest {
         rearmScanner = rearmScanner,
         deliveryTrigger = deliveryTrigger,
         dao = dao,
+        authTokenStore = authTokenStore,
     )
 
     private fun profile(
@@ -359,6 +364,73 @@ class ConfigViewModelProfileRegistryTest {
             0,
             trigger.triggerCount,
         )
+    }
+
+    /**
+     * Codex review, v2-body-composition PR, third pass: the requeue+drain for
+     * a same-host, contract-changing restore used to run *before*
+     * `applyImportedProfilesAndCredential`. `deliveryTrigger.triggerImmediateDrain()`
+     * schedules a WorkManager run rather than draining inline, so that ordering
+     * let the scheduled drain reach the network under whatever credential was
+     * still installed at that moment — a stale one, or another user's session
+     * — instead of the one this same backup is in the middle of installing.
+     * Pinned by recording the order two collaborators are touched in, since
+     * `FakeDeliveryTrigger`'s plain counter cannot see *when* relative to the
+     * credential write.
+     */
+    @Test
+    fun theContractRecoveryDrainIsTriggeredAfterTheImportedCredentialIsApplied() = runTest {
+        val order = mutableListOf<String>()
+        val dao = FakeReadingDao()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        val orderTrackingAuthTokenStore = object : AuthTokenStore {
+            private val delegate = FakeAuthTokenStore()
+            override fun isSet() = delegate.isSet()
+            override fun token() = delegate.token()
+            override fun save(token: String) {
+                order += "credential-applied"
+                delegate.save(token)
+            }
+            override fun clear() = delegate.clear()
+        }
+        val orderTrackingTrigger = object : DeliveryTrigger {
+            override fun triggerImmediateDrain() {
+                order += "drain-triggered"
+            }
+        }
+        val configStore = FakeConfigStore(initialContractVersion = ContractVersion.V2_BODY_COMP)
+        val vm = viewModelWithRegistry(
+            FakeScaleProfileStore(),
+            configStore,
+            dao = dao,
+            deliveryTrigger = orderTrackingTrigger,
+            authTokenStore = orderTrackingAuthTokenStore,
+        )
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings().copy(
+                contractVersion = ContractVersion.V1_WEIGHT_ONLY,
+                credentialType = BackupCredentialType.TOKEN,
+                credentialValue = "backup-token",
+            ),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        // Two drains actually fire here — unblockAuthRowsAndDrain's own, plus
+        // the contract recovery's — and both are correct to fire once the
+        // credential is in place. The invariant under test is narrower: no
+        // drain may have already run when the credential was applied.
+        assertEquals("credential-applied", order.first())
+        assertTrue("both drains must follow the credential write", order.drop(1).all { it == "drain-triggered" })
     }
 
     // --- M12: the scan registration reflects what the screen just changed.
