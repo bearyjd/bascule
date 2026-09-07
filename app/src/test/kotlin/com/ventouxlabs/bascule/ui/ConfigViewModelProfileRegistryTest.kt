@@ -10,6 +10,8 @@ import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
 import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.ui.fake.readingFixture
+import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
 import com.ventouxlabs.bascule.ui.fake.FakeAuthTokenStore
@@ -46,13 +48,15 @@ class ConfigViewModelProfileRegistryTest {
         scaleRegistrar: ScaleRegistrar? = null,
         scaleProfileStore: ScaleProfileStore? = null,
         rearmScanner: (suspend () -> Unit)? = null,
+        deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
+        dao: FakeReadingDao = FakeReadingDao(),
     ) = ConfigViewModel(
         configStore,
         FakeAuthTokenStore(),
         consentStore,
         sessionCookieStore,
-        FakeDeliveryTrigger(),
-        FakeReadingDao(),
+        deliveryTrigger,
+        dao,
         ioDispatcher = mainDispatcherRule.dispatcher,
         scaleRegistrar = scaleRegistrar,
         scaleProfileStore = scaleProfileStore,
@@ -311,4 +315,84 @@ class ConfigViewModelProfileRegistryTest {
         scaleCredential = null,
         profiles = profiles,
     )
+    @Test
+    fun choosingAContractVersionPersistsIt() = runTest {
+        val configStore = FakeConfigStore()
+        val vm = viewModel(configStore = configStore)
+
+        vm.saveContractVersion(ContractVersion.V2_BODY_COMP)
+        advanceUntilIdle()
+
+        assertEquals(ContractVersion.V2_BODY_COMP, configStore.contractVersion.value)
+    }
+
+    /**
+     * Devil's-advocate finding on the v2 PR: a 422 is classified permanent, so
+     * a reading rejected because the *server* did not yet speak the chosen
+     * contract was gone for good even after the user switched back. Switching
+     * contracts is the moment such rows earn a fresh attempt — and only such
+     * rows: one rejected under the contract now chosen was rejected on its
+     * own merits.
+     */
+    @Test
+    fun switchingContractsRequeuesRowsRejectedUnderTheOtherOneOnly() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+            ),
+        )
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v1",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V1_WEIGHT_ONLY.wire,
+            ),
+        )
+        dao.insert(
+            readingFixture().copy(
+                id = "never-sent",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = null,
+            ),
+        )
+        val vm = viewModel(dao = dao, deliveryTrigger = trigger)
+
+        vm.saveContractVersion(ContractVersion.V1_WEIGHT_ONLY)
+        advanceUntilIdle()
+
+        val byId = dao.rows.value.associateBy { it.id }
+        assertEquals(
+            "rejected by the other contract: retried",
+            ReadingStatus.PENDING,
+            byId.getValue("rejected-under-v2").status,
+        )
+        assertEquals(
+            "rejected by this contract: stays failed",
+            ReadingStatus.FAILED_PERMANENT,
+            byId.getValue("rejected-under-v1").status,
+        )
+        assertEquals(
+            "never reached a server: untouched",
+            ReadingStatus.FAILED_PERMANENT,
+            byId.getValue("never-sent").status,
+        )
+        assertEquals("a requeue is followed by a drain", 1, trigger.triggerCount)
+    }
+
+    /** No stranded rows, no drain — switching must not poke the network for nothing. */
+    @Test
+    fun switchingContractsWithNothingStrandedDoesNotDrain() = runTest {
+        val trigger = FakeDeliveryTrigger()
+        val vm = viewModel(deliveryTrigger = trigger)
+
+        vm.saveContractVersion(ContractVersion.V2_BODY_COMP)
+        advanceUntilIdle()
+
+        assertEquals(0, trigger.triggerCount)
+    }
+
 }

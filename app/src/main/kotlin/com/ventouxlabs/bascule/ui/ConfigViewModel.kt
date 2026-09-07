@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.ui
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
@@ -310,9 +311,26 @@ class ConfigViewModel(
      * Takes effect on the next delivery: `RuntimeApiFactory` reads the stored
      * version per request, so rows still pending go out under the new contract
      * and rows already `SENT` are untouched (re-sending them is WP-22's job).
+     *
+     * Rows the *previous* contract's server rejected are a different matter.
+     * A 422 lands them in `FAILED_PERMANENT`, which nothing revisits — so a
+     * user who picked v2 a day before their server could accept it, noticed,
+     * and switched back would have lost that day's weigh-in for good. The
+     * rejection was of the contract, not the reading, so a switch requeues
+     * them. Best-effort: the config write is the setting; the requeue must
+     * never be the reason it did not stick.
      */
     fun saveContractVersion(version: ContractVersion) {
-        viewModelScope.launch { configStore.saveContractVersion(version) }
+        viewModelScope.launch {
+            configStore.saveContractVersion(version)
+            runCatching {
+                val stranded = dao.failedPermanentlyUnderOtherContract(version.wire)
+                if (stranded.isNotEmpty()) {
+                    dao.requeueForReplay(stranded, nowMillis())
+                    deliveryTrigger.triggerImmediateDrain()
+                }
+            }.onFailure { Log.w(TAG, "could not requeue rows rejected under the previous contract", it) }
+        }
     }
 
     /** A fresh credential unblocks the backlog — see [unblockAuthRowsAndDrain]. */
@@ -689,6 +707,7 @@ class ConfigViewModel(
     }
 
     companion object {
+        private const val TAG = "ConfigViewModel"
         private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
         private val BLUETOOTH_ADDRESS = ScaleProfileCodec.BLUETOOTH_ADDRESS
         private val SCALE_INDEX_RANGE = SigWeightProfile.SCALE_INDEX_RANGE

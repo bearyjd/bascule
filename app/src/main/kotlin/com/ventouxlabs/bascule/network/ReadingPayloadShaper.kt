@@ -33,13 +33,14 @@ object V1Shaper : ReadingPayloadShaper {
 }
 
 /**
- * Contract v2, gated on the parallel VitalForge effort.
+ * Contract v2: weight plus body composition.
  *
- * The key strings below are the one thing not yet pinned: 00-design.md §4.2
- * were verified against VitalForge's real `WeightIn` model on 2026-09-03 and
- * the three it lacked (`bmi`/`bmr`/`amr`) were added server-side in
- * `vitalforge` PR #40 (merged 2026-09-07). The shaper is selectable in Settings;
- * a server older than that PR rejects the whole reading with a 422.
+ * The key strings below were verified against VitalForge's real `WeightIn`
+ * model on 2026-09-03; the three it lacked (`bmi`/`bmr`/`amr`) were added
+ * server-side in `vitalforge` PR #40, merged 2026-09-07. A server older than
+ * that PR rejects the whole reading with a 422 — `ConfigViewModel.
+ * saveContractVersion` is what lets a row rejected for its shape be retried
+ * once the contract is switched.
  */
 object V2Shaper : ReadingPayloadShaper {
     override fun shape(reading: ReadingEntity, unit: WeightUnit): ShapedPayload {

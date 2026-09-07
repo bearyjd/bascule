@@ -119,4 +119,19 @@ interface ReadingDao {
         """,
     )
     suspend fun requeueForReplay(ids: List<String>, nowMillis: Long)
+
+    /**
+     * Rows a server rejected for their *shape* rather than their content: a
+     * 422 under one contract version says nothing about the reading under
+     * another. `contractVersionAtDelivery` is stamped on every attempt, so a
+     * `FAILED_PERMANENT` row carrying a different version than the one now
+     * configured was refused by the old contract, and a switch is the moment
+     * it earns a fresh attempt — see `ConfigViewModel.saveContractVersion`.
+     * Rows with no stamp never reached a server and are left alone.
+     */
+    @Query(
+        "SELECT id FROM readings WHERE status = 'FAILED_PERMANENT' " +
+            "AND contractVersionAtDelivery IS NOT NULL AND contractVersionAtDelivery != :wire",
+    )
+    suspend fun failedPermanentlyUnderOtherContract(wire: Int): List<String>
 }
