@@ -323,13 +323,7 @@ class ConfigViewModel(
     fun saveContractVersion(version: ContractVersion) {
         viewModelScope.launch {
             configStore.saveContractVersion(version)
-            runCatching {
-                val stranded = dao.failedPermanentlyUnderOtherContract(version.wire)
-                if (stranded.isNotEmpty()) {
-                    dao.requeueForReplay(stranded, nowMillis())
-                    deliveryTrigger.triggerImmediateDrain()
-                }
-            }.onFailure { Log.w(TAG, "could not requeue rows rejected under the previous contract", it) }
+            requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, version, nowMillis)
         }
     }
 
@@ -644,8 +638,15 @@ class ConfigViewModel(
             // there is withheld here too. The existing value is kept rather than
             // forced to a default — this skips one field, it does not half-apply
             // the import.
+            //
+            // Codex review, v2-body-composition PR: a same-host restore that
+            // changes the contract must recover rows rejected under the
+            // contract being switched away from, exactly like a manual toggle
+            // does — requeueRowsRejectedUnderOtherContract is shared with
+            // saveContractVersion for exactly this.
             if (imported.contractVersion in selectableContractVersions) {
                 configStore.saveContractVersion(imported.contractVersion)
+                requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
             }
             configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
             configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
@@ -707,7 +708,6 @@ class ConfigViewModel(
     }
 
     companion object {
-        private const val TAG = "ConfigViewModel"
         private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
         private val BLUETOOTH_ADDRESS = ScaleProfileCodec.BLUETOOTH_ADDRESS
         private val SCALE_INDEX_RANGE = SigWeightProfile.SCALE_INDEX_RANGE
@@ -779,4 +779,33 @@ class ConfigViewModel(
             }
         }
     }
+}
+
+
+private const val CONFIG_VIEW_MODEL_TAG = "ConfigViewModel"
+
+/**
+ * Rows the *previous* contract's server rejected are a different matter from
+ * rows this one rejects: a 422 is a statement about the contract, not the
+ * reading, so a switch — however it happens — is the moment such a row earns
+ * a fresh attempt. Shared by [ConfigViewModel.saveContractVersion] and
+ * [ConfigViewModel.importSettings], which both change the stored contract and
+ * both owe this recovery. Top-level rather than a member: it needs nothing
+ * from `ConfigViewModel` but its two collaborators, and the class was already
+ * at this file's function-count ceiling. Best-effort — the config write is
+ * the setting, and the requeue must never be the reason it did not stick.
+ */
+private suspend fun requeueRowsRejectedUnderOtherContract(
+    dao: ReadingDao,
+    deliveryTrigger: DeliveryTrigger,
+    version: ContractVersion,
+    nowMillis: () -> Long,
+) {
+    runCatching {
+        val stranded = dao.failedPermanentlyUnderOtherContract(version.wire)
+        if (stranded.isNotEmpty()) {
+            dao.requeueForReplay(stranded, nowMillis())
+            deliveryTrigger.triggerImmediateDrain()
+        }
+    }.onFailure { Log.w(CONFIG_VIEW_MODEL_TAG, "could not requeue rows rejected under the previous contract", it) }
 }

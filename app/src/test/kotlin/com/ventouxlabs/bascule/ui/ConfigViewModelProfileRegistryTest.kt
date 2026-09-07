@@ -75,12 +75,16 @@ class ConfigViewModelProfileRegistryTest {
         configStore: FakeConfigStore = FakeConfigStore(),
         sessionCookieStore: FakeSessionCookieStore = FakeSessionCookieStore(),
         rearmScanner: (suspend () -> Unit)? = null,
+        deliveryTrigger: FakeDeliveryTrigger = FakeDeliveryTrigger(),
+        dao: FakeReadingDao = FakeReadingDao(),
     ) = viewModel(
         configStore = configStore,
         consentStore = registry,
         sessionCookieStore = sessionCookieStore,
         scaleProfileStore = registry,
         rearmScanner = rearmScanner,
+        deliveryTrigger = deliveryTrigger,
+        dao = dao,
     )
 
     private fun profile(
@@ -266,6 +270,42 @@ class ConfigViewModelProfileRegistryTest {
             configStore.displayUnit.value,
         )
         assertEquals("https://mine.example.com", configStore.baseUrl.value)
+    }
+
+    /**
+     * Codex review, v2-body-composition PR: a same-host restore that changes
+     * the contract used to write straight to `ConfigStore`, bypassing the
+     * recovery `saveContractVersion` gives a manual toggle — a row a v2
+     * server rejected would have stayed `FAILED_PERMANENT` forever even
+     * though the very backup being restored switches back to v1.
+     */
+    @Test
+    fun importingABackupThatChangesTheContractRequeuesRowsRejectedUnderTheOldOne() = runTest {
+        val dao = FakeReadingDao()
+        val trigger = FakeDeliveryTrigger()
+        dao.insert(
+            readingFixture().copy(
+                id = "rejected-under-v2",
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+            ),
+        )
+        val configStore = FakeConfigStore(initialContractVersion = ContractVersion.V2_BODY_COMP)
+        val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore, dao = dao, deliveryTrigger = trigger)
+        val bytes = SettingsBackupCodec.encrypt(
+            backupSettings().copy(contractVersion = ContractVersion.V1_WEIGHT_ONLY),
+            "correct horse battery staple",
+        )
+
+        vm.importSettings(bytes, "correct horse battery staple").getOrThrow()
+        advanceUntilIdle()
+
+        assertEquals(ContractVersion.V1_WEIGHT_ONLY, configStore.contractVersion.value)
+        assertEquals(
+            ReadingStatus.PENDING,
+            dao.rows.value.single { it.id == "rejected-under-v2" }.status,
+        )
+        assertEquals(1, trigger.triggerCount)
     }
 
     // --- M12: the scan registration reflects what the screen just changed.

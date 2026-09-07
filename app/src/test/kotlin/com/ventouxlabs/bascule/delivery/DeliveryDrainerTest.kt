@@ -4,6 +4,7 @@ import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.fake.FakeDeliveryApi
+import com.ventouxlabs.bascule.network.ContractVersion
 import com.ventouxlabs.bascule.network.ReadingField
 import com.ventouxlabs.bascule.network.RecentResult
 import com.ventouxlabs.bascule.network.RemoteReading
@@ -100,6 +101,26 @@ class DeliveryDrainerTest {
         val row = dao.rows.value.single()
         assertEquals(ReadingStatus.FAILED_PERMANENT, row.status)
         assertEquals(ErrorClass.PERMANENT, row.lastErrorClass)
+    }
+
+    /**
+     * Codex review, v2-body-composition PR: a 422 used to leave
+     * `contractVersionAtDelivery` at its initial `null`, which is
+     * indistinguishable from a row that never reached a server at all —
+     * `ConfigViewModel.saveContractVersion`'s recovery query reads this
+     * column specifically to find rows a *previous* contract's server
+     * rejected, and could never have matched a real rejection without it.
+     */
+    @Test
+    fun aPermanentRejectionRecordsWhichContractItWasRejectedUnder() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "row-1"))
+        val api = FakeDeliveryApi(contract = ContractVersion.V2_BODY_COMP)
+        api.enqueueSubmitResult(SubmitResult.PermanentRejection(422, "bad payload"))
+
+        drainer(dao, api).drain()
+
+        assertEquals(ContractVersion.V2_BODY_COMP.wire, dao.rows.value.single().contractVersionAtDelivery)
     }
 
     @Test

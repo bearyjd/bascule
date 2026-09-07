@@ -145,6 +145,14 @@ class DeliveryDrainer(
                     lastAttemptMillis = now,
                     lastError = "server rejected reading (${result.httpCode})",
                     lastErrorClass = ErrorClass.PERMANENT,
+                    // Codex review, v2-body-composition PR: without this, a
+                    // 422 caused by the *contract* (the realistic case this
+                    // whole recovery path exists for) left the row
+                    // indistinguishable from one rejected on its own merits —
+                    // ConfigViewModel.saveContractVersion's requeue query reads
+                    // this column and would never have matched a real
+                    // rejection, only the hand-stamped rows in its own tests.
+                    contractVersionAtDelivery = runtime.api.contract.wire,
                 ),
             )
             is SubmitResult.TransientFailure -> {
