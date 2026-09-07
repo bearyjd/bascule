@@ -213,6 +213,31 @@ class ReadingDaoSqlTest {
     }
 
     /**
+     * Codex review, v2-body-composition PR, 4th pass: a row's
+     * `contractVersionAtDelivery`/`permanentRejectionHttpCode` from a previous
+     * rejection must not survive into its next attempt — a requeued row that
+     * later fails for an unrelated reason (an expiry, a transient timeout)
+     * would otherwise still look like the *old* contract's 422 to
+     * `failedPermanentlyUnderOtherContract` on some future switch.
+     */
+    @Test
+    fun requeueingForReplayClearsContractProvenance() = runBlocking {
+        dao.insert(
+            readingFixture(id = "row-1").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = 2,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+
+        dao.requeueForReplay(ids = listOf("row-1"), nowMillis = 9_000L)
+
+        val requeued = dao.pending(nowMillis = 9_000L, limit = 10).single()
+        assertNull(requeued.contractVersionAtDelivery)
+        assertNull(requeued.permanentRejectionHttpCode)
+    }
+
+    /**
      * §3.3's `source` clause is what keeps a manual entry out of the scale dedup
      * corpus. `ReadingIngestor` passes `SCALE` as a literal rather than the
      * candidate's own source — correct today because it only ever ingests scale

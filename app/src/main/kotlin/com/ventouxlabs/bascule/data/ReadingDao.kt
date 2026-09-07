@@ -109,12 +109,22 @@ interface ReadingDao {
      * window, not a continuation of whatever attempt/backoff state the
      * original `SENT` delivery left behind, since this is a new delivery
      * attempt in every sense that matters to the drain.
+     *
+     * `contractVersionAtDelivery`/`permanentRejectionHttpCode` are cleared
+     * too (Codex review, v2-body-composition PR, 4th pass): both callers —
+     * this recovery path and [ReplayMigrationWorker] — resubmit a row from
+     * scratch, and stale provenance from the *previous* attempt otherwise
+     * survives every later outcome (an expiry, an unrelated transient
+     * failure) that never re-stamps it, so a row that failed for reasons
+     * having nothing to do with the contract could still be matched by
+     * [failedPermanentlyUnderOtherContract] on some future switch.
      */
     @Query(
         """
         UPDATE readings
         SET status = 'PENDING', attemptCount = 0, retryEpochMillis = :nowMillis,
-            lastError = NULL, lastErrorClass = NULL, nextAttemptMillis = NULL
+            lastError = NULL, lastErrorClass = NULL, nextAttemptMillis = NULL,
+            contractVersionAtDelivery = NULL, permanentRejectionHttpCode = NULL
         WHERE id IN (:ids)
         """,
     )

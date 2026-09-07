@@ -71,6 +71,7 @@ class DeliveryDrainer(
      * that has not run out.
      */
     suspend fun drain(): DrainOutcome {
+        recoverRowsRejectedUnderAnotherContract()
         val batchLimit = DeliveryCoordinator.DRAIN_BATCH_LIMIT
         val pending = dao.pending(clock(), batchLimit)
         // Nothing due: returns before `recentReadings`, so a drain triggered while
@@ -96,6 +97,24 @@ class DeliveryDrainer(
             pending.size == batchLimit -> DrainOutcome.MORE_PAGES
             else -> DrainOutcome.DONE
         }
+    }
+
+    /**
+     * The backstop for `ConfigViewModel.saveContractVersion`'s own recovery:
+     * that call reads the target contract once, at the moment the user
+     * switches, but a drain already in flight under the *old* contract can
+     * still stamp a fresh 422 after that one-time query has already run —
+     * the row then sits `FAILED_PERMANENT` under the very version the user
+     * just switched away from, unrecovered until they touch the setting
+     * again (Codex review, v2-body-composition PR, 4th pass). This runs on
+     * every drain — periodic, and immediate after every capture — reading
+     * `runtime.api.contract` fresh each time, the same value the batch below
+     * is about to submit under, so there is no gap for a race to live in.
+     * A no-op query when nothing is stranded, which is the common case.
+     */
+    private suspend fun recoverRowsRejectedUnderAnotherContract() {
+        val stranded = dao.failedPermanentlyUnderOtherContract(runtime.api.contract.wire)
+        if (stranded.isNotEmpty()) dao.requeueForReplay(stranded, clock())
     }
 
     private suspend fun processRow(row: ReadingEntity, remote: RecentResult, now: Long): RowOutcome {

@@ -63,6 +63,8 @@ class FakeReadingDao(
                     lastError = null,
                     lastErrorClass = null,
                     nextAttemptMillis = null,
+                    contractVersionAtDelivery = null,
+                    permanentRejectionHttpCode = null,
                 )
             }
         }

@@ -104,6 +104,48 @@ class DeliveryDrainerTest {
     }
 
     /**
+     * Codex review, v2-body-composition PR, 4th pass: `ConfigViewModel.
+     * saveContractVersion` reads the target contract once, at the moment of
+     * the switch, so a row a *different*, already-in-flight drain rejects
+     * under the old contract right after that one-time query has run would
+     * otherwise sit unrecovered until the user touches the setting again.
+     * The drain itself is the one place that always knows, with zero gap,
+     * which contract a submission is about to go out under — so it self-heals
+     * on every pass rather than depending on the settings screen alone.
+     */
+    @Test
+    fun aDrainRecoversRowsRejectedUnderAnotherContractBeforeSubmittingAnything() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(
+            readingFixture(id = "row-1").copy(
+                status = ReadingStatus.FAILED_PERMANENT,
+                contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                permanentRejectionHttpCode = 422,
+            ),
+        )
+        val api = FakeDeliveryApi(contract = ContractVersion.V1_WEIGHT_ONLY)
+        api.enqueueSubmitResult(SubmitResult.Accepted(setOf(ReadingField.WEIGHT)))
+
+        val outcome = drainer(dao, api).drain()
+
+        assertEquals(DrainOutcome.DONE, outcome)
+        assertEquals(ReadingStatus.SENT, dao.rows.value.single().status)
+    }
+
+    /** Nothing stranded is the common case — must not touch a row that never reached a server. */
+    @Test
+    fun aDrainLeavesAPendingRowAloneWhenNothingIsStrandedUnderAnotherContract() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "row-1"))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(SubmitResult.Accepted(setOf(ReadingField.WEIGHT)))
+
+        drainer(dao, api).drain()
+
+        assertEquals(ReadingStatus.SENT, dao.rows.value.single().status)
+    }
+
+    /**
      * Codex review, v2-body-composition PR: a 422 used to leave
      * `contractVersionAtDelivery` at its initial `null`, which is
      * indistinguishable from a row that never reached a server at all —
