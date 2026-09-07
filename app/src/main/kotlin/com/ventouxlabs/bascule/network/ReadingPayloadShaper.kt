@@ -36,9 +36,10 @@ object V1Shaper : ReadingPayloadShaper {
  * Contract v2, gated on the parallel VitalForge effort.
  *
  * The key strings below are the one thing not yet pinned: 00-design.md §4.2
- * requires them to come from VitalForge's Track A contract doc rather than be
- * invented here. They are the placeholder names that document names, and the
- * shaper is not selectable until that document lands.
+ * were verified against VitalForge's real `WeightIn` model on 2026-09-03 and
+ * the three it lacked (`bmi`/`bmr`/`amr`) were added server-side in
+ * `vitalforge` PR #40 (merged 2026-09-07). The shaper is selectable in Settings;
+ * a server older than that PR rejects the whole reading with a 422.
  */
 object V2Shaper : ReadingPayloadShaper {
     override fun shape(reading: ReadingEntity, unit: WeightUnit): ShapedPayload {

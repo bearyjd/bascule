@@ -231,14 +231,13 @@ class ConfigViewModelProfileRegistryTest {
     }
 
     /**
-     * M11: `V2Shaper`'s body-composition field names are placeholders, so the
-     * dropdown withholds `V2_BODY_COMP`. An ungated import would still reach it,
-     * leaving the app posting invented field names to the user's server with no
-     * way back out of the setting. The rest of the backup must still apply —
-     * one unusable field is not grounds for refusing a valid restore.
+     * The import path reads the same list the Settings selector offers, so a
+     * backup pinned to v2 restores v2 now that v2 is offered — the gate that
+     * used to withhold it (M11) is the same gate, just no longer withholding
+     * anything. The rest of the backup applies alongside it.
      */
     @Test
-    fun importingABackupPinnedToTheWithheldV2ContractSkipsThatFieldAndAppliesTheRest() = runTest {
+    fun importingABackupPinnedToV2RestoresV2AndAppliesTheRest() = runTest {
         val configStore = FakeConfigStore(initialBaseUrl = "https://original.example.com")
         val vm = viewModelWithRegistry(FakeScaleProfileStore(), configStore)
         val bytes = SettingsBackupCodec.encrypt(
@@ -253,8 +252,8 @@ class ConfigViewModelProfileRegistryTest {
         advanceUntilIdle()
 
         assertEquals(
-            "a contract the screen cannot select must not be reachable by import",
-            ContractVersion.V1_WEIGHT_ONLY,
+            "a contract the screen offers must be reachable by import too",
+            ContractVersion.V2_BODY_COMP,
             configStore.contractVersion.value,
         )
         assertEquals(

@@ -99,6 +99,7 @@ fun ConfigScreen(
                 state = state,
                 onUnitChanged = viewModel::saveDisplayUnit,
             )
+            ContractSection(state = state, onContractChanged = viewModel::saveContractVersion)
         }
         item {
             CredentialsSection(
@@ -301,18 +302,22 @@ private fun ConnectionTestResultText(result: ConnectionTestUiState) {
 }
 
 /**
- * `V2_BODY_COMP` is withheld because `V2Shaper`'s body-composition field names
- * are placeholders: 00-design.md §4.2 requires them to come from VitalForge's
- * Track A contract doc, which has not landed. The shaper's own KDoc claims it
- * "is not selectable until that document lands" — the settings dropdown that
- * used to enforce this is gone (spec §5.1; see `ContractVersionSelectionTest`),
- * so [com.ventouxlabs.bascule.ui.ConfigViewModel.importSettings]'s field-skip
- * gate, filtering against this same list, is what makes that claim true today.
- * Delete the filter and that gate together when the doc lands and the names
- * are pinned, alongside the shaper's KDoc caveat.
+ * Every contract version the app can be asked to speak. v2 was withheld
+ * here while its body-composition field names were unverified against
+ * VitalForge; they were checked against the server's real `WeightIn` model
+ * on 2026-09-03 and the three it lacked (`bmi`/`bmr`/`amr`) were added to the
+ * server (`vitalforge` PR #40, merged 2026-09-07). The selector below and
+ * [com.ventouxlabs.bascule.ui.ConfigViewModel.importSettings]'s field-skip
+ * gate both read this list, so a version withheld again in future is withheld
+ * from both paths at once.
  */
-internal val selectableContractVersions: List<ContractVersion> =
-    ContractVersion.entries.filterNot { it == ContractVersion.V2_BODY_COMP }
+internal val selectableContractVersions: List<ContractVersion> = ContractVersion.entries
+
+/** What each version means to the person choosing it, not its wire number. */
+internal fun contractVersionLabel(version: ContractVersion): String = when (version) {
+    ContractVersion.V1_WEIGHT_ONLY -> "v1 — weight only"
+    ContractVersion.V2_BODY_COMP -> "v2 — weight and body composition"
+}
 
 @Composable
 private fun UnitSection(
@@ -326,6 +331,34 @@ private fun UnitSection(
             optionLabel = { it.name.lowercase().replaceFirstChar(Char::uppercase) },
             selected = state.displayUnit,
             onSelected = onUnitChanged,
+        )
+    }
+}
+
+/**
+ * Back, now that there is more than one legitimate option (the earlier
+ * removal, spec §5.1, was for a single-entry list — see
+ * `ContractVersionSelectionTest`). Its own card rather than a row under
+ * "Units", so the unit card's header stays honest.
+ */
+@Composable
+private fun ContractSection(
+    state: ConfigUiState,
+    onContractChanged: (ContractVersion) -> Unit,
+) {
+    SectionCard(title = "What Bascule sends") {
+        LabeledDropdown(
+            label = "VitalForge contract",
+            options = selectableContractVersions,
+            optionLabel = ::contractVersionLabel,
+            selected = state.contractVersion,
+            onSelected = onContractChanged,
+        )
+        Text(
+            "v2 sends body fat, water, muscle, bone mass, BMI and metabolic rate alongside the weight. " +
+                "It needs a VitalForge that accepts them; older servers reject the whole reading.",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp),
         )
     }
 }
