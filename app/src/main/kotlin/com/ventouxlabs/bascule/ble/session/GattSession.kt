@@ -101,7 +101,7 @@ class GattSession(
         // event from an earlier step; (2) a late event from an already-closed
         // attempt (a post-close 133 callback, say) could otherwise sit in the
         // channel and be misread as the *next* attempt's outcome — see
-        // [drainStaleEvents], called after every mid-retry close().
+        // [ConnectLadder.drainStaleEvents], called after every mid-retry close().
         //
         // Depends on `transport.events` replaying at least the in-flight
         // script to a subscriber that starts collecting after emission — see
@@ -516,7 +516,7 @@ class GattSession(
         reconnectAttempts++
         // Same teardown-before-retry discipline as E1/E2: the BluetoothGatt
         // behind a dropped link is dead, and reusing it is the classic Android
-        // leak. Drained only after a real suspension — see [drainStaleEvents].
+        // leak. Drained only after a real suspension — see [ConnectLadder.drainStaleEvents].
         transport.close()
         yield()
         ladder.drainStaleEvents(events)

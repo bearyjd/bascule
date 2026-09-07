@@ -17,6 +17,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * emitted — but not the link: a drop mid-listen is handed back through
  * [onDropped], because reconnecting re-runs discovery and the handshake, which
  * are the session's business.
+ *
+ * One instance per session, holding the one decoder instance the session
+ * holds, never reset across reconnect legs — the same deliberate choice
+ * `GattSession.reconnectOnce` documents. A weight buffered for correlation
+ * survives the drop, and `MAX_EMISSIONS_PER_SESSION`'s one-shot latch in the
+ * decoder is what keeps a second leg from emitting twice; [emittedReading]
+ * here is the ceiling's memory of it, not a second latch.
  */
 internal class MeasurementPhase(
     private val decoder: ScaleDecoder,
@@ -51,7 +58,7 @@ internal class MeasurementPhase(
         receiveMeasureStep(events, stopAfterFirstFrame, onMalformed)
     }
 
-    /** See [receiveSubscriptionOutcome] for why this is a function, not a lambda. */
+    /** See `GattSession.receiveSubscriptionOutcome` for why this is a function, not a lambda. */
     private suspend fun receiveMeasureStep(
         events: Channel<TransportEvent>,
         stopAfterFirstFrame: Boolean,
