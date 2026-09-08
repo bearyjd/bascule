@@ -136,7 +136,18 @@ class VitalForgeHttpClient(
                 is SubmitResult.Accepted -> ConnectionTestResult.Authorized
                 is SubmitResult.AuthRejected -> ConnectionTestResult.Unauthorized(classified.httpCode)
                 is SubmitResult.TransientFailure -> ConnectionTestResult.Unreachable(classified.reason)
-                is SubmitResult.PermanentRejection -> ConnectionTestResult.Unreachable(classified.reason)
+                // A 404 here is the one failure the user can actually fix from
+                // this screen, and the generic "rejected by server" hides it:
+                // VitalForge serves the weight routes under `/p/{slug}/`, so a
+                // base URL missing that path authenticates fine and then finds
+                // nothing. Naming the cause is the difference between "syncs
+                // are unreliable" and a one-line correction.
+                is SubmitResult.PermanentRejection ->
+                    if (classified.httpCode == HTTP_NOT_FOUND) {
+                        ConnectionTestResult.Unreachable(NO_SUCH_ENDPOINT_REASON)
+                    } else {
+                        ConnectionTestResult.Unreachable(classified.reason)
+                    }
             }
         }
     }
@@ -257,6 +268,14 @@ class VitalForgeHttpClient(
         const val SESSION_COOKIE_NAME = "vf_session"
 
         private const val HTTP_UNAUTHORIZED = 401
+        private const val HTTP_NOT_FOUND = 404
+
+        /**
+         * Surfaced verbatim by `ConfigViewModel.testConnection()`, so it is
+         * written for the person reading the Settings screen, not for a log.
+         */
+        const val NO_SUCH_ENDPOINT_REASON =
+            "No such endpoint (404) — the Base URL may be missing your person path, e.g. /p/your-slug"
 
         /**
          * A remote `captured_at` outside this range cannot be a real weigh-in and

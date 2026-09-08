@@ -491,6 +491,32 @@ class VitalForgeHttpClientTest {
     private fun prefixedClient() = client(baseUrl = server.url("/p/bash6632").toString().trimEnd('/'))
 
     @Test
+    fun testConnectionNamesTheMissingPersonPathOn404() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(404).body("""{"detail":"Not Found"}""").build())
+
+        val result = client().testConnection()
+
+        assertEquals(
+            "a 404 is the one failure the user can fix from the settings screen",
+            ConnectionTestResult.Unreachable(VitalForgeHttpClient.NO_SUCH_ENDPOINT_REASON),
+            result,
+        )
+    }
+
+    @Test
+    fun testConnectionKeepsTheGenericReasonForOtherPermanentCodes() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(422).body("""{"detail":"Unprocessable"}""").build())
+
+        val result = client().testConnection()
+
+        assertEquals(
+            "only 404 gets the person-path hint; 422 is not a routing problem",
+            ConnectionTestResult.Unreachable("rejected by server"),
+            result,
+        )
+    }
+
+    @Test
     fun submitPostsUnderThePersonPrefixWhenTheBaseUrlCarriesOne() = runBlocking {
         server.enqueue(ok())
 
