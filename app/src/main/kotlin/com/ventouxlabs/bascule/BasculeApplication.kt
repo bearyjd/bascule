@@ -1,8 +1,10 @@
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
@@ -29,6 +31,7 @@ import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
 import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.RuntimeApiFactory
+import com.ventouxlabs.bascule.service.AdapterStateReceiver
 import com.ventouxlabs.bascule.service.BridgeForegroundService
 import com.ventouxlabs.bascule.ui.BridgeServiceController
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -148,6 +151,20 @@ class BasculeApplication : Application() {
         // WorkManager lazy, and getInstance() throws when WorkManager failed to
         // initialize — on the main thread, on every launch.
         guarded { deliveryScheduler.ensurePeriodicDrain() }
+        // RECEIVER_EXPORTED, not NOT_EXPORTED: ACTION_STATE_CHANGED comes from
+        // the Bluetooth stack's uid, and on Android 14+ NOT_EXPORTED admits
+        // only the app's own uid and the system uid — the identical mistake
+        // that made AndroidGattTransport's bond receiver silently deaf
+        // (`149403d`). It is a protected broadcast, so nothing forgeable
+        // reaches it.
+        guarded {
+            ContextCompat.registerReceiver(
+                this,
+                AdapterStateReceiver(),
+                IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+                ContextCompat.RECEIVER_EXPORTED,
+            )
+        }
         applicationScope.launch {
             // Migration first, deliberately: bridgeServiceController.start()
             // below can lead to BridgeForegroundService.startActiveScan()
