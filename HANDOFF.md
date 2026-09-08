@@ -18,6 +18,75 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-07, late night: v2 capture proven, and VitalForge's routes moved
+
+**VitalForge does NOT run on `atlas`. That claim, repeated in every section
+below, is wrong and cost this session an hour.** `weight.grepon.cc` resolves
+to `fd7a:115c:a1e0::be33:ce0f` = `proxy.manx-velociraptor.ts.net`, which
+fronts **`192.168.1.21`** (ports 8085 weight / 8086 dashboard). `atlas`
+(`100.77.15.80`) has 80, 443 and 8085 all closed and is unrelated to this
+service. SSH to `.21` works as `user` with the default key; SSH to `atlas`
+fails from everywhere with `Permission denied (publickey)` — which is why
+"no SSH to atlas" kept getting recorded as a blocker. Compose project lives
+at `/home/user/docker/vitalforge/docker-compose.yml` (content identical to
+the repo's `docker-compose.prod.yml`).
+
+**v2 capture is proven on hardware.** Two real weigh-ins tonight decoded the
+full body-composition set from one 14-byte `0x2A9C` frame — 89.16 kg /
+20.4% fat / 54.5% water / 40.8% muscle / BMI 26.0 / BMR 1825 / 446 Ω /
+67.4 kg lean, and a second at 89.09 kg. `amr` came back empty both times.
+Capture and decode were never the problem.
+
+**Delivery is the problem, and it is a route mismatch, not a field
+mismatch.** Sequence, in order:
+1. First weigh-in 422'd. The image running on `.21` was built **2026-08-28**
+   and contained **zero** occurrences of `bmi`, `client_id`, `captured_at`
+   or `amr` (grepped inside both images to confirm, not inferred).
+   `extra="forbid"` therefore rejected the whole payload — not just the
+   extra fields, so the weight did not land either.
+2. Pulled and recreated on `.21` (backup first:
+   `vitalforge-data-20260908-032917.tgz`). New image `53012dd0`; migration
+   added `client_id`/`bmi`/`bmr`/`amr` to `weight_log`; all 20 rows intact.
+3. Second weigh-in then **404'd**. The new image moved every weight route
+   under a per-person prefix — `POST /p/{slug}/api/weight` — while Bascule
+   still posts to the root `/api/weight`. The old image served
+   `@app.post("/api/weight")`; the new one does not. So the upgrade traded
+   a 422 for a 404 and removed the v1 fallback that used to work.
+
+**The slug is `bash6632`** (`persons.id=1`, `is_primary`, and
+`person_grants` gives `user_id=1` `own` access). Auth is unchanged and
+fine: the phone's `vf_session` cookie authenticates — the 404 rather than
+401 proves it got past auth and found no route. `api_tokens` is empty, so
+the cookie is the only credential in play.
+
+**Fix, this session:** `VitalForgeHttpClient` now resolves auth against the
+base URL's *origin* (`resolveAtOrigin`) while weight paths stay relative to
+`baseUrl` verbatim. That mirrors the server's own layout — `/p/{slug}/` is
+the person's API root, `/auth/login` is server-global — and needs no new
+config key, no new UI and no new `ConfigViewModel` function.
+**Operationally this means the Base URL setting must now carry the person
+prefix: `https://weight.grepon.cc/p/bash6632`.** A bare host still produces
+the pre-prefix paths unchanged, pinned by a test.
+
+**Open, and worth deciding:** `ResponseClassifier` maps 404 to
+`PermanentRejection`, so a wrong-or-missing slug marks rows
+`FAILED_PERMANENT` on the first attempt — exactly what happened to
+tonight's second reading, for a purely local configuration error. That is
+the failure mode `submitReading`'s own KDoc argues against for an invalid
+base URL. Not changed here (404 is legitimately permanent for other
+causes), but a config-shaped 404 arguably deserves the same transient
+treatment the invalid-URL branch already gets.
+
+**Both of tonight's readings are parked on the phone** as
+`FAILED_PERMANENT` (422 and 404) and will **not** self-heal:
+`failedPermanentlyUnderOtherContract` only matches rows stamped under a
+*different* contract than the current one, and both are stamped v2 while
+the phone is still on v2. Recovery only fires on a contract switch.
+
+Also seen on `.21`, not investigated and not ours: a zero-byte
+`vitalforge.db` owned by root in `/app/data`, created 02:53Z — before this
+session touched anything. The app uses `fitness.db`.
+
 ## 2026-09-07, evening: three PRs merged, phones swapped back, v2 switched on
 
 **All three PRs merged to `main` (`cb2fc2d`), CI green including the signed

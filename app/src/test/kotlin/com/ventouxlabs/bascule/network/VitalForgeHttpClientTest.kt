@@ -483,6 +483,68 @@ class VitalForgeHttpClientTest {
         assertEquals(LoginResult.InvalidCredentials, result)
     }
 
+    // VitalForge moved its weight routes under a per-person prefix
+    // (`/p/{slug}/api/weight`) while keeping auth server-global at `/auth/login`.
+    // A base URL carrying the prefix has to reach both, and a base URL without
+    // one must behave exactly as it did before the prefix existed.
+
+    private fun prefixedClient() = client(baseUrl = server.url("/p/bash6632").toString().trimEnd('/'))
+
+    @Test
+    fun submitPostsUnderThePersonPrefixWhenTheBaseUrlCarriesOne() = runBlocking {
+        server.enqueue(ok())
+
+        prefixedClient().submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+
+        assertEquals("/p/bash6632/api/weight", server.takeRequest().url.encodedPath)
+    }
+
+    @Test
+    fun recentReadsUnderThePersonPrefixWhenTheBaseUrlCarriesOne() = runBlocking {
+        server.enqueue(ok("[]"))
+
+        prefixedClient().recentReadings(5.minutes)
+
+        assertEquals("/p/bash6632/api/weight/recent", server.takeRequest().url.encodedPath)
+    }
+
+    @Test
+    fun loginStaysAtTheServerRootUnderAPersonPrefix() = runBlocking {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .body("""{"success":true}""")
+                .addHeader("Set-Cookie", "vf_session=$SESSION_COOKIE_VALUE; HttpOnly; SameSite=Lax")
+                .build(),
+        )
+
+        prefixedClient().login("alice", "hunter2")
+
+        assertEquals(
+            "auth is server-global; prefixing it with the person slug 404s",
+            "/auth/login",
+            server.takeRequest().url.encodedPath,
+        )
+    }
+
+    @Test
+    fun aBaseUrlWithoutAPersonPrefixKeepsThePreExistingPaths() = runBlocking {
+        server.enqueue(ok())
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .body("""{"success":true}""")
+                .addHeader("Set-Cookie", "vf_session=$SESSION_COOKIE_VALUE; HttpOnly; SameSite=Lax")
+                .build(),
+        )
+
+        client().submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+        client().login("alice", "hunter2")
+
+        assertEquals("/api/weight", server.takeRequest().url.encodedPath)
+        assertEquals("/auth/login", server.takeRequest().url.encodedPath)
+    }
+
     @Test
     fun loginIsUnreachableOnSocketHangUp() = runBlocking {
         server.close()
