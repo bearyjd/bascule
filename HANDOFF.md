@@ -77,11 +77,44 @@ base URL. Not changed here (404 is legitimately permanent for other
 causes), but a config-shaped 404 arguably deserves the same transient
 treatment the invalid-URL branch already gets.
 
-**Both of tonight's readings are parked on the phone** as
-`FAILED_PERMANENT` (422 and 404) and will **not** self-heal:
-`failedPermanentlyUnderOtherContract` only matches rows stamped under a
-*different* contract than the current one, and both are stamped v2 while
-the phone is still on v2. Recovery only fires on a contract switch.
+**Resolved 2026-09-08 evening — the whole chain is proven on hardware.**
+Server row 26: `195.73 lbs, bmi 25.9, bmr 1821.2, body_fat 20.3,
+body_water 54.70, muscle 40.8, client_id 80ba3559…, synced_to_garmin 1`,
+from a phone row `SENT` under `contractVersionAtDelivery = 2` with
+`deliveredFields = BMI,BMR,BODY_FAT_PCT,BODY_WATER_PCT,CAPTURED_AT,
+MUSCLE_PCT,WEIGHT`. Capture, decode, v2 delivery, idempotency and the
+Garmin push all confirmed in one weigh-in. Both earlier parked readings
+recovered too (server rows 24 and 25) — a Settings contract toggle
+requeued them, so the prediction below that they would "not self-heal"
+was **wrong**: recovery does fire, it just needs a contract switch to
+trigger it, which the user performed.
+
+**Base URL is now `https://weight.grepon.cc/p/bash6632`** on the Pixel 9.
+
+**A second, unrelated bug surfaced and was fixed the same evening: a BLE
+scan registration does not survive a Bluetooth *adapter cycle*, and
+nothing re-armed it.** `00-design.md` §8.2 covers this for reboot and
+`BootReceiver` handles that case; an adapter restart has the identical
+effect and had no handler. The adapter receiver inside
+`AndroidGattTransport` does not help — it lives for the duration of one
+`GattSession` and exists to abort a session in flight, so when the adapter
+cycles with no session running, nothing is listening.
+
+Observed: the stack restarted at 18:49:14 (all `GattServer`s
+re-registered, bonded storage reloaded), Bascule never re-registered
+though other apps did, and capture had been dead for **eleven hours**.
+Every diagnostic looked healthy — bridge service running, both toggles
+on, cooldown empty, config correct. Only the registration inside the
+stack was gone. This is almost certainly a long-standing contributor to
+"connections are not reliable", surviving every cooldown and staleness
+fix made for that complaint.
+
+Fixed by `AdapterStateReceiver` (`d8c767d`), registered dynamically from
+`BasculeApplication.onCreate` with `RECEIVER_EXPORTED`. **Known limit:
+process-scoped, so it only covers an adapter cycle while the app process
+is alive** — guaranteed under always-on bridging, not guaranteed for
+automatic-capture-only. Verified on device: toggle → session at 18:59:44 →
+capture at 19:00:15.
 
 Also seen on `.21`, not investigated and not ours: a zero-byte
 `vitalforge.db` owned by root in `/app/data`, created 02:53Z — before this
