@@ -18,6 +18,83 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-07, evening: three PRs merged, phones swapped back, v2 switched on
+
+**All three PRs merged to `main` (`cb2fc2d`), CI green including the signed
+release job.** Working tree clean, all feature branches deleted.
+
+- **PR #3 — v2 body-composition contract.** Five Codex review rounds. Four
+  found real bugs, all fixed and mutation-checked:
+  1. `DeliveryDrainer` stamped `contractVersionAtDelivery` only on
+     `Accepted`, never on `PermanentRejection` — so the recovery query
+     (`failedPermanentlyUnderOtherContract`) could never match a *real*
+     422, only the hand-stamped rows in its own tests. The whole recovery
+     mechanism was inert on real data.
+  2. Recovery was unscoped: it matched any `FAILED_PERMANENT` row stamped
+     under another contract, but `PermanentRejection` also covers
+     400/404/409/413. Added `ReadingEntity.permanentRejectionHttpCode`
+     (schema v4, `MIGRATION_3_4`) and scoped the query to 422.
+  3. **Security:** `importSettings` ran the requeue+drain *before*
+     `applyImportedProfilesAndCredential`, so a scheduled drain could reach
+     the network under the *previous* credential (stale, or another user's
+     session). Moved past credential application and gated on
+     `keepsSameHost` — a host change must not resurrect rows into a drain
+     that bypasses `blockAllPendingForAuth`.
+  4. Stale provenance survived `requeueForReplay`, so a row that later
+     failed for an unrelated reason (expiry, transient) still looked like
+     the old contract's 422. Both columns now cleared on requeue.
+  Round 5 raised a genuinely narrow residual (a switch landing inside an
+  in-flight drain, where `ExistingWorkPolicy.KEEP` drops the new trigger);
+  **accepted and documented, not built** — see the open-items entry. Also
+  added a `DeliveryDrainer` self-healing pre-step so recovery runs on every
+  drain using the same `runtime.api.contract` it submits under.
+- **PR #4 — `GattSession` split** into `ConnectLadder` + `MeasurementPhase`
+  (1055 → 652 lines). Three devil's-advocate rounds first (dead cross-seam
+  KDoc links, an undocumented shared-decoder invariant, an untested drain
+  invariant); Codex then found nothing.
+- **PR #5 — signed release builds.** Devil's advocate found a fail-open
+  path (a dangling `$KEYSTORE_PROPERTIES` silently produced an unsigned
+  APK under a green check — now fails loudly) and no signer visibility in
+  CI (now printed every run). Codex then found nothing. **A suspected
+  GitHub Actions `env`-in-`if` bug was investigated and disproved against
+  the actual run logs** — the step ran and signed with the real key
+  (`f6df2b0d…`); no change made.
+
+**Phones swapped back — the Pixel 9 (`4A111FDKD0000C`) is primary again.**
+The user asked for this directly. No export/import was needed: the Pixel 9's
+own encrypted stores were never touched during the earlier migration *to*
+the Pixel 10 — only its two capture toggles had been switched off — so this
+was a straight toggle swap. Verified on the Pixel 9 before it left USB:
+both capture toggles on, bridge service running, BLE scan registered, still
+bonded to the BF720, battery-optimization exemption added (it had none),
+updated to tonight's merged build (18:38), launches clean, and
+"Test connection" reads **✓ Connected — credential accepted**. The Pixel 10
+is retired: both toggles off, bridge and scan both confirmed at 0. It keeps
+its own copy of the identity and stays useful as the bench.
+
+**v2 is switched ON for the Pixel 9, and NOT yet proven end to end.** This
+is the one genuinely open thread. What is known: `vitalforge` PR #40 merged
+2026-09-07T03:34Z and its `docker.yml` build-and-push run succeeded, so a
+`bearyj/vitalforge-weight:latest` carrying `bmi`/`bmr`/`amr` exists. What is
+**not** known: whether `atlas` has pulled and restarted on that image — this
+session has no SSH there (`Permission denied (publickey)`), and `/health`
+only proves *a* server is up, not which image. The only real test is a live
+weigh-in under v2, and none arrived: two full listen windows were watched
+(19:31:20-19:39:21 `NO_MEASUREMENT`, then a fresh one from 19:40:14) with
+the session cycle visibly healthy — connect, handshake, subscribe, listen,
+re-link — but nobody stepped on the scale during them.
+
+**Next session, start here:** ask whether a weigh-in has landed since. Then
+`adb -s 4A111FDKD0000C` and check
+`shared_prefs/capture_attempts.xml` plus the `readings` table. A row with
+`contractVersionAtDelivery = 2` and `deliveredFields` carrying more than
+`WEIGHT` means v2 works and atlas is deployed — done. A row `FAILED_PERMANENT`
+with `permanentRejectionHttpCode = 422` means atlas is still on the old
+image: switch Settings back to v1 and the recovery built this session
+requeues that reading automatically (verify it flips to `PENDING` then
+`SENT`) — that path is the one piece of this feature that has never run
+against real hardware, so watch it rather than assume it.
+
 ## 2026-09-07, night: v2 body composition, the GattSession split, and a signed release
 
 Three PRs, each with a devil's-advocate pass and (once the quota reset)
