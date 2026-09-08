@@ -55,6 +55,51 @@ class BridgeForegroundServiceTest {
      * permission gate and `startActiveScan`'s cast to the real
      * `BasculeApplication`, neither of which this behavior depends on.
      */
+    /**
+     * The re-arm exists because an external stop/start cannot do this job:
+     * `Context.stopService` is asynchronous, so the restart can be delivered to
+     * the still-live instance, and `onStartCommand` never called
+     * `startActiveScan`. Re-arming in place removes the race — but it must stay
+     * a *re-arm*, not a second start, so it may not disturb the restart mode a
+     * bounded window established. `START_STICKY` here would mean a mid-window
+     * process kill restarts the scan unbounded, with no timer to end it: the
+     * exact failure `onStartCommand`'s KDoc already guards for bounded starts.
+     */
+    @Test
+    fun aRearmPreservesTheRestartModeOfABoundedStart() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        val bounded = service.onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L),
+            0,
+            1,
+        )
+        val rearmed = service.onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true),
+            0,
+            2,
+        )
+
+        assertEquals(Service.START_NOT_STICKY, bounded)
+        assertEquals("a re-arm must not promote a bounded window to sticky", bounded, rearmed)
+    }
+
+    /** A re-arm is not a new "Weigh now": arming a second timer would cut the window short. */
+    @Test
+    fun aRearmDoesNotArmASecondBoundedTimer() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        var timersArmed = 0
+        service.boundStopScheduler = { _, _ -> timersArmed++ }
+
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 1)
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true), 0, 2)
+
+        assertEquals(1, timersArmed)
+    }
+
     @Test
     fun aScanResultIsDispatchedThroughTheInjectedEnqueuer() {
         val enqueuer = FakeScaleSessionEnqueuer()

@@ -72,6 +72,10 @@ class ScaleViewModelTest {
             bridgeCalls += "start"
         }
 
+        override fun rearmScan() {
+            bridgeCalls += "rearmScan"
+        }
+
         override fun startBounded(durationMillis: Long) {
             bridgeCalls += "startBounded:$durationMillis"
         }

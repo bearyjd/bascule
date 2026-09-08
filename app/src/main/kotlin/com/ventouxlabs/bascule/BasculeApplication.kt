@@ -270,5 +270,10 @@ internal class AndroidBridgeServiceController(
         context.stopService(intent())
     }
 
+    override fun rearmScan() {
+        if (!BridgeForegroundService.isRunning) return
+        startWith(intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true))
+    }
+
     private fun intent() = Intent(context, BridgeForegroundService::class.java)
 }

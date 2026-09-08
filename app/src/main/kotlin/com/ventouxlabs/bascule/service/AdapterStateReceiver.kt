@@ -35,9 +35,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * the overwhelmingly common case, since sessions are short and the gaps
  * between them are not — there is nothing listening at all.
  *
- * The bridge service is stopped and started rather than merely started: its
- * scan is registered in `onCreate`, which a second `startForegroundService`
- * on an already-running service does not re-run.
+ * The bridge's scan is re-registered *in place*, via
+ * [BridgeForegroundService.EXTRA_REARM_SCAN], rather than by stopping and
+ * restarting the service. An external stop/start looks equivalent and is not:
+ * `Context.stopService` is asynchronous, so the `start()` can be delivered to
+ * the still-live instance, whose `onStartCommand` never called
+ * `startActiveScan()` — leaving the invalidated registration in place and the
+ * service running with no scan, which is the very state this file exists to
+ * end. Found by an independent review of the first version of this fix, which
+ * had exactly that race.
  *
  * [rearm] defaults to the real path via [BasculeApplication] — Android
  * instantiates receivers reflectively, so production behavior is unchanged,
@@ -48,12 +54,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 class AdapterStateReceiver(
     private val rearm: suspend (Context) -> Unit = { context ->
         val app = context.applicationContext as BasculeApplication
-        // Ordered as BasculeApplication.onCreate orders them, and for the same
-        // reason: nothing below depends on the scan's result.
-        if (app.configStore.alwaysOnBridging.first()) {
-            app.bridgeServiceController.stop()
-            app.bridgeServiceController.start()
-        }
+        // Unconditional, and NOT gated on the always-on setting: the service
+        // may also be running a bounded "Weigh now" window with both toggles
+        // off, and that window's scan is invalidated by the adapter cycle
+        // exactly like the always-on one. rearmScan() is itself a no-op when
+        // nothing is running, so it cannot start a bridge the user turned off
+        // — which is why the config read that used to gate this is gone
+        // rather than merely widened.
+        app.bridgeServiceController.rearmScan()
+        // Independent path, independently invalidated: this is the low-power
+        // PendingIntent scan, and it is its own arm() gate for automatic
+        // capture. Nothing above depends on its result.
         app.scaleScanner.arm()
     },
     private val onFailure: (Context, Throwable) -> Unit = { context, error ->

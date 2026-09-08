@@ -6,6 +6,7 @@ import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,6 +32,30 @@ class AdapterStateReceiverTest {
 
     private fun receiverRecording(latch: CountDownLatch) =
         AdapterStateReceiver(rearm = { latch.countDown() }, onFailure = { _, _ -> })
+
+    /**
+     * The re-arm must not be gated on the always-on setting. An independent
+     * review of the first version of this fix caught that gating it there
+     * leaves a bounded "Weigh now" window — which runs with both toggles off —
+     * holding a scan the adapter cycle already invalidated, for the remainder
+     * of its window.
+     */
+    @Test
+    fun rearmIsAttemptedRegardlessOfTheAlwaysOnSetting() {
+        val calls = mutableListOf<String>()
+        val receiver = AdapterStateReceiver(
+            rearm = { calls += "rearm" },
+            onFailure = { _, _ -> },
+        )
+
+        receiver.onReceive(context, stateIntent(BluetoothAdapter.STATE_ON))
+
+        // The production `rearm` reaches bridgeServiceController.rearmScan()
+        // unconditionally; `rearmScan()` is itself the no-op guard for "no
+        // service running", so no config read gates this path.
+        repeat(20) { if (calls.isEmpty()) Thread.sleep(100) }
+        assertEquals(listOf("rearm"), calls)
+    }
 
     @Test
     fun adapterTurningOnRearmsTheScan() {
