@@ -1,0 +1,52 @@
+Codemap generation — 2026-09-08
+================================
+
+FIRST GENERATION. No prior codemaps existed in this repo, so there is no diff
+to gate on and Step 3's 30% approval threshold does not apply.
+
+Files scanned: 86 Kotlin sources under app/src/main, plus
+gradle/libs.versions.toml and app/build.gradle.kts.
+
+Generated
+---------
+docs/CODEMAPS/architecture.md   pipeline, package boundaries, entry points
+docs/CODEMAPS/capture.md        BLE session lifecycle and decoding
+docs/CODEMAPS/delivery.md       queueing, HTTP surface, classification, recovery
+docs/CODEMAPS/data.md           Room v4, DataStore, encrypted stores
+docs/CODEMAPS/ui.md             screens, ViewModels, diagnostics surfaces
+docs/CODEMAPS/dependencies.md   libraries, external services, build
+
+Deviation from the skill's default file set
+-------------------------------------------
+backend.md -> capture.md + delivery.md, frontend.md -> ui.md.
+This is an Android app with no server component; "backend" would have been a
+misleading name for a BLE session state machine, and splitting capture from
+delivery matches how the code is actually partitioned (ble/ vs
+delivery/+network/) and where its bugs have clustered.
+
+Architecture notes worth carrying
+---------------------------------
+- 7 packages: ble, data, delivery, diagnostics, network, service, ui.
+- No DI framework. BasculeApplication is a lazy service locator by choice.
+- Room schema is at v4 (MIGRATION_3_4 added permanentRejectionHttpCode).
+- WorkManager is the only scheduler: ScaleSessionWorker, DeliveryWorker,
+  DeliveryPeriodicKickWorker, ReplayMigrationWorker (built, unwired).
+
+Staleness warnings
+------------------
+- docs/prp/00-design.md and 01-plan.md predate the "no store-and-forward"
+  finding. Several premises in them are known-wrong; 05-retrospective.md §1
+  records which. Read the retrospective before trusting either.
+- docs/prp/02-devils-advocate-findings.md O-02 and O-03 describe a merge model
+  the correlator has since outgrown. Their dispositions should not be treated
+  as still binding.
+- docs/prp/03-hardware-validation.md remains accurate but its "NOT yet
+  confirmed" list has shrunk; the proprietary 0xFFFF/0xFF00 services are still
+  genuinely unexercised.
+
+Known gaps the codemaps record rather than hide
+-----------------------------------------------
+- ConfigViewModel sits at 19 functions against detekt's ceiling of 20.
+- No Compose or instrumented test lane; UI is hardware-verified only.
+- 404 classifies as PermanentRejection, so a config error costs a reading.
+- ReplayMigrationWorker is implemented and scheduled by nothing.
