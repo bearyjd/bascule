@@ -22,6 +22,31 @@ object ReadingMapper {
     /** Body Composition Service 1.0 reports basal metabolism in kilojoules. */
     const val KJ_PER_KCAL = 4.184
 
+    /**
+     * AMR is not a field of the SIG Body Composition profile and never arrives
+     * on the wire — the BF720 *derives* it, exactly as this does, by
+     * multiplying basal metabolism by a coefficient tied to the activity level
+     * configured on the scale.
+     *
+     * 1.85 is measured from this scale, not taken from a table: a weigh-in
+     * displaying BMR 1826 kcal showed AMR 3378, and 3378 / 1826 = 1.84995. It
+     * deliberately matches **no** published multiplier — Harris-Benedict puts
+     * level 4 at 1.725 and level 5 at 1.9, the DGE PAL table 1.8 and 2.0, and
+     * the closest of those is 91 kcal out. Implementing a textbook value would
+     * have produced a confidently wrong number.
+     *
+     * Two limits, both accepted deliberately (user's call, 2026-09-08):
+     * - **It encodes one activity level**, the one this scale is set to. A
+     *   different level is a different coefficient, and one data point cannot
+     *   recover the rest of Beurer's table.
+     * - **It will read a few kcal above the scale's own display.** The scale
+     *   works in kcal internally and transmits kilojoules: the wire carried
+     *   7649 kJ (1828.15 kcal) for a reading the scale displayed as 1826, so
+     *   this computes 3382 where the scale shows 3378. The rounding the scale
+     *   applies before display is not recoverable from what it sends.
+     */
+    const val ACTIVITY_FACTOR = 1.85
+
     fun map(
         measurement: ScaleReading,
         unit: WeightUnit,
@@ -41,7 +66,11 @@ object ReadingMapper {
         boneMassKg = measurement.boneMassKg,
         bmi = measurement.bmi,
         bmr = measurement.basalMetabolismKj?.div(KJ_PER_KCAL),
-        amr = measurement.amr,
+        // Derived here rather than in the decoder because it is not decoded:
+        // no frame carries it. Falls back to measurement.amr so a future
+        // non-SIG decoder that *does* read one is preferred over this estimate
+        // rather than silently overwritten by it.
+        amr = measurement.amr ?: measurement.basalMetabolismKj?.div(KJ_PER_KCAL)?.times(ACTIVITY_FACTOR),
         impedanceOhms = measurement.impedanceOhms,
         softLeanMassKg = measurement.softLeanMassKg,
         status = status,
