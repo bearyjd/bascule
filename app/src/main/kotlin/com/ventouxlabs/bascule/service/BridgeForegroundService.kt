@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -65,6 +66,19 @@ class BridgeForegroundService : Service() {
      * the restart-unbounded failure `onStartCommand`'s KDoc already guards.
      */
     private var lastStartMode: Int = START_STICKY
+
+    /** Injectable for the same reason as [boundStopScheduler]: a JVM test has no real clock to wait out. */
+    internal var elapsedClock: () -> Long = { SystemClock.elapsedRealtime() }
+
+    /**
+     * When the active bounded window ends, or null when no bounded window is
+     * running. Needed because every `startForegroundService` allocates a newer
+     * `startId`, and `stopSelf(startId)` is a documented no-op once a newer
+     * start has landed — so a re-arm silently orphans the bounded timer and
+     * "Weigh now" never ends. Carrying the deadline lets the re-arm rebind the
+     * stop to its own `startId` for whatever time is left.
+     */
+    private var boundedEndElapsed: Long? = null
 
     /**
      * The permission check runs before [startForeground], not after it as the
@@ -123,10 +137,19 @@ class BridgeForegroundService : Service() {
         // established — hence returning [lastStartMode] rather than a literal.
         if (intent?.getBooleanExtra(EXTRA_REARM_SCAN, false) == true) {
             restartActiveScan()
+            rebindBoundedStop(startId)
             return lastStartMode
         }
         val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
-        if (boundMillis <= 0) return START_STICKY.also { lastStartMode = it }
+        // A plain always-on start deliberately supersedes any bounded window —
+        // the stale timer's stopSelf(oldId) is already a no-op — so forget the
+        // deadline rather than let a later re-arm resurrect a stop for a window
+        // the user has since replaced with "keep scanning".
+        if (boundMillis <= 0) {
+            boundedEndElapsed = null
+            return START_STICKY.also { lastStartMode = it }
+        }
+        boundedEndElapsed = elapsedClock() + boundMillis
         // A bounded start is "Weigh now": the user is standing on the scale
         // right now, so any backoff earned by earlier failures has to go. It is
         // the one control they have, and a throttle that can block it is worse
@@ -143,6 +166,27 @@ class BridgeForegroundService : Service() {
      * skipping it would leak a live registration in the case this is ever
      * called without one (a future caller, a stack that survived).
      */
+    /**
+     * Re-points the bounded window's stop at [rearmStartId], the newest start,
+     * because the timer armed by the original bounded start now holds a stale
+     * id whose `stopSelf` will do nothing. Without this a Bluetooth cycle
+     * during a "Weigh now" leaves a `SCAN_MODE_BALANCED` foreground scan
+     * running forever — worse for the phone and the scale's batteries than the
+     * adapter-cycle gap the re-arm exists to close.
+     *
+     * A window that already elapsed stops immediately rather than scheduling
+     * zero: the re-arm may be the first thing to run after a long stall.
+     */
+    private fun rebindBoundedStop(rearmStartId: Int) {
+        val end = boundedEndElapsed ?: return
+        val remaining = end - elapsedClock()
+        if (remaining <= 0) {
+            stopSelf(rearmStartId)
+            return
+        }
+        boundStopScheduler(remaining) { stopSelf(rearmStartId) }
+    }
+
     @SuppressLint("MissingPermission")
     private fun restartActiveScan() {
         runCatching { scanner?.stopScan(callback) }
@@ -258,6 +302,5 @@ class BridgeForegroundService : Service() {
          */
         @Volatile
         internal var isRunning: Boolean = false
-            private set
     }
 }

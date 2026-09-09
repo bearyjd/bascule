@@ -254,10 +254,25 @@ internal class AndroidBridgeServiceController(
      */
     private val starter: (Intent) -> Unit = { intent -> ContextCompat.startForegroundService(context, intent) },
 ) : BridgeServiceController {
-    override fun start() = startWith(intent())
+    /**
+     * Whether this process has asked the service to stop and not asked for it
+     * back. [BridgeForegroundService.isRunning] alone cannot answer that:
+     * `Context.stopService` is asynchronous, so `isRunning` stays true until
+     * `onDestroy`, and a re-arm landing in that gap would resurrect a bridge
+     * the user just switched off. Intent, not observed liveness.
+     */
+    @Volatile
+    private var stopRequested = false
 
-    override fun startBounded(durationMillis: Long) =
+    override fun start() {
+        stopRequested = false
+        startWith(intent())
+    }
+
+    override fun startBounded(durationMillis: Long) {
+        stopRequested = false
         startWith(intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, durationMillis))
+    }
 
     private fun startWith(intent: Intent) {
         val succeeded = runCatching { starter(intent) }
@@ -267,11 +282,12 @@ internal class AndroidBridgeServiceController(
     }
 
     override fun stop() {
+        stopRequested = true
         context.stopService(intent())
     }
 
     override fun rearmScan() {
-        if (!BridgeForegroundService.isRunning) return
+        if (stopRequested || !BridgeForegroundService.isRunning) return
         startWith(intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true))
     }
 

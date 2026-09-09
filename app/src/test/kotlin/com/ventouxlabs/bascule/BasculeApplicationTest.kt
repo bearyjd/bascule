@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.ventouxlabs.bascule.service.BridgeForegroundService
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -29,6 +30,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class BasculeApplicationTest {
+
+    /** Process-wide state, so it has to be reset or it leaks into every later test in the JVM. */
+    @After
+    fun clearServiceRunningFlag() {
+        BridgeForegroundService.isRunning = false
+    }
 
     private val context = ApplicationProvider.getApplicationContext<Application>()
 
@@ -69,6 +76,51 @@ class BasculeApplicationTest {
         )
 
         controller.start()
+    }
+
+    /**
+     * `Context.stopService` is asynchronous, so `BridgeForegroundService.isRunning`
+     * stays true until `onDestroy`. An adapter-on broadcast landing in that gap
+     * would otherwise start the service again, keeping a bridge alive after the
+     * user switched always-on off. The guard is intent, not observed liveness.
+     */
+    @Test
+    fun rearmAfterAStopRequestDoesNotResurrectTheBridge() {
+        val started = mutableListOf<Intent>()
+        val controller = AndroidBridgeServiceController(
+            context = ApplicationProvider.getApplicationContext(),
+            onStartResult = {},
+            starter = { started += it },
+        )
+        // The whole point of the guard: stopService is asynchronous, so the
+        // service is still live here. Leaving this false made an earlier
+        // version of this test pass with the guard deleted.
+        BridgeForegroundService.isRunning = true
+
+        controller.start()
+        controller.stop()
+        controller.rearmScan()
+
+        assertEquals("only the original start; the re-arm must not fire", 1, started.size)
+    }
+
+    /** A start after a stop clears the guard: the user turning it back on must re-arm normally. */
+    @Test
+    fun rearmWorksAgainOnceTheServiceIsStartedAfterAStop() {
+        val started = mutableListOf<Intent>()
+        val controller = AndroidBridgeServiceController(
+            context = ApplicationProvider.getApplicationContext(),
+            onStartResult = {},
+            starter = { started += it },
+        )
+        BridgeForegroundService.isRunning = true
+
+        controller.start()
+        controller.stop()
+        controller.start()
+        controller.rearmScan()
+
+        assertEquals("start clears the guard, so the re-arm fires again", 3, started.size)
     }
 
     /** `startBounded` shares [AndroidBridgeServiceController.start]'s exception handling — only the intent differs. */
