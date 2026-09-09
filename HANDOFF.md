@@ -18,6 +18,126 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-08: v0.1.0 released, Phase 5 closed, and a silent capture killer found
+
+**`v0.1.0` is released**: https://github.com/bearyjd/bascule/releases/tag/v0.1.0
+— signed `app-release.apk`, 2.4 MB, signer SHA-256 `f6df2b0d…1bdc1018` (the
+2026-09-06 keystore). Five PRs merged, #6 through #10. `main` at `6422738`.
+
+**Phase 5's four gate items are all done**: CI green on `main`; README with
+the AGPL-3.0 notice and openScale attribution; tag + signed APK + changelog;
+and `docs/prp/05-retrospective.md`.
+
+### The bug worth remembering: a scan registration dies with the Bluetooth stack
+
+Reported as "I stepped on the scale and nothing happened". Capture had been
+dead for **eleven hours** and every diagnostic read healthy — bridge service
+running, both toggles on, cooldown empty, config correct, Bluetooth on, app
+exempt from battery optimisation. The stack had restarted at 18:49:14 (every
+`GattServer` re-registered, bonded storage reloaded); Garmin re-registered
+its scan, Bascule did not. Only the registration inside the stack was gone,
+and nothing in the app could see that.
+
+`00-design.md` §8.2 covers this for *reboot* and `BootReceiver` handles it.
+An adapter cycle has the identical effect and had no handler. The receiver
+inside `AndroidGattTransport` does not help — it lives for one `GattSession`
+and exists to abort a session in flight, so when the adapter cycles with no
+session running, nothing is listening.
+
+Fixed by `AdapterStateReceiver` (`d8c767d`), then fixed twice more after
+review:
+
+- **Codex round 1 (`05569e2`)** — the first fix had the same shape as the bug.
+  `stop()` + `start()` races `Context.stopService`'s asynchronous teardown:
+  the start lands on the still-live instance, whose `onStartCommand` never
+  calls `startActiveScan()`. Replaced with an in-place re-arm
+  (`EXTRA_REARM_SCAN`).
+- **Codex round 2 (`041a99d`)** — the re-arm allocated a newer `startId`,
+  orphaning the bounded "Weigh now" timer, so `stopSelf(oldId)` became a
+  no-op and the window never ended: a `SCAN_MODE_BALANCED` foreground scan
+  running forever. Now the deadline is carried and the stop rebound to the
+  newest id. Also `stopRequested` intent tracking, since `isRunning` cannot
+  express "the user turned it off" while `stopService` is in flight.
+
+**This is the third bug of one shape in this file** — a shared service where
+any new owner's start silently invalidates another owner's pending
+`stopSelf`. The prior investigation named the pattern
+(`weighnow-alwayson-service-lifecycle-races`, 2026-09-01). Each has been
+fixed individually; the structural answer is one owner-aware lifecycle rather
+than four callers each getting `startId` right. **Recommended next
+refactor.**
+
+### AMR now populates, and the factor is measured not looked up
+
+AMR is not a field of the SIG Body Composition profile —
+`BodyCompositionMeasurementParser` enumerates the whole §3.2 flag set and
+there is none. The BF720 *derives* it: BMR × a coefficient tied to the
+activity level set on the scale. `ReadingMapper.ACTIVITY_FACTOR = 1.85`, from
+a real weigh-in (BMR 1826 / AMR 3378 → 1.84995). That matches **no** published
+multiplier — Harris-Benedict L4 is 1.725, DGE L4 is 1.8, nearest is 91 kcal
+out — so a textbook value would have shipped a confidently wrong number.
+Accepted limits: it encodes one activity level, and reads ~4 kcal above the
+scale's display because the scale computes in kcal and transmits kJ.
+
+### Hardware evidence, in order
+
+Server `weight_log` on `192.168.1.21`: row 26 (195.73 lbs) proved the route
+fix; row 27 (197.36) after the adapter toggle; row 28 (197.60) is the first
+row with `amr` populated — 3386.07 against `bmr` 1830.31. All
+`synced_to_garmin = 1`.
+
+### Release plumbing that did not exist
+
+`ci.yml` triggered on `push: branches: [main]` only, so a tag ran **nothing**,
+and the `release` job only ever produced an `upload-artifact` that expires
+with the run. Added `tags: ['v*']` and a publish step that **refuses to ship
+an unsigned APK** — the keystore steps are deliberately fail-open so a
+secret-less fork still proves R8 compiles, which means an unsigned build can
+reach the publish step. Verified live: the signer digest in the release run
+is the real key.
+
+### New documentation
+
+`CHANGELOG.md` · `docs/prp/05-retrospective.md` · `docs/CODEMAPS/` (six maps)
+· `docs/CONTRIBUTING.md` · `docs/RUNBOOK.md` · `.reports/codemap-diff.txt`.
+
+The codemaps and runbook flag that **`00-design.md` and `01-plan.md` are
+content-stale, not mtime-stale** — they carry premises the hardware disproved.
+Read `05-retrospective.md` first.
+
+### Open, carried forward
+
+1. **`BridgeForegroundService` wants an owner-aware lifecycle** (above).
+2. **VitalForge needs root-compat routes** before `ReplayMigrationWorker` is
+   ever wired: a replay batch posting to root routes would 404, and 404
+   classifies as `PermanentRejection`, so every row would be marked
+   permanently failed on the first attempt. A prompt for that work was
+   drafted this session and **not yet sent**.
+3. **404-as-permanent** costs a reading for a purely local config error.
+   `submitReading`'s own KDoc argues against exactly this for a bad base URL.
+   Unchanged, because 404 is legitimately permanent for other causes.
+4. **The adapter fix is process-scoped** — registered from
+   `BasculeApplication.onCreate` rather than the manifest, because
+   `ACTION_STATE_CHANGED`'s implicit-broadcast exemption is not certain.
+   Covered under always-on bridging; a gap for automatic-capture-only.
+5. **Five merged branches** still exist locally and on `origin`:
+   `fix/vitalforge-person-prefix`, `feat/derive-amr`,
+   `ci/tag-triggered-release`, `docs/phase-5-retrospective`, `docs/codemaps`.
+6. **The proprietary `0xFFFF` / `0xFF00` services remain unexercised** — the
+   only route to a measured AMR, and to stored-measurement fetch that would
+   let sessions be seconds instead of minutes. `tools/hw-probe` is still
+   installed on the Pixel 9 as `com.ventouxlabs.hwprobe`.
+
+### Method note
+
+Two hardware claims were made this session on evidence that did not isolate
+what was claimed, and both were caught by something other than the claim
+itself — Codex once, a mutation test once. A third test was written vacuous
+(an earlier guard in the same function returned first, so deleting the guard
+under test changed nothing) and only running the mutation exposed it. When
+testing the second condition of a compound guard, make the fixture satisfy
+the first.
+
 ## 2026-09-07, late night: v2 capture proven, and VitalForge's routes moved
 
 **VitalForge does NOT run on `atlas`. That claim, repeated in every section
