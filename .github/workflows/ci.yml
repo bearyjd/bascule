@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # A tag build is what publishes. Without this the `release` job proves the
+    # R8 build compiles on every push and nothing more — pushing v0.1.0 ran no
+    # workflow at all and produced no artifact.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -53,6 +57,10 @@ jobs:
     name: Signed release APK
     needs: build
     runs-on: ubuntu-latest
+    # Only the publish step needs write access, and only on a tag. Declared at
+    # job scope because that is the narrowest scope GitHub Actions offers.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -94,3 +102,29 @@ jobs:
           name: app-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # An upload-artifact APK expires with the run's retention window and is
+      # only reachable from the Actions tab, so it is not a release. This is
+      # what actually publishes one, and only for a tag.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          # Fail loudly rather than publish an unsigned build. The keystore
+          # steps above are deliberately fail-open so a secret-less fork still
+          # proves R8 compiles — which means an unsigned APK CAN reach here if
+          # the secrets are ever missing or renamed. Shipping one would be
+          # worse than shipping nothing: its signature differs from the
+          # installed app, so nobody could update in place, and this project
+          # has no way to re-sign an install after the fact.
+          if ! "$BT/apksigner" verify "$APK"; then
+            echo "::error::refusing to publish an unsigned APK — check the BASCULE_KEYSTORE_* secrets"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "$APK" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
