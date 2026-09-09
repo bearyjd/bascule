@@ -1,8 +1,10 @@
 package com.ventouxlabs.bascule
 
 import android.app.Application
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.ble.AndroidScaleRegistrar
@@ -29,6 +31,7 @@ import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedSessionCookieStore
 import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.RuntimeApiFactory
+import com.ventouxlabs.bascule.service.AdapterStateReceiver
 import com.ventouxlabs.bascule.service.BridgeForegroundService
 import com.ventouxlabs.bascule.ui.BridgeServiceController
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -148,6 +151,20 @@ class BasculeApplication : Application() {
         // WorkManager lazy, and getInstance() throws when WorkManager failed to
         // initialize — on the main thread, on every launch.
         guarded { deliveryScheduler.ensurePeriodicDrain() }
+        // RECEIVER_EXPORTED, not NOT_EXPORTED: ACTION_STATE_CHANGED comes from
+        // the Bluetooth stack's uid, and on Android 14+ NOT_EXPORTED admits
+        // only the app's own uid and the system uid — the identical mistake
+        // that made AndroidGattTransport's bond receiver silently deaf
+        // (`149403d`). It is a protected broadcast, so nothing forgeable
+        // reaches it.
+        guarded {
+            ContextCompat.registerReceiver(
+                this,
+                AdapterStateReceiver(),
+                IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+                ContextCompat.RECEIVER_EXPORTED,
+            )
+        }
         applicationScope.launch {
             // Migration first, deliberately: bridgeServiceController.start()
             // below can lead to BridgeForegroundService.startActiveScan()
@@ -237,10 +254,25 @@ internal class AndroidBridgeServiceController(
      */
     private val starter: (Intent) -> Unit = { intent -> ContextCompat.startForegroundService(context, intent) },
 ) : BridgeServiceController {
-    override fun start() = startWith(intent())
+    /**
+     * Whether this process has asked the service to stop and not asked for it
+     * back. [BridgeForegroundService.isRunning] alone cannot answer that:
+     * `Context.stopService` is asynchronous, so `isRunning` stays true until
+     * `onDestroy`, and a re-arm landing in that gap would resurrect a bridge
+     * the user just switched off. Intent, not observed liveness.
+     */
+    @Volatile
+    private var stopRequested = false
 
-    override fun startBounded(durationMillis: Long) =
+    override fun start() {
+        stopRequested = false
+        startWith(intent())
+    }
+
+    override fun startBounded(durationMillis: Long) {
+        stopRequested = false
         startWith(intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, durationMillis))
+    }
 
     private fun startWith(intent: Intent) {
         val succeeded = runCatching { starter(intent) }
@@ -250,7 +282,13 @@ internal class AndroidBridgeServiceController(
     }
 
     override fun stop() {
+        stopRequested = true
         context.stopService(intent())
+    }
+
+    override fun rearmScan() {
+        if (stopRequested || !BridgeForegroundService.isRunning) return
+        startWith(intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true))
     }
 
     private fun intent() = Intent(context, BridgeForegroundService::class.java)

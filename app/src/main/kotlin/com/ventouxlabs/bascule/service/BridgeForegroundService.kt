@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -59,6 +60,27 @@ class BridgeForegroundService : Service() {
     private val cooldown by lazy { ScanEnqueueCooldown(this) }
 
     /**
+     * The value the most recent *real* start returned, replayed by a re-arm so
+     * reattaching a scan cannot silently flip an always-on service to
+     * `START_NOT_STICKY` or a bounded one to `START_STICKY` — the latter being
+     * the restart-unbounded failure `onStartCommand`'s KDoc already guards.
+     */
+    private var lastStartMode: Int = START_STICKY
+
+    /** Injectable for the same reason as [boundStopScheduler]: a JVM test has no real clock to wait out. */
+    internal var elapsedClock: () -> Long = { SystemClock.elapsedRealtime() }
+
+    /**
+     * When the active bounded window ends, or null when no bounded window is
+     * running. Needed because every `startForegroundService` allocates a newer
+     * `startId`, and `stopSelf(startId)` is a documented no-op once a newer
+     * start has landed — so a re-arm silently orphans the bounded timer and
+     * "Weigh now" never ends. Carrying the deadline lets the re-arm rebind the
+     * stop to its own `startId` for whatever time is left.
+     */
+    private var boundedEndElapsed: Long? = null
+
+    /**
      * The permission check runs before [startForeground], not after it as the
      * scan did: on API 34+ a `connectedDevice` foreground service may only start
      * while the app actually holds a Bluetooth runtime permission, so checking
@@ -81,6 +103,7 @@ class BridgeForegroundService : Service() {
                 .setContentText(getString(R.string.scale_bridge_text))
                 .setOngoing(true).build(),
         )
+        isRunning = true
         startActiveScan()
     }
 
@@ -107,15 +130,67 @@ class BridgeForegroundService : Service() {
      * toggle's own restart behavior is unchanged.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A re-arm is not a new start: it is this same instance reattaching its
+        // scan to a Bluetooth stack that replaced the one the old registration
+        // belonged to. It must not disturb a bounded window's timer or its
+        // start id, and must not change the restart mode the *actual* start
+        // established — hence returning [lastStartMode] rather than a literal.
+        if (intent?.getBooleanExtra(EXTRA_REARM_SCAN, false) == true) {
+            restartActiveScan()
+            rebindBoundedStop(startId)
+            return lastStartMode
+        }
         val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
-        if (boundMillis <= 0) return START_STICKY
+        // A plain always-on start deliberately supersedes any bounded window —
+        // the stale timer's stopSelf(oldId) is already a no-op — so forget the
+        // deadline rather than let a later re-arm resurrect a stop for a window
+        // the user has since replaced with "keep scanning".
+        if (boundMillis <= 0) {
+            boundedEndElapsed = null
+            return START_STICKY.also { lastStartMode = it }
+        }
+        boundedEndElapsed = elapsedClock() + boundMillis
         // A bounded start is "Weigh now": the user is standing on the scale
         // right now, so any backoff earned by earlier failures has to go. It is
         // the one control they have, and a throttle that can block it is worse
         // than no throttle at all.
         activeAddressProvider()?.let(cooldown::clear)
         boundStopScheduler(boundMillis) { stopSelf(startId) }
-        return START_NOT_STICKY
+        return START_NOT_STICKY.also { lastStartMode = it }
+    }
+
+    /**
+     * Replaces the scan registration in place. Stopping the old callback first
+     * is best-effort by design: after an adapter cycle the registration it
+     * refers to is already gone, so the call is expected to be a no-op — but
+     * skipping it would leak a live registration in the case this is ever
+     * called without one (a future caller, a stack that survived).
+     */
+    /**
+     * Re-points the bounded window's stop at [rearmStartId], the newest start,
+     * because the timer armed by the original bounded start now holds a stale
+     * id whose `stopSelf` will do nothing. Without this a Bluetooth cycle
+     * during a "Weigh now" leaves a `SCAN_MODE_BALANCED` foreground scan
+     * running forever — worse for the phone and the scale's batteries than the
+     * adapter-cycle gap the re-arm exists to close.
+     *
+     * A window that already elapsed stops immediately rather than scheduling
+     * zero: the re-arm may be the first thing to run after a long stall.
+     */
+    private fun rebindBoundedStop(rearmStartId: Int) {
+        val end = boundedEndElapsed ?: return
+        val remaining = end - elapsedClock()
+        if (remaining <= 0) {
+            stopSelf(rearmStartId)
+            return
+        }
+        boundStopScheduler(remaining) { stopSelf(rearmStartId) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartActiveScan() {
+        runCatching { scanner?.stopScan(callback) }
+        startActiveScan()
     }
 
     /** BLUETOOTH_SCAN, not CONNECT: this service only ever scans. */
@@ -178,6 +253,7 @@ class BridgeForegroundService : Service() {
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
+        isRunning = false
         runCatching { scanner?.stopScan(callback) }
         super.onDestroy()
     }
@@ -202,5 +278,29 @@ class BridgeForegroundService : Service() {
 
         /** Positive only on a `weighNow()`-bounded start; absent on the always-on toggle's unbounded one. */
         const val EXTRA_BOUND_MILLIS = "bound_millis"
+
+        /**
+         * Set by [AdapterStateReceiver] to re-register the scan against a
+         * replacement Bluetooth stack, without the stop/start race an external
+         * restart has: `Context.stopService` is asynchronous, so a `start()`
+         * issued straight after it can be delivered to the still-live instance,
+         * whose [onStartCommand] never called [startActiveScan] — leaving the
+         * invalidated registration in place and the service running with no
+         * scan at all.
+         */
+        const val EXTRA_REARM_SCAN = "rearm_scan"
+
+        /**
+         * Whether an instance is live and holding a scan. Read by
+         * [AdapterStateReceiver] so a re-arm is only ever sent to a service
+         * that is already running: `startForegroundService` would otherwise
+         * *create* a bridge the user never asked for, in exactly the
+         * configuration (both toggles off) where they had turned it off.
+         *
+         * Set after [onCreate]'s permission gate rather than at its top, so a
+         * start that immediately stops itself never reads as running.
+         */
+        @Volatile
+        internal var isRunning: Boolean = false
     }
 }

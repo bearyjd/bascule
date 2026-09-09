@@ -55,6 +55,107 @@ class BridgeForegroundServiceTest {
      * permission gate and `startActiveScan`'s cast to the real
      * `BasculeApplication`, neither of which this behavior depends on.
      */
+    /**
+     * The re-arm exists because an external stop/start cannot do this job:
+     * `Context.stopService` is asynchronous, so the restart can be delivered to
+     * the still-live instance, and `onStartCommand` never called
+     * `startActiveScan`. Re-arming in place removes the race — but it must stay
+     * a *re-arm*, not a second start, so it may not disturb the restart mode a
+     * bounded window established. `START_STICKY` here would mean a mid-window
+     * process kill restarts the scan unbounded, with no timer to end it: the
+     * exact failure `onStartCommand`'s KDoc already guards for bounded starts.
+     */
+    @Test
+    fun aRearmPreservesTheRestartModeOfABoundedStart() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        val bounded = service.onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L),
+            0,
+            1,
+        )
+        val rearmed = service.onStartCommand(
+            Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true),
+            0,
+            2,
+        )
+
+        assertEquals(Service.START_NOT_STICKY, bounded)
+        assertEquals("a re-arm must not promote a bounded window to sticky", bounded, rearmed)
+    }
+
+    /**
+     * The bounded window must still end after a re-arm. `stopSelf(startId)` is
+     * a no-op once a newer start has landed, and a re-arm IS a newer start, so
+     * the timer armed by the original bounded start is orphaned: without a
+     * rebind, "Weigh now" runs a BALANCED foreground scan forever.
+     *
+     * Asserted as "the rebound stop carries the re-arm's own startId", not as
+     * "the service stopped" — Robolectric's ShadowService records
+     * `stopSelf(int)` but does not model the platform's newer-start no-op, so
+     * an isStoppedBySelf assertion would pass either way (prior learning
+     * `robolectric-stopself-startid-not-modeled`).
+     */
+    @Test
+    fun aRearmRebindsTheBoundedStopToItsOwnStartId() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        var now = 1_000L
+        service.elapsedClock = { now }
+        val scheduled = mutableListOf<Pair<Long, () -> Unit>>()
+        service.boundStopScheduler = { millis, onExpire -> scheduled += millis to onExpire }
+
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 1)
+        now += 30_000L
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true), 0, 7)
+
+        assertEquals("the re-arm must rebind, not merely leave the stale timer", 2, scheduled.size)
+        assertEquals("only the time left in the window, not a fresh 120s", 90_000L, scheduled[1].first)
+
+        scheduled[1].second()
+        assertEquals(
+            "the rebound stop must carry the newest startId or it is a no-op",
+            7,
+            shadowOf(service).stopSelfId,
+        )
+    }
+
+    /** A window that already elapsed stops at once rather than scheduling zero. */
+    @Test
+    fun aRearmAfterTheBoundedWindowElapsedStopsImmediately() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        var now = 1_000L
+        service.elapsedClock = { now }
+        val scheduled = mutableListOf<Long>()
+        service.boundStopScheduler = { millis, _ -> scheduled += millis }
+
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 1)
+        now += 200_000L
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true), 0, 7)
+
+        assertEquals("no second timer for an expired window", 1, scheduled.size)
+        assertEquals(7, shadowOf(service).stopSelfId)
+    }
+
+    /** An always-on start supersedes a bounded window, so a later re-arm must not resurrect its stop. */
+    @Test
+    fun anAlwaysOnStartClearsTheBoundedDeadline() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.elapsedClock = { 1_000L }
+        val scheduled = mutableListOf<Long>()
+        service.boundStopScheduler = { millis, _ -> scheduled += millis }
+
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 1)
+        service.onStartCommand(Intent(), 0, 2)
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true), 0, 3)
+
+        assertEquals("the always-on owner wants it running; no stop may be rebound", 1, scheduled.size)
+    }
+
     @Test
     fun aScanResultIsDispatchedThroughTheInjectedEnqueuer() {
         val enqueuer = FakeScaleSessionEnqueuer()

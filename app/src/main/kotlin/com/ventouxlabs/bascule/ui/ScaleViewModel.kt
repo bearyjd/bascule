@@ -81,6 +81,15 @@ interface BridgeServiceController {
     /** Same underlying scan, bounded: the service stops itself once [durationMillis] elapses. */
     fun startBounded(durationMillis: Long)
     fun stop()
+
+    /**
+     * Re-register the running service's scan against a replacement Bluetooth
+     * stack, in place. A no-op when no service is running — deliberately, so
+     * this can never bring up a bridge the user has switched off. Distinct
+     * from [stop] + [start] because `Context.stopService` is asynchronous: the
+     * start can land on the still-live instance, which re-registers nothing.
+     */
+    fun rearmScan()
 }
 
 class ScaleViewModel(

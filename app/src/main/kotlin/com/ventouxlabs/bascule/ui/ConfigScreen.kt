@@ -260,7 +260,11 @@ private fun ConnectionSection(
             },
             label = { Text("Base URL") },
             isError = state.baseUrlError != null,
-            supportingText = state.baseUrlError?.let { { Text(it) } },
+            // Always supported, not only on error: VitalForge serves the weight
+            // routes under a per-person path, and a base URL missing it looks
+            // completely valid here while every delivery 404s. The field said
+            // nothing at all in the state where the guidance was needed most.
+            supportingText = { Text(state.baseUrlError ?: BASE_URL_HINT) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -750,3 +754,14 @@ private fun PassphraseDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+/**
+ * Shown under the Base URL field whenever there is no validation error to show
+ * instead. Names the person path because that is the one part of the URL a user
+ * cannot guess and the app cannot infer — and getting it wrong produces a 404
+ * that [com.ventouxlabs.bascule.network.VitalForgeHttpClient.NO_SUCH_ENDPOINT_REASON]
+ * explains from the other direction, on "Test connection".
+ */
+private const val BASE_URL_HINT =
+    "Include your person path, e.g. https://your-server/p/your-slug — " +
+        "it is the address VitalForge shows after you sign in."

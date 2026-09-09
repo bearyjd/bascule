@@ -136,13 +136,25 @@ class VitalForgeHttpClient(
                 is SubmitResult.Accepted -> ConnectionTestResult.Authorized
                 is SubmitResult.AuthRejected -> ConnectionTestResult.Unauthorized(classified.httpCode)
                 is SubmitResult.TransientFailure -> ConnectionTestResult.Unreachable(classified.reason)
-                is SubmitResult.PermanentRejection -> ConnectionTestResult.Unreachable(classified.reason)
+                // A 404 here is the one failure the user can actually fix from
+                // this screen, and the generic "rejected by server" hides it:
+                // VitalForge serves the weight routes under `/p/{slug}/`, so a
+                // base URL missing that path authenticates fine and then finds
+                // nothing. Naming the cause is the difference between "syncs
+                // are unreliable" and a one-line correction.
+                is SubmitResult.PermanentRejection ->
+                    if (classified.httpCode == HTTP_NOT_FOUND) {
+                        ConnectionTestResult.Unreachable(NO_SUCH_ENDPOINT_REASON)
+                    } else {
+                        ConnectionTestResult.Unreachable(classified.reason)
+                    }
             }
         }
     }
 
     override suspend fun login(username: String, password: String): LoginResult {
-        val url = resolve(LOGIN_PATH) ?: return LoginResult.Unreachable("base URL is not a valid http(s) URL")
+        val url = resolveAtOrigin(LOGIN_PATH)
+            ?: return LoginResult.Unreachable("base URL is not a valid http(s) URL")
         val body = buildJsonObject {
             put("username", JsonPrimitive(username))
             put("password", JsonPrimitive(password))
@@ -229,8 +241,23 @@ class VitalForgeHttpClient(
         return source.buffer.size > MAX_BODY_BYTES
     }
 
+    /**
+     * Weight paths hang off [baseUrl] verbatim, so a base URL carrying
+     * VitalForge's per-person prefix (`https://host/p/<slug>`) reaches that
+     * person's routes and a bare host keeps the pre-prefix behaviour.
+     */
     private fun resolve(path: String): HttpUrl? =
         baseUrl.trimEnd('/').plus(path).toHttpUrlOrNull()
+
+    /**
+     * Auth is server-global, not per-person: VitalForge serves `/auth/login` at
+     * the root while the weight routes live under `/p/{slug}/`. Resolving an
+     * absolute path against the base URL discards any path component, so this
+     * stays correct whether or not [baseUrl] carries a person prefix — and is
+     * identical to [resolve] when it does not.
+     */
+    private fun resolveAtOrigin(path: String): HttpUrl? =
+        baseUrl.trimEnd('/').toHttpUrlOrNull()?.resolve(path)
 
     companion object {
         const val WEIGHT_PATH = "/api/weight"
@@ -241,6 +268,14 @@ class VitalForgeHttpClient(
         const val SESSION_COOKIE_NAME = "vf_session"
 
         private const val HTTP_UNAUTHORIZED = 401
+        private const val HTTP_NOT_FOUND = 404
+
+        /**
+         * Surfaced verbatim by `ConfigViewModel.testConnection()`, so it is
+         * written for the person reading the Settings screen, not for a log.
+         */
+        const val NO_SUCH_ENDPOINT_REASON =
+            "No such endpoint (404) — the Base URL may be missing your person path, e.g. /p/your-slug"
 
         /**
          * A remote `captured_at` outside this range cannot be a real weigh-in and
