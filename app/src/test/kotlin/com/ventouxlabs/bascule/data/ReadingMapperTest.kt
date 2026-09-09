@@ -56,4 +56,34 @@ class ReadingMapperTest {
         assertNull(entity.bodyFatPct)
         assertNull(entity.scaleProfileId)
     }
+
+    /**
+     * Reproduces the measurement the factor came from: a weigh-in the scale
+     * displayed as BMR 1826 / AMR 3378. Pinned against the real device numbers
+     * rather than a round fixture, so a change to [ReadingMapper.ACTIVITY_FACTOR]
+     * fails against what the hardware actually shows.
+     */
+    @Test
+    fun derivesAmrFromBasalMetabolismUsingTheScalesActivityFactor() {
+        val measurement = scaleReadingFixture().copy(basalMetabolismKj = ReadingMapper.KJ_PER_KCAL * 1_826.0)
+        val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
+        assertEquals(3_378.1, requireNotNull(entity.amr), 0.05)
+    }
+
+    /** No basal metabolism means no basis to derive from — an invented AMR is worse than none. */
+    @Test
+    fun leavesAmrNullWhenTheFrameCarriedNoBasalMetabolism() {
+        val measurement = scaleReadingFixture()
+        val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
+        assertNull(entity.amr)
+    }
+
+    /** A decoded AMR, if one ever arrives, outranks the estimate. */
+    @Test
+    fun prefersADecodedAmrOverTheDerivedOne() {
+        val measurement = scaleReadingFixture()
+            .copy(basalMetabolismKj = ReadingMapper.KJ_PER_KCAL * 1_826.0, amr = 9_999.0)
+        val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
+        assertEquals(9_999.0, requireNotNull(entity.amr), 0.0001)
+    }
 }
