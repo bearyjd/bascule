@@ -40,9 +40,13 @@ object ReadingMapper {
      * have produced a confidently wrong number.
      *
      * Two limits, both accepted deliberately (user's call, 2026-09-08):
-     * - **It encodes one activity level**, the one this scale is set to. A
-     *   different level is a different coefficient, and one data point cannot
-     *   recover the rest of Beurer's table.
+     * - **It encodes one activity level**, the one this scale is set to —
+     *   reported as level 4 (2026-09-09). That is the user's recollection,
+     *   not a value read back off the scale's menu, so treat it as probable
+     *   rather than established. If it holds, Beurer's level-4 coefficient
+     *   is its own: 1.85 against Harris-Benedict's 1.725 and the DGE's 1.8.
+     *   A different level is a different coefficient, and one data point
+     *   cannot recover the rest of the table.
      * - **It will read a few kcal above the scale's own display.** The scale
      *   works in kcal internally and transmits kilojoules: the wire carried
      *   7649 kJ (1828.15 kcal) for a reading the scale displayed as 1826, so
