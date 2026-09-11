@@ -29,16 +29,24 @@ object ReadingMapper {
      * configured on the scale.
      *
      * 1.85 is measured from this scale, not taken from a table: a weigh-in
-     * displaying BMR 1826 kcal showed AMR 3378, and 3378 / 1826 = 1.84995. It
-     * deliberately matches **no** published multiplier — Harris-Benedict puts
+     * displaying BMR 1826 kcal showed AMR 3378, and 3378 / 1826 = 1.84995.
+     * That is one observation but a tight one. The scale displays whole kcal,
+     * so the true ratio lies in 3377.5/1826.5 .. 3378.5/1825.5 — a window of
+     * 1.8492..1.8507, ±0.04%, with 1.85 near its centre. Re-read on
+     * 2026-09-09: the same 1826 / 3378, so nothing contradicts it.
+     * It deliberately matches **no** published multiplier — Harris-Benedict puts
      * level 4 at 1.725 and level 5 at 1.9, the DGE PAL table 1.8 and 2.0, and
      * the closest of those is 91 kcal out. Implementing a textbook value would
      * have produced a confidently wrong number.
      *
      * Two limits, both accepted deliberately (user's call, 2026-09-08):
-     * - **It encodes one activity level**, the one this scale is set to. A
-     *   different level is a different coefficient, and one data point cannot
-     *   recover the rest of Beurer's table.
+     * - **It encodes one activity level**, the one this scale is set to —
+     *   reported as level 4 (2026-09-09). That is the user's recollection,
+     *   not a value read back off the scale's menu, so treat it as probable
+     *   rather than established. If it holds, Beurer's level-4 coefficient
+     *   is its own: 1.85 against Harris-Benedict's 1.725 and the DGE's 1.8.
+     *   A different level is a different coefficient, and one data point
+     *   cannot recover the rest of the table.
      * - **It will read a few kcal above the scale's own display.** The scale
      *   works in kcal internally and transmits kilojoules: the wire carried
      *   7649 kJ (1828.15 kcal) for a reading the scale displayed as 1826, so
