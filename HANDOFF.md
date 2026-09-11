@@ -65,7 +65,8 @@ any new owner's start silently invalidates another owner's pending
 (`weighnow-alwayson-service-lifecycle-races`, 2026-09-01). Each has been
 fixed individually; the structural answer is one owner-aware lifecycle rather
 than four callers each getting `startId` right. **Recommended next
-refactor.**
+refactor** — designed in `docs/prp/06-owner-aware-bridge-lifecycle.md`,
+deliberately not implemented (that doc's §6 says why).
 
 ### AMR now populates, and the factor is measured not looked up
 
@@ -108,6 +109,9 @@ Read `05-retrospective.md` first.
 ### Open, carried forward
 
 1. **`BridgeForegroundService` wants an owner-aware lifecycle** (above).
+   Plan written: `docs/prp/06-owner-aware-bridge-lifecycle.md`. Do it with a
+   device in hand and no release in flight — verifying it needs a Bluetooth
+   toggle plus a live weigh-in.
 2. **VitalForge needs root-compat routes** before `ReplayMigrationWorker` is
    ever wired: a replay batch posting to root routes would 404, and 404
    classifies as `PermanentRejection`, so every row would be marked
