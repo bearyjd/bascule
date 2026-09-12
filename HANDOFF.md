@@ -130,9 +130,11 @@ Read `05-retrospective.md` first.
    `BasculeApplication.onCreate` rather than the manifest, because
    `ACTION_STATE_CHANGED`'s implicit-broadcast exemption is not certain.
    Covered under always-on bridging; a gap for automatic-capture-only.
-5. **Five merged branches** still exist locally and on `origin`:
-   `fix/vitalforge-person-prefix`, `feat/derive-amr`,
-   `ci/tag-triggered-release`, `docs/phase-5-retrospective`, `docs/codemaps`.
+5. ~~**Five merged branches** still exist locally and on `origin`~~ — deleted
+   2026-09-09 after confirming each was 0 commits ahead of `main`. `origin`
+   carries only `main`; the one other local branch,
+   `meute/draft-ticket-2026-09-06`, is unrelated to this repo's work and is
+   left alone deliberately.
 6. **The proprietary `0xFFFF` / `0xFF00` services remain unexercised** — the
    only route to a measured AMR, and to stored-measurement fetch that would
    let sessions be seconds instead of minutes. `tools/hw-probe` is still
