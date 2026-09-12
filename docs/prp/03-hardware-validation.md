@@ -100,9 +100,10 @@ Test host: Pixel 9 Pro Fold, Android 17 (API 37), 2026-08-22.
 
 ## What was NOT yet confirmed
 
-- The two proprietary services (`0xFFFF`, `0xFF00`) — not exercised. Unknown
-  whether Bascule ever needs them (the standard-profile path above was
-  sufficient to get a full reading).
+- ~~The two proprietary services (`0xFFFF`, `0xFF00`) — not exercised.~~
+  **Enumerated 2026-09-12** — see "Proprietary services" below. Still unknown
+  whether Bascule *needs* them; the standard-profile path remains sufficient
+  for a full reading.
 - Multiple weigh-ins / repeat-session stability, disconnect-mid-measurement
   behavior, and the other E1–E16 failure edges — none of these were
   exercised by this probe. They remain Phase 3 hardware-checklist items
@@ -118,6 +119,86 @@ Test host: Pixel 9 Pro Fold, Android 17 (API 37), 2026-08-22.
   inconsistent) but not characterized rigorously. Relevant to E-series
   session-lifetime assumptions in `00-design.md` §2.5 — flagged, not
   resolved.
+
+## Proprietary services, enumerated 2026-09-12
+
+Read-only reconnaissance. No writes were issued, so nothing here changed
+scale state or consumed one of its eight user slots.
+
+Device: Pixel 10 Pro Fold `57211FDCG0023C` (the spare — it is bonded to the
+same BF720 and hw-probe is a separate package, so which phone probes does not
+matter). Scale advertising at −63 dBm, battery `0x64` = 100%.
+
+**The scale documents its own proprietary service.** Every characteristic in
+`0xFFFF` carries a `0x2901` Characteristic User Description, and the firmware
+fills them in:
+
+| Char | `0x2901` name (verbatim, typo included) | Props | Value read |
+|---|---|---|---|
+| `0x0000` | `Scale Setting` | R/W | `ff 01 ff ff 1e 00 ff ff` |
+| `0x0001` | `User List` | R/W/N | `08` |
+| `0x0002` | `Initials` | R/W | `ff ff ff` |
+| `0x0004` | `Acitivity Level` | R/W | `ff` |
+| `0x0005` | `Copy User Measurement List From MCU to BT-Module` | R/W | `ff` |
+| `0x0006` | `Take Measurement` | R/W/N | `ff` |
+| `0x000b` | `Refer Weight/BF` | R | `ff ff ff ff` |
+
+`0xFF00` holds a single characteristic `0xFF01` (R/W/WRITE_NR, no description)
+reading `00 00`.
+
+The scale accepted NOTIFY subscriptions on `0x0001` and `0x0006` (both
+`status=0`), so the proprietary channels are live, not vestigial.
+
+### Why two of these matter
+
+- **`0x0004` "Acitivity Level"** is the input to the AMR coefficient
+  `ReadingMapper.ACTIVITY_FACTOR` encodes. That constant is currently pinned
+  by inference — a measured BMR/AMR pair bounds it to 1.8492..1.8507 — and the
+  level itself rests on the user's recollection ("level 4"). A successful read
+  here would make the level **authoritative** and, across levels, recover the
+  rest of Beurer's table rather than the single point we have.
+- **`0x0005` "Copy User Measurement List From MCU to BT-Module"** is a
+  stored-measurement fetch. It is the mechanism behind the standing hypothesis
+  that a session could be seconds rather than minutes, and that a weigh-in
+  missed by a sleeping phone need not be lost at all.
+
+### The blocker, and what it costs
+
+Every user-scoped characteristic read back `0xff`. The working hypothesis is
+that these require an established UDS user context — hw-probe connected
+without sending consent — which matches `0x0001 User List` returning `08`, the
+slot count, while everything user-specific reads as unset.
+
+Testing that needs a consent code. Bascule holds one (the Scale screen reports
+"Registered as user slot 1") but it lives in `EncryptedPreferences` and is not
+readable off the device. hw-probe's `register` command would mint a new user
+**and burn one of the eight slots**, so it was not run. That is a deliberate
+stop, not an unexplored path: the next step costs a slot and is the user's
+call.
+
+`0x0001` returning `08` is also ambiguous on its own — a count of eight slots,
+or a bitmask with slot 4 set. Not resolved.
+
+### Reproducing
+
+`tools/hw-probe` gained a `dumpprop` command for this: it reads the `0x2901`
+descriptor of every characteristic in `0xFFFF`/`0xFF00` and then every
+readable value, one operation at a time because GATT allows a single
+outstanding request.
+
+```
+adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd connect --es addr E7:DB:51:F1:36:91
+adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd dumpprop
+adb shell cat /sdcard/Android/data/com.ventouxlabs.hwprobe/files/capture.txt
+```
+
+Note `tools/hw-probe` has **no Gradle wrapper of its own**; build it with the
+root one and give it an SDK path:
+
+```
+echo "sdk.dir=$ANDROID_HOME" > tools/hw-probe/local.properties
+./gradlew -p tools/hw-probe assembleDebug
+```
 
 ## Tooling used
 
