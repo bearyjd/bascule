@@ -75,19 +75,36 @@ private data class ScaleCaptureSnapshot(
  * ad-hoc lambda resembling nothing in production — the same reason
  * `ConfigStore`, `ConsentStore` and `DeliveryTrigger` are interfaces.
  */
+/**
+ * Paired acquire/release, not start/stop: the service runs while anyone wants
+ * it and stops when the last caller lets go, so no caller has to reason about
+ * whether *another* one still needs it. [start]/[stop] are the always-on
+ * toggle's pair, [startBounded]/[cancelBounded] are "Weigh now"'s.
+ */
 interface BridgeServiceController {
     fun start()
 
-    /** Same underlying scan, bounded: the service stops itself once [durationMillis] elapses. */
+    /** Same underlying scan, bounded: the window releases itself once [durationMillis] elapses. */
     fun startBounded(durationMillis: Long)
+
+    /**
+     * Give up the always-on claim. The service keeps running if a "Weigh now"
+     * window still holds one.
+     */
     fun stop()
 
     /**
+     * End a "Weigh now" window early. A no-op when none is running, and it
+     * cannot stop a service the always-on toggle is holding open.
+     */
+    fun cancelBounded()
+
+    /**
      * Re-register the running service's scan against a replacement Bluetooth
-     * stack, in place. A no-op when no service is running — deliberately, so
-     * this can never bring up a bridge the user has switched off. Distinct
-     * from [stop] + [start] because `Context.stopService` is asynchronous: the
-     * start can land on the still-live instance, which re-registers nothing.
+     * stack, in place. A no-op when nothing owns the bridge — deliberately, so
+     * this can never bring up one the user has switched off. Distinct from
+     * [stop] + [start] because `Context.stopService` is asynchronous: the start
+     * can land on the still-live instance, which re-registers nothing.
      */
     fun rearmScan()
 }
@@ -262,21 +279,22 @@ class ScaleViewModel(
     }
 
     /**
-     * No window running is a no-op — the service self-stops on its own once
-     * its window elapses regardless. Stopping it here is itself conditional:
-     * "Always-on foreground fallback" can be switched on *during* a
-     * `weighNow()` window (that check only runs once, at start), and an
-     * unconditional `stop()` would kill the scan the user separately asked
-     * to keep running, leaving that toggle reading on with nothing behind it
-     * (devil's-advocate review, H-2).
+     * No window running is a no-op — the window releases itself once it elapses
+     * regardless.
+     *
+     * This used to read `alwaysOnBridging` first and stop the service only if
+     * it was off, because "Always-on foreground fallback" can be switched on
+     * *during* a window and an unconditional `stop()` would have killed the
+     * scan the user separately asked to keep running (devil's-advocate review,
+     * H-2). [BridgeServiceController.cancelBounded] releases only this window's
+     * own claim, so that check — and the coroutine it needed to read config —
+     * is now structurally unnecessary rather than merely correct.
      */
     fun cancelWeighNow() {
         if (!mutableWeighNowActive.value) return
         weighNowJob?.cancel()
         mutableWeighNowActive.value = false
-        viewModelScope.launch {
-            if (!config.alwaysOnBridging.first()) bridgeService.stop()
-        }
+        bridgeService.cancelBounded()
     }
 
     companion object {

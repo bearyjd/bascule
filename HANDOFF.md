@@ -108,10 +108,16 @@ Read `05-retrospective.md` first.
 
 ### Open, carried forward
 
-1. **`BridgeForegroundService` wants an owner-aware lifecycle** (above).
-   Plan written: `docs/prp/06-owner-aware-bridge-lifecycle.md`. Do it with a
-   device in hand and no release in flight — verifying it needs a Bluetooth
-   toggle plus a live weigh-in.
+1. ~~**`BridgeForegroundService` wants an owner-aware lifecycle**~~ —
+   **done 2026-09-11**, `refactor/owner-aware-bridge-lifecycle`. Callers now
+   acquire/release a `BridgeOwner` and `releaseOwner` is the only thing that
+   stops the service. `lastStartMode`, `boundedEndElapsed`'s clear-the-deadline
+   branch, `isRunning` and `stopRequested` are all gone.
+   `docs/prp/06-owner-aware-bridge-lifecycle.md` §8 records the three things the
+   plan did not settle (releases must be a direct call, not an intent; a null
+   intent means `ALWAYS_ON`; the stop condition is membership, not emptiness)
+   and §9 the evidence, including the hardware sequence where a re-armed
+   bounded window still ended.
 2. **VitalForge needs root-compat routes** before `ReplayMigrationWorker` is
    ever wired: a replay batch posting to root routes would 404, and 404
    classifies as `PermanentRejection`, so every row would be marked
