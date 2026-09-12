@@ -212,6 +212,35 @@ class BridgeForegroundServiceTest {
      * a concurrent acquire had legitimately just started — the same race the
      * owner model exists to remove.
      */
+    /**
+     * The case with actual teeth, and the reason the guard is a membership test
+     * rather than a subtraction: removing an absent element from a set is a
+     * no-op, so an empty set stays empty and "did this empty the set" would
+     * read true for a release of something never held. Without the guard this
+     * `stopSelf`s a service a concurrent acquire may have just started.
+     *
+     * Reached by the always-on toggle going off twice, or a "Weigh now" being
+     * cancelled after its window already expired.
+     *
+     * Found by mutation: the sibling test below passes with the guard deleted,
+     * because `setOf(ALWAYS_ON) - WEIGH_NOW` is still `setOf(ALWAYS_ON)`.
+     */
+    @Test
+    fun releasingWhenNothingIsHeldDoesNotStopTheService() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        service.releaseOwner(BridgeOwner.ALWAYS_ON)
+
+        assertTrue(service.owners.isEmpty())
+        assertFalse(
+            "a release against an empty set must not stop anything",
+            shadowOf(service).isStoppedBySelf,
+        )
+    }
+
+    /** The same guard from the other side: a different owner is held, so nothing changes. */
     @Test
     fun releasingAnOwnerThatIsNotHeldDoesNotStopTheService() {
         val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
