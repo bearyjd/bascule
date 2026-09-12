@@ -12,8 +12,12 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * Deliberately coarser than `SessionExitReason`: a user cannot act on
  * "DISCOVERY_FAILED" versus "GRACEFUL_DISCONNECT", but they can act on "the
- * phone never got there in time" versus "your scale isn't linked yet". The
- * fine-grained reason still goes to logcat for whoever is debugging.
+ * phone never got there in time" versus "your scale isn't linked yet".
+ *
+ * The fine-grained reason is not discarded: it goes to logcat, and it is also
+ * stored beside the outcome as [LastCaptureAttempt.technicalReason], because
+ * logcat has rotated by the time anyone asks about an attempt from this
+ * morning. Nothing shows it to the user.
  */
 enum class CaptureOutcome {
     /** A reading was captured and stored. */
@@ -45,7 +49,27 @@ enum class CaptureOutcome {
     NEEDS_PAIRING,
 }
 
-data class LastCaptureAttempt(val atMillis: Long, val outcome: CaptureOutcome)
+data class LastCaptureAttempt(
+    val atMillis: Long,
+    val outcome: CaptureOutcome,
+    /**
+     * The fine-grained reason behind [outcome], as the session layer named it —
+     * a `SessionExitReason` name in practice, kept as an opaque `String` so this
+     * package does not depend on `ble.session` for a debugging breadcrumb.
+     *
+     * **Nothing renders this, deliberately.** [outcome] is what the user is
+     * told, and the coarseness there is the point (see [CaptureOutcome]). This
+     * exists so the distinction survives: `NO_READING` covers both "listened
+     * and nobody stepped on" and "the handshake failed", which are very
+     * different problems, and the logcat line separating them is gone once the
+     * ring buffer wraps. It lands in `shared_prefs/capture_attempts.xml`,
+     * readable with `run-as`, hours after the fact.
+     *
+     * Null for a record written before this field existed, and for any caller
+     * with no finer reason to give.
+     */
+    val technicalReason: String? = null,
+)
 
 /**
  * The last thing an automatic capture attempt did, surviving the process that
@@ -63,7 +87,12 @@ data class LastCaptureAttempt(val atMillis: Long, val outcome: CaptureOutcome)
  * cheap enough to write on every exit from a worker.
  */
 interface CaptureAttemptLog {
-    fun record(outcome: CaptureOutcome, atMillis: Long = System.currentTimeMillis())
+    fun record(
+        outcome: CaptureOutcome,
+        technicalReason: String? = null,
+        atMillis: Long = System.currentTimeMillis(),
+    )
+
     val last: StateFlow<LastCaptureAttempt?>
 }
 
@@ -102,10 +131,14 @@ class SharedPreferencesCaptureAttemptLog(context: Context) : CaptureAttemptLog {
      * process is reaped is exactly the silent failure this class exists to make
      * visible.
      */
-    override fun record(outcome: CaptureOutcome, atMillis: Long) {
+    override fun record(outcome: CaptureOutcome, technicalReason: String?, atMillis: Long) {
         store.edit()
             .putString(KEY_OUTCOME, outcome.name)
             .putLong(KEY_AT, atMillis)
+            // Cleared, not left behind, when a caller gives no reason: a stale
+            // reason under a fresh outcome is worse than none, because it reads
+            // as an explanation of the wrong attempt.
+            .putString(KEY_REASON, technicalReason)
             .commit()
     }
 
@@ -120,12 +153,13 @@ class SharedPreferencesCaptureAttemptLog(context: Context) : CaptureAttemptLog {
         if (at <= 0L) return null
         val name = store.getString(KEY_OUTCOME, null) ?: return null
         val outcome = CaptureOutcome.entries.firstOrNull { it.name == name } ?: return null
-        return LastCaptureAttempt(at, outcome)
+        return LastCaptureAttempt(at, outcome, store.getString(KEY_REASON, null))
     }
 
     private companion object {
         const val PREFS_NAME = "capture_attempts"
         const val KEY_OUTCOME = "last_outcome"
         const val KEY_AT = "last_at_millis"
+        const val KEY_REASON = "last_technical_reason"
     }
 }

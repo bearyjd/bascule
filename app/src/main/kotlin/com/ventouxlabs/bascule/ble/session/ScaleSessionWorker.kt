@@ -182,7 +182,9 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
                 // Read before write: the transition is from what the user was
                 // last told to what just happened.
                 val previous = log.last.value?.outcome
-                log.record(outcome)
+                // reason.name, not just the outcome: NO_READING alone cannot
+                // tell a failed handshake from nobody stepping on the scale.
+                log.record(outcome, reason.name)
                 CaptureAttentionNotifier(applicationContext).apply(attentionTransition(previous, outcome))
             }.onFailure { Log.w(TAG, "could not record the capture attempt", it) }
         }
