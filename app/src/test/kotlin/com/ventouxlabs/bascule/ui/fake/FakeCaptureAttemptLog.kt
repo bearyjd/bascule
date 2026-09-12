@@ -19,7 +19,7 @@ class FakeCaptureAttemptLog(initial: LastCaptureAttempt? = null) : CaptureAttemp
 
     override val last: StateFlow<LastCaptureAttempt?> = state.asStateFlow()
 
-    override fun record(outcome: CaptureOutcome, atMillis: Long) {
-        state.value = LastCaptureAttempt(atMillis, outcome)
+    override fun record(outcome: CaptureOutcome, technicalReason: String?, atMillis: Long) {
+        state.value = LastCaptureAttempt(atMillis, outcome, technicalReason)
     }
 }

@@ -28,6 +28,54 @@ class CaptureAttemptLogTest {
         assertNull(log().last.value)
     }
 
+    /**
+     * The distinction `CaptureOutcome` deliberately throws away, kept where it
+     * survives: `NO_READING` covers both "listened and nobody stepped on" and
+     * "the handshake failed". Logcat separated them and has since rotated, so
+     * without this there is no way to tell them apart the next morning.
+     */
+    @Test
+    fun theTechnicalReasonSurvivesAFreshInstance() {
+        log().record(CaptureOutcome.NO_READING, technicalReason = "HANDSHAKE_FAILED", atMillis = 1_000L)
+
+        assertEquals("HANDSHAKE_FAILED", log().last.value?.technicalReason)
+    }
+
+    /**
+     * A caller with no finer reason to give must clear whatever was there, not
+     * inherit it. A stale reason sitting under a fresh outcome is worse than no
+     * reason at all, because it reads as an explanation of the wrong attempt.
+     */
+    @Test
+    fun recordingWithoutAReasonClearsThePreviousOne() {
+        val log = log()
+        log.record(CaptureOutcome.NO_READING, technicalReason = "HANDSHAKE_FAILED", atMillis = 1_000L)
+
+        log.record(CaptureOutcome.IDLE, atMillis = 2_000L)
+
+        assertEquals(CaptureOutcome.IDLE, log.last.value?.outcome)
+        assertNull("the old reason explained a different attempt", log.last.value?.technicalReason)
+    }
+
+    /**
+     * A record written by a build that predates the field reads back with a null
+     * reason rather than failing: this is a diagnostic surface and must never be
+     * why a screen does not render.
+     */
+    @Test
+    fun aRecordWithNoStoredReasonReadsAsNull() {
+        context.getSharedPreferences("capture_attempts", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString("last_outcome", CaptureOutcome.CAPTURED.name)
+            .putLong("last_at_millis", 5_000L)
+            .commit()
+
+        val last = log().last.value
+
+        assertEquals(CaptureOutcome.CAPTURED, last?.outcome)
+        assertNull(last?.technicalReason)
+    }
+
     @Test
     fun anAttemptIsReadableImmediatelyAfterBeingRecorded() {
         val log = log()
