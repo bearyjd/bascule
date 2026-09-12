@@ -33,6 +33,8 @@ import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.RuntimeApiFactory
 import com.ventouxlabs.bascule.service.AdapterStateReceiver
 import com.ventouxlabs.bascule.service.BridgeForegroundService
+import com.ventouxlabs.bascule.service.BridgeOwner
+import com.ventouxlabs.bascule.service.BridgeOwnership
 import com.ventouxlabs.bascule.ui.BridgeServiceController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -253,24 +255,19 @@ internal class AndroidBridgeServiceController(
      * actually sent, the same way [start] always could.
      */
     private val starter: (Intent) -> Unit = { intent -> ContextCompat.startForegroundService(context, intent) },
-) : BridgeServiceController {
     /**
-     * Whether this process has asked the service to stop and not asked for it
-     * back. [BridgeForegroundService.isRunning] alone cannot answer that:
-     * `Context.stopService` is asynchronous, so `isRunning` stays true until
-     * `onDestroy`, and a re-arm landing in that gap would resurrect a bridge
-     * the user just switched off. Intent, not observed liveness.
+     * The live service's ownership, injectable for the same reason [starter]
+     * is: a real [BridgeForegroundService] instance is not constructible in
+     * this project's JUnit lane, and the release and re-arm decisions are
+     * exactly what need testing.
      */
-    @Volatile
-    private var stopRequested = false
-
+    private val ownership: () -> BridgeOwnership? = { BridgeForegroundService.instance },
+) : BridgeServiceController {
     override fun start() {
-        stopRequested = false
         startWith(intent())
     }
 
     override fun startBounded(durationMillis: Long) {
-        stopRequested = false
         startWith(intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, durationMillis))
     }
 
@@ -281,13 +278,48 @@ internal class AndroidBridgeServiceController(
         onStartResult(succeeded)
     }
 
+    /**
+     * Releases the always-on claim rather than stopping the service outright.
+     * An unconditional stop here would kill a "Weigh now" window the user
+     * started separately — and `Context.stopService` has no equivalent of
+     * `stopSelf(startId)`'s newer-start protection, so it cannot be made safe
+     * by ordering.
+     *
+     * With no instance there is nothing holding a claim, but a start may still
+     * be in flight: `startForegroundService` is asynchronous, so `onCreate` may
+     * not have run. Cancelling through the context is the only lever available
+     * before an instance exists, and is exactly what this method did in every
+     * case before owners existed.
+     */
     override fun stop() {
-        stopRequested = true
-        context.stopService(intent())
+        val ownership = ownership()
+        if (ownership == null) {
+            context.stopService(intent())
+            return
+        }
+        ownership.releaseOwner(BridgeOwner.ALWAYS_ON)
     }
 
+    /**
+     * No context fallback: with no instance there is no window to end, and
+     * `stopService` here could cancel an in-flight always-on start the user
+     * does want.
+     */
+    override fun cancelBounded() {
+        ownership()?.releaseOwner(BridgeOwner.WEIGH_NOW)
+    }
+
+    /**
+     * Gated on someone actually wanting the bridge, not on whether an instance
+     * happens to exist. A release is synchronous but `onDestroy` is not, so
+     * between the last release and the teardown there is a window where an
+     * instance is still published — and a re-arm sent into it would
+     * `startForegroundService` a bridge nobody owns, which is the resurrection
+     * this guard exists to prevent.
+     */
     override fun rearmScan() {
-        if (stopRequested || !BridgeForegroundService.isRunning) return
+        val owners = ownership()?.owners ?: return
+        if (owners.isEmpty()) return
         startWith(intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true))
     }
 

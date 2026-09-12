@@ -28,8 +28,17 @@ import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.ble.session.ScaleSessionEnqueuer
 import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
 
-/** Optional active-scan fallback; every result is routed through the same unique worker path. */
-class BridgeForegroundService : Service() {
+/**
+ * Optional active-scan fallback; every result is routed through the same unique
+ * worker path.
+ *
+ * Lifecycle is owner-driven: callers acquire a [BridgeOwner] and release it,
+ * and [releaseOwner] is the **only** place that decides a running service
+ * should stop. See `docs/prp/06-owner-aware-bridge-lifecycle.md` for the three
+ * bugs that shape replaced, and [BridgeOwner] for why naming the callers is
+ * what fixes them.
+ */
+class BridgeForegroundService : Service(), BridgeOwnership {
     private val scanner get() = getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner
 
     /**
@@ -59,26 +68,38 @@ class BridgeForegroundService : Service() {
     private val enqueuer by lazy { enqueuerFactory(this) }
     private val cooldown by lazy { ScanEnqueueCooldown(this) }
 
-    /**
-     * The value the most recent *real* start returned, replayed by a re-arm so
-     * reattaching a scan cannot silently flip an always-on service to
-     * `START_NOT_STICKY` or a bounded one to `START_STICKY` — the latter being
-     * the restart-unbounded failure `onStartCommand`'s KDoc already guards.
-     */
-    private var lastStartMode: Int = START_STICKY
-
     /** Injectable for the same reason as [boundStopScheduler]: a JVM test has no real clock to wait out. */
     internal var elapsedClock: () -> Long = { SystemClock.elapsedRealtime() }
 
     /**
-     * When the active bounded window ends, or null when no bounded window is
-     * running. Needed because every `startForegroundService` allocates a newer
-     * `startId`, and `stopSelf(startId)` is a documented no-op once a newer
-     * start has landed — so a re-arm silently orphans the bounded timer and
-     * "Weigh now" never ends. Carrying the deadline lets the re-arm rebind the
-     * stop to its own `startId` for whatever time is left.
+     * Who wants this service running. Replaces `lastStartMode`, an `isRunning`
+     * flag and a `stopRequested` flag in the controller, all three of which
+     * existed to reconstruct this one fact from its side effects.
+     *
+     * Assigned a new set rather than mutated, under [synchronized] because a
+     * release can arrive from a caller's thread while a start is being handled
+     * on the main one.
      */
-    private var boundedEndElapsed: Long? = null
+    @Volatile
+    private var heldOwners: Set<BridgeOwner> = emptySet()
+
+    /**
+     * The newest `startId` seen. [stopSelf] takes it rather than the id of
+     * whichever start armed a timer: `stopSelf(startId)` is a documented no-op
+     * once a *newer* start has landed, so an expiring "Weigh now" that passed
+     * its own stale id would silently fail to stop a service nobody owns.
+     */
+    private var latestStartId: Int = 0
+
+    /**
+     * When the running "Weigh now" window ends, or null when none is running.
+     * Carried so a re-arm — which allocates a newer `startId` and thereby
+     * orphans the original timer — can rebind the stop for whatever time is
+     * left instead of leaving a `SCAN_MODE_BALANCED` scan running forever.
+     */
+    private var weighNowDeadline: Long? = null
+
+    override val owners: Set<BridgeOwner> get() = heldOwners
 
     /**
      * The permission check runs before [startForeground], not after it as the
@@ -103,7 +124,7 @@ class BridgeForegroundService : Service() {
                 .setContentText(getString(R.string.scale_bridge_text))
                 .setOngoing(true).build(),
         )
-        isRunning = true
+        instance = this
         startActiveScan()
     }
 
@@ -115,49 +136,90 @@ class BridgeForegroundService : Service() {
      * entirely when this service is already running unbounded (see
      * `ScaleViewModel.weighNow`).
      *
-     * `stopSelf(startId)` rather than the no-arg overload: the no-arg form
-     * stops the service unconditionally, so a bounded call's timer firing
-     * after a *later* plain (always-on) start arrived would kill a scan the
-     * user just turned on. The `startId` overload is a documented no-op once
-     * a newer start has landed — exactly the guard this needs.
+     * Every branch is an *acquire*; nothing here stops the service. That is
+     * what removed this file's recurring bug: a start can no longer invalidate
+     * another caller's pending stop, because only [releaseOwner] stops
+     * anything, and only when the last owner has let go.
      *
-     * `START_NOT_STICKY` for a bounded start, `START_STICKY` (the platform
-     * default this class relied on before overriding this method) for a
-     * plain one: a sticky restart after a mid-window process kill delivers a
-     * null `Intent`, which reads as `boundMillis = 0` — no timer gets armed,
-     * and the scan `onCreate` starts is never bounded again. Restarting
-     * unbounded is worse than not restarting at all here; the always-on
-     * toggle's own restart behavior is unchanged.
+     * The restart mode follows from the owner set rather than being remembered
+     * across calls ([restartMode]), so a re-arm cannot flip an always-on
+     * service to `START_NOT_STICKY` or a bounded one to `START_STICKY` — the
+     * latter being the restart-unbounded failure this KDoc used to guard by
+     * replaying a stored `lastStartMode`.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
+        // A sticky restart delivers a null Intent. START_STICKY is only ever
+        // returned while ALWAYS_ON is held, so a null Intent *is* the always-on
+        // owner asking for its scan back — no config read needed to know that.
+        // WEIGH_NOW is deliberately not restored: the window is seconds long
+        // and the user was standing on the scale, so a silently resurrected one
+        // would hold a BALANCED scan with nobody watching. They can tap again.
+        if (intent == null) {
+            acquire(BridgeOwner.ALWAYS_ON)
+            return restartMode()
+        }
         // A re-arm is not a new start: it is this same instance reattaching its
         // scan to a Bluetooth stack that replaced the one the old registration
-        // belonged to. It must not disturb a bounded window's timer or its
-        // start id, and must not change the restart mode the *actual* start
-        // established — hence returning [lastStartMode] rather than a literal.
-        if (intent?.getBooleanExtra(EXTRA_REARM_SCAN, false) == true) {
+        // belonged to. It changes no ownership at all — it only has to move the
+        // "Weigh now" stop onto the start id this call just allocated.
+        if (intent.getBooleanExtra(EXTRA_REARM_SCAN, false)) {
             restartActiveScan()
-            rebindBoundedStop(startId)
-            return lastStartMode
+            rebindWeighNowStop()
+            return restartMode()
         }
-        val boundMillis = intent?.getLongExtra(EXTRA_BOUND_MILLIS, 0L) ?: 0L
-        // A plain always-on start deliberately supersedes any bounded window —
-        // the stale timer's stopSelf(oldId) is already a no-op — so forget the
-        // deadline rather than let a later re-arm resurrect a stop for a window
-        // the user has since replaced with "keep scanning".
+        val boundMillis = intent.getLongExtra(EXTRA_BOUND_MILLIS, 0L)
         if (boundMillis <= 0) {
-            boundedEndElapsed = null
-            return START_STICKY.also { lastStartMode = it }
+            acquire(BridgeOwner.ALWAYS_ON)
+            return restartMode()
         }
-        boundedEndElapsed = elapsedClock() + boundMillis
+        acquire(BridgeOwner.WEIGH_NOW)
+        weighNowDeadline = elapsedClock() + boundMillis
         // A bounded start is "Weigh now": the user is standing on the scale
         // right now, so any backoff earned by earlier failures has to go. It is
         // the one control they have, and a throttle that can block it is worse
         // than no throttle at all.
         activeAddressProvider()?.let(cooldown::clear)
-        boundStopScheduler(boundMillis) { stopSelf(startId) }
-        return START_NOT_STICKY.also { lastStartMode = it }
+        boundStopScheduler(boundMillis) { releaseOwner(BridgeOwner.WEIGH_NOW) }
+        return restartMode()
     }
+
+    /**
+     * Acquiring is idempotent because a [Set] makes it so — `onStartCommand`
+     * can be redelivered, and a second acquire of an owner already held must
+     * not change anything.
+     */
+    private fun acquire(owner: BridgeOwner) = synchronized(this) {
+        heldOwners = heldOwners + owner
+    }
+
+    /**
+     * The one place that stops a running service.
+     *
+     * Releasing a claim nobody holds is a no-op rather than a stop: the
+     * always-on toggle can be switched off twice, and a "Weigh now" window can
+     * be cancelled after it already expired. Stopping on those would `stopSelf`
+     * a service a concurrent acquire had legitimately just started — the same
+     * race this refactor removed, in new clothes. The condition is "the set
+     * *became* empty", never "the set is empty".
+     */
+    override fun releaseOwner(owner: BridgeOwner) {
+        val becameEmpty = synchronized(this) {
+            if (owner !in heldOwners) return
+            heldOwners = heldOwners - owner
+            if (owner == BridgeOwner.WEIGH_NOW) weighNowDeadline = null
+            heldOwners.isEmpty()
+        }
+        if (becameEmpty) stopSelf(latestStartId)
+    }
+
+    /**
+     * `START_STICKY` only while the always-on owner holds the bridge: a sticky
+     * restart delivers a null `Intent`, and restarting a bounded window as an
+     * unbounded scan nothing will ever stop is worse than losing the window.
+     */
+    private fun restartMode(): Int =
+        if (BridgeOwner.ALWAYS_ON in heldOwners) START_STICKY else START_NOT_STICKY
 
     /**
      * Replaces the scan registration in place. Stopping the old callback first
@@ -167,24 +229,29 @@ class BridgeForegroundService : Service() {
      * called without one (a future caller, a stack that survived).
      */
     /**
-     * Re-points the bounded window's stop at [rearmStartId], the newest start,
-     * because the timer armed by the original bounded start now holds a stale
-     * id whose `stopSelf` will do nothing. Without this a Bluetooth cycle
-     * during a "Weigh now" leaves a `SCAN_MODE_BALANCED` foreground scan
-     * running forever — worse for the phone and the scale's batteries than the
-     * adapter-cycle gap the re-arm exists to close.
+     * Re-arms the "Weigh now" window's release, because the timer armed by the
+     * original bounded start would `stopSelf` a start id this re-arm has just
+     * superseded. Without it a Bluetooth cycle during a "Weigh now" leaves a
+     * `SCAN_MODE_BALANCED` foreground scan running forever — worse for both
+     * batteries than the adapter-cycle gap the re-arm exists to close.
      *
-     * A window that already elapsed stops immediately rather than scheduling
+     * Note what this schedules: a *release*, not a stop. If the always-on owner
+     * acquired the bridge during the window, the release fires, the window
+     * genuinely ends, and the service keeps running because someone still
+     * wants it. That case needed a special "clear the deadline" branch before
+     * owners existed.
+     *
+     * A window that already elapsed releases at once rather than scheduling
      * zero: the re-arm may be the first thing to run after a long stall.
      */
-    private fun rebindBoundedStop(rearmStartId: Int) {
-        val end = boundedEndElapsed ?: return
+    private fun rebindWeighNowStop() {
+        val end = weighNowDeadline ?: return
         val remaining = end - elapsedClock()
         if (remaining <= 0) {
-            stopSelf(rearmStartId)
+            releaseOwner(BridgeOwner.WEIGH_NOW)
             return
         }
-        boundStopScheduler(remaining) { stopSelf(rearmStartId) }
+        boundStopScheduler(remaining) { releaseOwner(BridgeOwner.WEIGH_NOW) }
     }
 
     @SuppressLint("MissingPermission")
@@ -253,7 +320,10 @@ class BridgeForegroundService : Service() {
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
-        isRunning = false
+        // Only if this is still the live instance: a replacement created before
+        // this one finished tearing down must not be unpublished by it.
+        if (instance === this) instance = null
+        heldOwners = emptySet()
         runCatching { scanner?.stopScan(callback) }
         super.onDestroy()
     }
@@ -291,16 +361,24 @@ class BridgeForegroundService : Service() {
         const val EXTRA_REARM_SCAN = "rearm_scan"
 
         /**
-         * Whether an instance is live and holding a scan. Read by
-         * [AdapterStateReceiver] so a re-arm is only ever sent to a service
-         * that is already running: `startForegroundService` would otherwise
-         * *create* a bridge the user never asked for, in exactly the
-         * configuration (both toggles off) where they had turned it off.
+         * The live instance's ownership, or null when no bridge is up.
          *
-         * Set after [onCreate]'s permission gate rather than at its top, so a
-         * start that immediately stops itself never reads as running.
+         * There is one service and one process, so a release can be a direct
+         * call instead of an intent — which matters because a release must work
+         * from the background, and `startForegroundService` throws there on
+         * API 31+. Acquires still go by intent, since they may need to *create*
+         * the service.
+         *
+         * Replaces an `isRunning` boolean and the controller's `stopRequested`
+         * flag. Both existed because `Context.stopService` is asynchronous, so
+         * observed liveness and intent could disagree; a synchronous release
+         * against [owners] leaves no gap for them to disagree in.
+         *
+         * Published after [onCreate]'s permission gate rather than at its top,
+         * so a start that immediately stops itself never reads as running.
          */
         @Volatile
-        internal var isRunning: Boolean = false
+        internal var instance: BridgeOwnership? = null
+            private set
     }
 }

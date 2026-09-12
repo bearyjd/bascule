@@ -83,6 +83,10 @@ class ScaleViewModelTest {
         override fun stop() {
             bridgeCalls += "stop"
         }
+
+        override fun cancelBounded() {
+            bridgeCalls += "cancelBounded"
+        }
     }
 
     private fun viewModel(
@@ -626,7 +630,10 @@ class ScaleViewModelTest {
         advanceUntilIdle()
 
         assertFalse(vm.uiState.value.weighNowActive)
-        assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "stop"), recorder.bridgeCalls)
+        assertEquals(
+            listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "cancelBounded"),
+            recorder.bridgeCalls,
+        )
     }
 
     @Test
@@ -660,7 +667,10 @@ class ScaleViewModelTest {
         advanceUntilIdle()
 
         assertFalse(vm.uiState.value.weighNowActive)
-        assertEquals(listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "stop"), recorder.bridgeCalls)
+        assertEquals(
+            listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "cancelBounded"),
+            recorder.bridgeCalls,
+        )
     }
 
     /**
@@ -670,6 +680,13 @@ class ScaleViewModelTest {
      * only checks it once, at start — cancelling would kill the scan the
      * user separately asked to keep running, leaving that toggle reading on
      * with nothing behind it.
+     *
+     * The guard against that used to live here, as a config read deciding
+     * whether to call `stop()` at all. It is now structural: `cancelBounded()`
+     * releases only this window's own claim and cannot stop a service the
+     * always-on owner is holding, so calling it unconditionally is correct.
+     * What this test protects is that the ViewModel no longer reaches for
+     * `stop()` — the one call that could still take the bridge down.
      */
     @Test
     fun cancelWeighNowDoesNotStopTheServiceWhenAlwaysOnBridgingTurnedOnMidWindow() = runTest {
@@ -687,10 +704,11 @@ class ScaleViewModelTest {
 
         assertFalse(vm.uiState.value.weighNowActive)
         assertEquals(
-            "the bounded scan stops waiting, but the shared service itself must keep running",
-            listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}"),
+            "the window releases its own claim; the shared service must not be stopped",
+            listOf("startBounded:${ScaleViewModel.WEIGH_NOW_DURATION_MILLIS}", "cancelBounded"),
             recorder.bridgeCalls,
         )
+        assertFalse("stop() would take the bridge down for the always-on owner too", "stop" in recorder.bridgeCalls)
     }
     /**
      * The gap this surfaces is the point: `lastCaptureMillis` only ever moves

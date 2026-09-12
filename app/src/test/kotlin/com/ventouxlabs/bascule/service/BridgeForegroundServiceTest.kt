@@ -140,20 +140,122 @@ class BridgeForegroundServiceTest {
         assertEquals(7, shadowOf(service).stopSelfId)
     }
 
-    /** An always-on start supersedes a bounded window, so a later re-arm must not resurrect its stop. */
+    /**
+     * The clearest single proof the owner model works, and the one test whose
+     * *meaning* the refactor changed.
+     *
+     * Before owners, a plain always-on start cleared the bounded deadline so
+     * that no stop could be rebound — the window silently stopped existing,
+     * because the only way to protect the always-on scan was to forget the
+     * window. Now both claims are held: the window's release still fires on
+     * schedule, and the service keeps running because `ALWAYS_ON` has not let
+     * go. Interleaving stops being a special case.
+     *
+     * Asserted as "not stopped", which is safe in this direction: the concern
+     * with `ShadowService` is that it records `stopSelf(int)` without modelling
+     * the platform's newer-start no-op, so a *stopped* assertion can pass
+     * vacuously. Nothing calling `stopSelf` at all is directly observable.
+     */
     @Test
-    fun anAlwaysOnStartClearsTheBoundedDeadline() {
+    fun aWeighNowWindowEndingUnderAlwaysOnReleasesTheWindowWithoutStoppingTheService() {
         val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
-        service.activeAddressProvider = { null }
-        service.elapsedClock = { 1_000L }
-        val scheduled = mutableListOf<Long>()
-        service.boundStopScheduler = { millis, _ -> scheduled += millis }
+        // A real address, unlike the other cases here: the re-arm runs
+        // `startActiveScan`, and with nothing to scan for that stops the service
+        // by a route that has nothing to do with ownership — which would make
+        // the assertion below pass for the wrong reason.
+        service.activeAddressProvider = { DEVICE_ADDRESS }
+        var now = 1_000L
+        service.elapsedClock = { now }
+        val scheduled = mutableListOf<Pair<Long, () -> Unit>>()
+        service.boundStopScheduler = { millis, onExpire -> scheduled += millis to onExpire }
 
         service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 1)
         service.onStartCommand(Intent(), 0, 2)
+        now += 30_000L
         service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_REARM_SCAN, true), 0, 3)
 
-        assertEquals("the always-on owner wants it running; no stop may be rebound", 1, scheduled.size)
+        assertEquals("the window still has to end, so its stop is rebound", 2, scheduled.size)
+        assertEquals("only the time left in the window", 90_000L, scheduled[1].first)
+
+        scheduled[1].second()
+
+        assertEquals("the window released its own claim", setOf(BridgeOwner.ALWAYS_ON), service.owners)
+        assertFalse(
+            "always-on still wants the scan, so the window ending must not stop the service",
+            shadowOf(service).isStoppedBySelf,
+        )
+    }
+
+    /**
+     * The other direction of the same invariant: with nobody else holding the
+     * bridge, the window ending is the last release and the service does stop.
+     */
+    @Test
+    fun aWeighNowWindowEndingAloneStopsTheService() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.elapsedClock = { 1_000L }
+        var expire: (() -> Unit)? = null
+        service.boundStopScheduler = { _, onExpire -> expire = onExpire }
+
+        service.onStartCommand(Intent().putExtra(BridgeForegroundService.EXTRA_BOUND_MILLIS, 120_000L), 0, 4)
+        expire?.invoke()
+
+        assertTrue("the last owner letting go must stop the service", service.owners.isEmpty())
+        assertEquals("and it must carry the newest start id", 4, shadowOf(service).stopSelfId)
+    }
+
+    /**
+     * Releasing a claim nobody holds must not stop the service. The always-on
+     * toggle can be switched off twice, and "Weigh now" can be cancelled after
+     * its window already expired; stopping on either would `stopSelf` a service
+     * a concurrent acquire had legitimately just started — the same race the
+     * owner model exists to remove.
+     */
+    @Test
+    fun releasingAnOwnerThatIsNotHeldDoesNotStopTheService() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        service.onStartCommand(Intent(), 0, 1)
+        service.releaseOwner(BridgeOwner.WEIGH_NOW)
+
+        assertEquals(setOf(BridgeOwner.ALWAYS_ON), service.owners)
+        assertFalse("releasing an unheld claim is a no-op", shadowOf(service).isStoppedBySelf)
+    }
+
+    /** Redelivery is real: `onStartCommand` can run twice for one logical start. */
+    @Test
+    fun acquiringAnOwnerTwiceIsIdempotent() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        service.onStartCommand(Intent(), 0, 1)
+        service.onStartCommand(Intent(), 0, 2)
+        service.releaseOwner(BridgeOwner.ALWAYS_ON)
+
+        assertTrue("a second acquire must not need a second release", service.owners.isEmpty())
+    }
+
+    /**
+     * A sticky restart delivers a null `Intent`. `START_STICKY` is only ever
+     * returned while `ALWAYS_ON` is held, so a null `Intent` is that owner
+     * asking for its scan back — and reconstructing it this way needs no
+     * `ConfigStore` read from `onStartCommand`. `WEIGH_NOW` is deliberately not
+     * restored.
+     */
+    @Test
+    fun aStickyRestartWithNoIntentRestoresOnlyTheAlwaysOnOwner() {
+        val service = Robolectric.buildService(BridgeForegroundService::class.java).get()
+        service.activeAddressProvider = { null }
+        service.boundStopScheduler = { _, _ -> }
+
+        val mode = service.onStartCommand(null, 0, 1)
+
+        assertEquals(setOf(BridgeOwner.ALWAYS_ON), service.owners)
+        assertEquals(Service.START_STICKY, mode)
     }
 
     @Test
