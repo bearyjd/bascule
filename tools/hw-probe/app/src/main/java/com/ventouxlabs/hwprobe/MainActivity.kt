@@ -57,6 +57,12 @@ class MainActivity : AppCompatActivity() {
     private val seenDevices = LinkedHashMap<String, BluetoothDevice>()
     private val notifyQueue = ArrayDeque<BluetoothGattCharacteristic>()
     private val readQueue = ArrayDeque<BluetoothGattCharacteristic>()
+
+    // dumpprop: the 0xFFFF / 0xFF00 proprietary services. Descriptors first
+    // (0x2901 carries a human-readable name), then every readable value.
+    private val propDescQueue = ArrayDeque<BluetoothGattDescriptor>()
+    private val propReadQueue = ArrayDeque<BluetoothGattCharacteristic>()
+    private var propDumpActive = false
     private var connectionBusy = false
     private var activeButton: Button? = null
     private var gotRealMeasurement = false
@@ -155,10 +161,62 @@ class MainActivity : AppCompatActivity() {
                     val code = intent.getIntExtra("consent", -1)
                     if (idx >= 0 && code >= 0) sendConsent(idx, code)
                 }
+                "dumpprop" -> dumpProprietary()
                 "reset" -> resetAll()
                 else -> appendLog("unknown remote cmd: $cmd")
             }
         }
+    }
+
+    /**
+     * Reads what the proprietary services will volunteer without being written
+     * to: the 0x2901 Characteristic User Description of every characteristic in
+     * 0xFFFF and 0xFF00, then every readable value. Strictly read-only — no
+     * writes, so nothing here can change scale state or burn a user slot.
+     */
+    @SuppressLint("MissingPermission")
+    private fun dumpProprietary() {
+        val g = gatt
+        if (g == null) {
+            appendLog("dumpprop: not connected")
+            return
+        }
+        propDescQueue.clear()
+        propReadQueue.clear()
+        for (svc in g.services) {
+            val name = svc.uuid.toString()
+            if (!name.startsWith("0000ffff") && !name.startsWith("0000ff00")) continue
+            for (ch in svc.characteristics) {
+                ch.descriptors
+                    .firstOrNull { it.uuid.toString().startsWith("00002901") }
+                    ?.let { propDescQueue.addLast(it) }
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) {
+                    propReadQueue.addLast(ch)
+                }
+            }
+        }
+        appendLog(
+            "=== dumpprop: ${propDescQueue.size} user-description descriptors, " +
+                "${propReadQueue.size} readable characteristics ===",
+        )
+        propDumpActive = true
+        drainProp(g)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun drainProp(g: BluetoothGatt) {
+        val desc = propDescQueue.removeFirstOrNull()
+        if (desc != null) {
+            g.readDescriptor(desc)
+            return
+        }
+        val ch = propReadQueue.removeFirstOrNull()
+        if (ch != null) {
+            g.readCharacteristic(ch)
+            return
+        }
+        propDumpActive = false
+        appendLog("=== dumpprop complete ===")
     }
 
     @SuppressLint("MissingPermission")
@@ -405,8 +463,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onCharacteristicRead(g: BluetoothGatt, ch: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
-            appendLog("READ ${ch.uuid} status=$status len=${value.size} bytes=${value.toHex()}")
-            enableNextRead(g)
+            appendLog(
+                "READ ${ch.uuid} status=$status len=${value.size} bytes=${value.toHex()} ascii=\"${value.printable()}\"",
+            )
+            if (propDumpActive) drainProp(g) else enableNextRead(g)
+        }
+
+        override fun onDescriptorRead(
+            g: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int,
+            value: ByteArray,
+        ) {
+            appendLog(
+                "DESC-READ char=${descriptor.characteristic.uuid} desc=${descriptor.uuid} " +
+                    "status=$status bytes=${value.toHex()} name=\"${value.printable()}\"",
+            )
+            if (propDumpActive) drainProp(g)
         }
 
         @SuppressLint("MissingPermission")
@@ -462,6 +535,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ByteArray.toHex(): String = joinToString(" ") { String.format("%02x", it) }
+
+    /** Printable ASCII only; anything else becomes '.' so a name stays legible next to the hex. */
+    private fun ByteArray.printable(): String =
+        map { b -> (b.toInt() and 0xFF).let { if (it in 0x20..0x7e) it.toChar() else '.' } }.joinToString("")
 
     private fun appendLog(line: String) {
         val stamped = "[${timeFmt.format(Date())}] $line"
