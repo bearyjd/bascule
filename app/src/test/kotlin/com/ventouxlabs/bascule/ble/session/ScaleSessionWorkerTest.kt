@@ -6,7 +6,11 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.work.Data
 import androidx.work.ListenableWorker
 import androidx.work.testing.TestListenableWorkerBuilder
+import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
+import com.ventouxlabs.bascule.ui.fake.FakeCaptureAttemptLog
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -41,6 +45,60 @@ class ScaleSessionWorkerTest {
         val data = Data.Builder().putString(ScaleSessionWorker.KEY_ADDRESS, DEVICE_ADDRESS)
         seenAtMillis?.let { data.putLong(ScaleSessionWorker.KEY_SEEN_AT, it) }
         return TestListenableWorkerBuilder<ScaleSessionWorker>(context).setInputData(data.build()).build()
+    }
+
+    /**
+     * The call site that records an attempt, finally reachable: substituting
+     * [ScaleSessionWorker.captureAttemptLogProvider] gets past
+     * `applicationContext as? BasculeApplication`, which is null under the plain
+     * `Application` this lane uses and made the whole body a silent no-op.
+     *
+     * What it asserts is the part that was taken on inspection until now — that
+     * the *fine-grained* reason is what reaches the log, not just the coarse
+     * outcome. `HANDSHAKE_FAILED` and `MISSED` both map to `NO_READING`, so an
+     * assertion on the outcome alone would pass either way.
+     */
+    @Test
+    fun recordingAnAttemptStoresTheFineGrainedReasonNotJustTheOutcome() = runTest {
+        val log = FakeCaptureAttemptLog()
+        val worker = worker()
+        worker.captureAttemptLogProvider = { log }
+
+        worker.recordAttempt(SessionExitReason.HANDSHAKE_FAILED)
+
+        val recorded = log.last.value
+        assertEquals(CaptureOutcome.NO_READING, recorded?.outcome)
+        assertEquals(
+            "the reason NO_READING throws away is the whole point of storing it",
+            SessionExitReason.HANDSHAKE_FAILED.name,
+            recorded?.technicalReason,
+        )
+    }
+
+    /**
+     * The discriminating pair: two reasons that collapse to the same outcome
+     * must still be told apart afterwards. Without this, passing a constant —
+     * or the outcome's own name — would satisfy the test above.
+     */
+    @Test
+    fun twoReasonsSharingAnOutcomeAreStillDistinguishable() = runTest {
+        val handshake = FakeCaptureAttemptLog()
+        val missed = FakeCaptureAttemptLog()
+        worker().also { it.captureAttemptLogProvider = { handshake } }
+            .recordAttempt(SessionExitReason.HANDSHAKE_FAILED)
+        worker().also { it.captureAttemptLogProvider = { missed } }
+            .recordAttempt(SessionExitReason.MISSED)
+
+        assertEquals(
+            "both are NO_READING, which is exactly why the outcome is not enough",
+            handshake.last.value?.outcome,
+            missed.last.value?.outcome,
+        )
+        assertNotEquals(
+            "and the stored reason is what separates them",
+            handshake.last.value?.technicalReason,
+            missed.last.value?.technicalReason,
+        )
     }
 
     @Test
