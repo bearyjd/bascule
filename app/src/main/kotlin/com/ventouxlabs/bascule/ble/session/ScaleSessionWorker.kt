@@ -17,6 +17,7 @@ import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
+import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
 import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
 import com.ventouxlabs.bascule.diagnostics.attentionTransition
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
@@ -29,6 +30,23 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 class ScaleSessionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+
+    /**
+     * The same seam, for the same reason, as
+     * [com.ventouxlabs.bascule.service.BridgeForegroundService.enqueuerFactory]:
+     * a `CoroutineWorker` is built by a factory, so this is a reassignable
+     * property a test overwrites on the built instance rather than a constructor
+     * parameter.
+     *
+     * It exists because [recordAttempt] reaches the log through
+     * `applicationContext as? BasculeApplication`, and that cast returns null
+     * under the plain `Application` this project's JVM lane uses — so the whole
+     * body silently did nothing in a test, and *what* it records could not be
+     * asserted. Production behaviour is unchanged by the default.
+     */
+    internal var captureAttemptLogProvider: () -> CaptureAttemptLog? =
+        { (applicationContext as? BasculeApplication)?.captureAttemptLog }
+
     /**
      * Every exit from here settles the scan cooldown this session's
      * advertisement claimed. That is the whole point of the indirection through
@@ -173,9 +191,14 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
      * every exit rather than only the interesting ones: an attempt that ended
      * before it reached the radio is precisely the case the user could not
      * otherwise distinguish from no attempt at all.
+     *
+     * `internal` rather than private for the same reason
+     * [com.ventouxlabs.bascule.service.BridgeForegroundService.enqueueOnce] is:
+     * a test drives it directly instead of going through [doWork], which would
+     * need a real `BasculeApplication`.
      */
-    private suspend fun recordAttempt(reason: SessionExitReason) {
-        val log = (applicationContext as? BasculeApplication)?.captureAttemptLog ?: return
+    internal suspend fun recordAttempt(reason: SessionExitReason) {
+        val log = captureAttemptLogProvider() ?: return
         val outcome = captureOutcomeFor(reason)
         withContext(Dispatchers.IO) {
             runCatching {
