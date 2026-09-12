@@ -196,18 +196,61 @@ it was worth checking as a shortcut to the activity level. It is not one:
 What the `01`, `1e` and `00` bytes mean is unknown — device-scoped settings of
 some kind, since they survive with no user selected.
 
-### The two experiments left, and what each costs
+### Live weigh-in, no consent: the scale sends nothing at all
 
-- **Watch the notify channels during a real weigh-in.** `0x0001` and `0x0006`
-  are subscribed and live, so a measurement taken while hw-probe holds the
-  connection would show whatever the proprietary path emits. Zero writes.
-  **Costs one weigh-in**: hw-probe owns the GATT link, so Bascule cannot
-  capture through it, and the reading is not delivered.
-- **Register hw-probe as its own user.** Unlocks every user-scoped value and
-  the stored-measurement fetch. **Burns one of the scale's eight slots**, and
-  slots are not recoverable without a factory reset.
+Run 2026-09-12, and it is the decisive result. hw-probe held the connection
+with every relevant channel subscribed — standard Weight `0x2A9D` and Body
+Composition `0x2A9C` indications, proprietary `0x0001` and `0x0006` notifies,
+all confirmed `status=0`. Two weigh-ins were taken: one shod, one barefoot.
 
-Neither was run. Both are the user's call, and the first is strictly cheaper.
+**Zero `onCharacteristicChanged` events. Not one, on any channel.**
+
+The link was demonstrably live rather than quietly dead, which is what makes
+this a finding instead of a failed setup:
+
+- `BF720` did **not** appear in a scan taken mid-experiment, and a connected
+  device does not advertise.
+- `dumpsys bluetooth_manager` reported `ACL LE:Y` with encryption established
+  (`keySize=16`) and four GATT connections held.
+
+The shod attempt alone would have been confounded — no impedance path, so the
+scale might simply never have completed a measurement. The barefoot attempt
+removes that: the scale had everything it needed and still transmitted nothing.
+
+**Conclusion: UDS consent gates the measurement path itself, not merely the
+user-scoped reads.** Without it the BF720 will connect, answer device-scoped
+reads, accept subscriptions, accept a time sync — and then never send a
+measurement.
+
+### The scale hangs up on an unconsented client
+
+A second behavioural fact, not previously recorded: at 16:53:01, about ten
+minutes after connecting, the scale terminated the link itself with
+`status=19` — `0x13`, `GATT_CONN_TERMINATE_PEER_USER`. It tolerates an
+unauthenticated client for a while and then drops it. Reconnecting worked
+immediately.
+
+### What this validates
+
+Bascule's existing design. The UDS register/consent handshake in `GattSession`
+is not defensive politeness that could be trimmed for speed — it is the only
+reason any measurement arrives at all. Anyone tempted to shorten the session
+by skipping it should read this section first.
+
+### The one experiment left, and what it costs
+
+**Register hw-probe as its own user.** It is now the only route to the
+user-scoped values, including `0x0004 Acitivity Level` and the
+`0x0005` stored-measurement fetch, because every cheaper probe is exhausted:
+device-scoped reads are done, a bare UCP write changes nothing, and the
+measurement path is consent-gated.
+
+It **burns one of the scale's eight user slots**, and slots are not recoverable
+without a factory reset. Not run. That is the user's call.
+
+Cost of the experiments above, stated plainly: two weigh-ins were spent and
+neither was delivered, because hw-probe owned the GATT link and Bascule could
+not capture through it.
 
 ### Reproducing
 
