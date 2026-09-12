@@ -164,10 +164,18 @@ The scale accepted NOTIFY subscriptions on `0x0001` and `0x0006` (both
 
 ### The blocker, and what it costs
 
-Every user-scoped characteristic read back `0xff`. The working hypothesis is
-that these require an established UDS user context — hw-probe connected
-without sending consent — which matches `0x0001 User List` returning `08`, the
-slot count, while everything user-specific reads as unset.
+Every user-scoped characteristic read back `0xff`. **The gate is consent
+specifically, not UDS interaction in general** — tested rather than assumed:
+
+`listusers` (`UCP LIST_ALL_USERS`, a plain write to `0x2A9F` that needs no
+consent code) was accepted with `status=0` and then produced **no indication at
+all**, and a re-read of all seven characteristics came back byte-for-byte
+identical. A UCP operation that answers nothing without an authenticated user
+is standard UDS behaviour, and it rules out the looser hypothesis that any
+handshake traffic would populate these.
+
+`0x0001 User List` returning `08` while everything user-specific reads unset
+fits: the slot count is device-scoped, the rest is per-user.
 
 Testing that needs a consent code. Bascule holds one (the Scale screen reports
 "Registered as user slot 1") but it lives in `EncryptedPreferences` and is not
@@ -178,6 +186,28 @@ call.
 
 `0x0001` returning `08` is also ambiguous on its own — a count of eight slots,
 or a bitmask with slot 4 set. Not resolved.
+
+### `0x0000 Scale Setting` is populated, and is not the level
+
+`ff 01 ff ff 1e 00 ff ff` is the only proprietary value carrying real data, so
+it was worth checking as a shortcut to the activity level. It is not one:
+`0x1e` is 30, which does not fit a 1–5 scale, and the characteristic actually
+*named* `Acitivity Level` is `0x0004`, which is user-scoped and reads `ff`.
+What the `01`, `1e` and `00` bytes mean is unknown — device-scoped settings of
+some kind, since they survive with no user selected.
+
+### The two experiments left, and what each costs
+
+- **Watch the notify channels during a real weigh-in.** `0x0001` and `0x0006`
+  are subscribed and live, so a measurement taken while hw-probe holds the
+  connection would show whatever the proprietary path emits. Zero writes.
+  **Costs one weigh-in**: hw-probe owns the GATT link, so Bascule cannot
+  capture through it, and the reading is not delivered.
+- **Register hw-probe as its own user.** Unlocks every user-scoped value and
+  the stored-measurement fetch. **Burns one of the scale's eight slots**, and
+  slots are not recoverable without a factory reset.
+
+Neither was run. Both are the user's call, and the first is strictly cheaper.
 
 ### Reproducing
 
