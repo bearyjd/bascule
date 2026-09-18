@@ -2,15 +2,26 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <!-- base slab, ghosted -->
-    <path android:fillColor="#FFA586F2" android:fillAlpha="0.30"
-        android:pathData="M54,82 L81,67 L54,52 L27,67 Z"/>
-    <!-- middle slab: left edge, right edge, top face -->
-    <path android:fillColor="#FF553CBE" android:pathData="M27,56 L54,71 L54,75.5 L27,60.5 Z"/>
-    <path android:fillColor="#FF4530A0" android:pathData="M81,56 L54,71 L54,75.5 L81,60.5 Z"/>
-    <path android:fillColor="#FF7C5CE0" android:pathData="M54,71 L81,56 L54,41 L27,56 Z"/>
-    <!-- top slab: left edge, right edge, top face -->
-    <path android:fillColor="#FF17A8BF" android:pathData="M27,41 L54,56 L54,60.5 L27,45.5 Z"/>
-    <path android:fillColor="#FF128FA3" android:pathData="M81,41 L54,56 L54,60.5 L81,45.5 Z"/>
-    <path android:fillColor="#FF22D3EE" android:pathData="M54,56 L81,41 L54,26 L27,41 Z"/>
+    <!-- A simple, front-facing precision scale: legible even at launcher size. -->
+    <path
+        android:fillColor="#FF130C35"
+        android:fillAlpha="0.42"
+        android:pathData="M40,32 L68,32 C75.73,32 82,38.27 82,46 L82,70 C82,77.73 75.73,84 68,84 L40,84 C32.27,84 26,77.73 26,70 L26,46 C26,38.27 32.27,32 40,32 Z" />
+    <path
+        android:fillColor="#FFF1EBFF"
+        android:pathData="M40,28 L68,28 C75.73,28 82,34.27 82,42 L82,66 C82,73.73 75.73,80 68,80 L40,80 C32.27,80 26,73.73 26,66 L26,42 C26,34.27 32.27,28 40,28 Z" />
+    <!-- The display holds the Bluetooth rune: the device's whole job in one mark. -->
+    <path
+        android:fillColor="#FF3E2A96"
+        android:pathData="M45,37 L63,37 C66.87,37 70,40.13 70,44 L70,48 C70,51.87 66.87,55 63,55 L45,55 C41.13,55 38,51.87 38,48 L38,44 C38,40.13 41.13,37 45,37 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M53,40 L60,44.5 L55.5,47 L60,49.5 L53,54 L53,40 M47,43.5 L53,47 L47,50.5"
+        android:strokeColor="#FF4ADBF1"
+        android:strokeLineCap="square"
+        android:strokeLineJoin="miter"
+        android:strokeWidth="2.4" />
+    <!-- Contact points keep the silhouette unmistakably a scale without visual noise. -->
+    <path android:fillColor="#FFC9B4F8" android:pathData="M37,65 A3,3 0,1,0 43,65 A3,3 0,1,0 37,65 Z" />
+    <path android:fillColor="#FFC9B4F8" android:pathData="M65,65 A3,3 0,1,0 71,65 A3,3 0,1,0 65,65 Z" />
 </vector>
