@@ -18,6 +18,57 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-18: the root-compat item closed the other way, and the probe is staged
+
+Picked up the open list. Three things moved; the fourth is waiting on
+hardware.
+
+**Open item 2 (VitalForge root-compat routes) is closed without doing it.**
+Before sending the drafted prompt, its premise was checked against
+VitalForge's own design spec (`2026-08-25-family-multitenancy-design.md`
+§f.2/§f.8, sibling checkout). That spec deleted the alias layer deliberately
+and says so in exactly the terms the prompt argues against: no implicit
+person fallback in any data route, `require_person` the only supplier of a
+`person_id`, and "if a client is ever discovered mid-phase-2, the answer is
+to reconfigure it, not to reintroduce an alias." A 307 would not help either
+— Bascule never follows redirects. So the server was never the right fix
+site. The prompt is kept, marked superseded, with the reasoning.
+
+**Open item 3 (404-as-permanent) is fixed, and it is what item 2 actually
+needed.** The recorded reason for leaving it — "404 is legitimately permanent
+for other causes" — does not hold for this client: Bascule only ever POSTs to
+a collection route, so a 404 can only mean the endpoint is missing, never
+that the reading was rejected. The redirect branch in `ResponseClassifier`
+already made that exact argument for 3xx. 404 now mirrors it. The 2026-09-07
+incident (a real weigh-in marked `FAILED_PERMANENT` on first attempt for a
+missing `/p/{slug}` prefix, recovered only by a contract toggle) can no longer
+happen; a replay batch under a root base URL retries and expires instead of
+being permanently failed. 692 tests, detekt clean, mutation-checked the
+honest way — re-adding 404 to `PERMANENT_CODES` alone is inert (the new arm
+precedes that check), so the check restored the *old classifier* and got
+four reds, including the pre-existing `testConnection` test.
+
+**The launcher icon rework from 2026-09-14 was sitting uncommitted** with the
+themed mask in an untracked `mipmap-anydpi-v33/` — a stash or clean checkout
+would have dropped it while keeping the v26 removal. Built (`assembleDebug`
+carries both qualifiers) and committed on `chore/launcher-icon-redraw`.
+
+**The probe is staged, not run.** The user authorised burning a scale slot.
+Plan A costs none: consent as the existing slot 2 (Aug-22 probe
+registration, code 1234). `tools/hw-probe` gained `writeprop`/`readprop` so
+the `0x0005` stored-measurement fetch can actually be triggered (it needs a
+write hw-probe had no command for); built and installed on the Pixel 9.
+Runbook in the session scratchpad; the sequence is connect → consent →
+`dumpprop` → `readprop 0004` → `writeprop 0005 01`, then force-stop hw-probe
+and relaunch Bascule so `onCreate` re-arms both scans.
+
+**Device state when the phone was on USB (Pixel 9, 17:27):** installed
+build is 2026-09-14 22:31 (current main plus the icon build). Both of
+Bascule's scanners registered in the stack and running 9.4 h, **zero scan
+results** in that window; last capture attempt 2026-09-16 07:26, `MISSED`.
+The user was away from the scale, which explains it. If that ever shows up
+with the phone at home, it is a different problem — look at the scale first.
+
 ## 2026-09-08: v0.1.0 released, Phase 5 closed, and a silent capture killer found
 
 **`v0.1.0` is released**: https://github.com/bearyjd/bascule/releases/tag/v0.1.0
@@ -118,14 +169,23 @@ Read `05-retrospective.md` first.
    intent means `ALWAYS_ON`; the stop condition is membership, not emptiness)
    and §9 the evidence, including the hardware sequence where a re-armed
    bounded window still ended.
-2. **VitalForge needs root-compat routes** before `ReplayMigrationWorker` is
-   ever wired: a replay batch posting to root routes would 404, and 404
-   classifies as `PermanentRejection`, so every row would be marked
-   permanently failed on the first attempt. A prompt for that work was
-   drafted this session and **not yet sent**.
-3. **404-as-permanent** costs a reading for a purely local config error.
-   `submitReading`'s own KDoc argues against exactly this for a bad base URL.
-   Unchanged, because 404 is legitimately permanent for other causes.
+2. ~~**VitalForge needs root-compat routes** before `ReplayMigrationWorker` is
+   ever wired~~ — **closed 2026-09-18, not by doing it.** VitalForge's design
+   spec (§f.2/§f.8) forbids exactly this: the alias layer was deleted on
+   purpose, `require_person` is the only supplier of a `person_id`, and a
+   root 404 is the intended answer to a misconfigured client. The prompt at
+   `docs/vitalforge-root-compat-prompt.md` carries the full reasoning and is
+   marked superseded. The data-loss mode it guarded is closed by item 3.
+3. ~~**404-as-permanent** costs a reading for a purely local config error~~ —
+   **fixed 2026-09-18**, `fix/404-is-a-configuration-error`. The
+   "legitimately permanent for other causes" reasoning was wrong for this
+   client: Bascule only ever POSTs to a collection route, so a 404 can only
+   mean the endpoint is not there — never a verdict on the reading. It is now
+   `TransientFailure`, mirroring the redirect branch (same `Retry-After`
+   handling, same 14-day expiry bound), and `testConnection`'s person-path
+   hint is sourced from the classifier rather than a local special case.
+   Rows already stamped `permanentRejectionHttpCode = 404` are untouched; the
+   422-scoped recovery query still excludes them, pinned by test.
 4. **The adapter fix is process-scoped** — registered from
    `BasculeApplication.onCreate` rather than the manifest, because
    `ACTION_STATE_CHANGED`'s implicit-broadcast exemption is not certain.
