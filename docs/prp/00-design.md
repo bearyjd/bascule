@@ -768,7 +768,8 @@ shaper change (swap which field feeds `captured_at`), not a VitalForge change.
 | 2xx | `Accepted` | `SENT`, `deliveredFields` set |
 | 401, 403 | `AuthRejected` | `BLOCKED_AUTH`, drain pauses globally |
 | 408, 429, 5xx, IO/timeout/DNS | `TransientFailure` | `attemptCount++`, stays `PENDING`; honours `Retry-After` if ≤ 1 h |
-| 400, 404, 409, 413, 422 | `PermanentRejection` | `FAILED_PERMANENT` immediately — retrying a malformed or rejected body never succeeds |
+| 400, 409, 413, 422 | `PermanentRejection` | `FAILED_PERMANENT` immediately — retrying a malformed or rejected body never succeeds |
+| 404 | `TransientFailure` | the client only ever POSTs to a collection route, so a 404 is never a verdict on the reading — it means the endpoint is not there (a base URL missing VitalForge's `/p/{slug}` prefix). Treated like 3xx (2026-09-18): retried on the ladder, bounded by the 14-day expiry, reason names the person-path fix |
 | 3xx | `TransientFailure` | redirects are **not followed** (`followRedirects = false`, `followSslRedirects = false`) — following one can leak the bearer token to another host. Retryable, not permanent (round-3 C2): a server-side redirect rule is a config change, so failing it permanently marked the *entire* pending queue `FAILED_PERMANENT` on its first attempt, unrecoverably |
 | 2xx with non-JSON or unparseable body | `Accepted` | the POST succeeded; the body is not needed. Never crash on it |
 | Response body > 64 KiB | `TransientFailure` | body read is capped; never buffered whole |

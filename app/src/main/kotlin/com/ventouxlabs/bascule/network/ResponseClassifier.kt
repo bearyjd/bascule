@@ -104,8 +104,10 @@ object ResponseClassifier {
         "redirect not followed; a moved endpoint is a configuration error"
 
     /**
-     * Surfaced verbatim by `ConfigViewModel.testConnection()`, so it is
-     * written for the person reading the Settings screen, not for a log.
+     * Surfaced verbatim by `ConfigViewModel.testConnection()` and persisted as
+     * a row's `lastError` on every 404 attempt, so it is written for the person
+     * reading the Settings screen, not for a log. A fixed phrase, never built
+     * from the response (00-design.md §8.8).
      */
     const val NO_SUCH_ENDPOINT_REASON =
         "No such endpoint (404) — the Base URL may be missing your person path, e.g. /p/your-slug"

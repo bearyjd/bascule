@@ -136,14 +136,15 @@ class VitalForgeHttpClient(
                 is SubmitResult.Accepted -> ConnectionTestResult.Authorized
                 is SubmitResult.AuthRejected -> ConnectionTestResult.Unauthorized(classified.httpCode)
                 // The classifier's reason is surfaced as-is. That includes a
-                // 404's person-path hint, which is the one failure the user can
-                // actually fix from this screen: VitalForge serves the weight
-                // routes under `/p/{slug}/`, so a base URL missing that path
+                // 404's person-path hint — VitalForge serves the weight routes
+                // under `/p/{slug}/`, so a base URL missing that path
                 // authenticates fine and then finds nothing, and naming the
                 // cause is the difference between "syncs are unreliable" and a
-                // one-line correction. The classifier already says so — a 404
-                // is transient there for the same reason — so nothing here
-                // needs to special-case it.
+                // one-line correction. The classifier already carries that
+                // phrase (a 404 is transient there for the same reason), so
+                // nothing here needs to special-case it.
+                // Two arms, not one: `reason` lives on each type, not on the
+                // sealed parent, so a combined arm has nothing to smart-cast to.
                 is SubmitResult.TransientFailure -> ConnectionTestResult.Unreachable(classified.reason)
                 is SubmitResult.PermanentRejection -> ConnectionTestResult.Unreachable(classified.reason)
             }
