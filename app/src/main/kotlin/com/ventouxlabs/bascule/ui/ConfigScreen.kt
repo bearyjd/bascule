@@ -759,7 +759,7 @@ private fun PassphraseDialog(
  * Shown under the Base URL field whenever there is no validation error to show
  * instead. Names the person path because that is the one part of the URL a user
  * cannot guess and the app cannot infer — and getting it wrong produces a 404
- * that [com.ventouxlabs.bascule.network.VitalForgeHttpClient.NO_SUCH_ENDPOINT_REASON]
+ * that [com.ventouxlabs.bascule.network.ResponseClassifier.NO_SUCH_ENDPOINT_REASON]
  * explains from the other direction, on "Test connection".
  */
 private const val BASE_URL_HINT =

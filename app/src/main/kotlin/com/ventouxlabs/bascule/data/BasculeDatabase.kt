@@ -61,7 +61,7 @@ abstract class BasculeDatabase : RoomDatabase() {
          * Codex review, v2-body-composition PR: a contract switch's recovery
          * query needs to tell a 422 (schema rejection a new contract can fix)
          * apart from the other codes `PermanentRejection` also carries
-         * (400/404/409/413, none of them contract-fixable) — see
+         * (400/409/413, none of them contract-fixable) — see
          * [ReadingEntity.permanentRejectionHttpCode].
          */
         val MIGRATION_3_4 = object : Migration(3, 4) {

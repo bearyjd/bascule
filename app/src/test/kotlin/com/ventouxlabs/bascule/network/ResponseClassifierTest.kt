@@ -35,12 +35,37 @@ class ResponseClassifierTest {
         listOf(408, 429, 500, 502, 503, 504).forEach {
             assertTrue("$it should be transient", classify(it) is SubmitResult.TransientFailure)
         }
-        listOf(400, 404, 409, 413, 422).forEach {
+        listOf(400, 409, 413, 422).forEach {
             assertTrue(
                 "$it should be permanent — retrying a rejected body never succeeds",
                 classify(it) is SubmitResult.PermanentRejection,
             )
         }
+    }
+
+    /**
+     * Regression (hardware, 2026-09-07). Bascule only ever POSTs to a
+     * collection route, so a 404 cannot be a verdict on the reading — it means
+     * the endpoint is not there, which is a base URL missing VitalForge's
+     * `/p/{slug}/` prefix. Classifying it permanently marked a real weigh-in
+     * FAILED_PERMANENT on its first attempt, and only a contract toggle got it
+     * back. The reason is the same person-path hint the Settings screen shows.
+     */
+    @Test
+    fun aNotFoundIsTransientBecauseAMissingEndpointIsAConfigurationError() {
+        val result = classify(404)
+
+        assertTrue("404 must retry until the base URL is corrected", result is SubmitResult.TransientFailure)
+        assertEquals(ResponseClassifier.NO_SUCH_ENDPOINT_REASON, (result as SubmitResult.TransientFailure).reason)
+        assertNull("no header: the §3.4 ladder decides, as for a redirect", result.retryAfter)
+    }
+
+    /** Mirrors the redirect branch exactly, including honouring `Retry-After` when the server sends one. */
+    @Test
+    fun aNotFoundHonoursRetryAfterLikeARedirect() {
+        val result = classify(404, retryAfter = "30") as SubmitResult.TransientFailure
+
+        assertEquals(30.seconds, result.retryAfter)
     }
 
     @Test

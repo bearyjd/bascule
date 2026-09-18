@@ -498,9 +498,31 @@ class VitalForgeHttpClientTest {
 
         assertEquals(
             "a 404 is the one failure the user can fix from the settings screen",
-            ConnectionTestResult.Unreachable(VitalForgeHttpClient.NO_SUCH_ENDPOINT_REASON),
+            ConnectionTestResult.Unreachable(ResponseClassifier.NO_SUCH_ENDPOINT_REASON),
             result,
         )
+    }
+
+    /**
+     * Regression (hardware, 2026-09-07): a base URL missing the person prefix
+     * authenticated fine, POSTed to a route that was not there, and the 404 was
+     * classified permanent — a real weigh-in went FAILED_PERMANENT on its first
+     * attempt for a local configuration error the server never weighed in on.
+     * A collection POST cannot be 404'd on the merits of the reading, so it
+     * retries until the URL is corrected, carrying the same person-path hint
+     * that "Test connection" shows.
+     */
+    @Test
+    fun aNotFoundOnSubmitIsTransientNotPermanent() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(404).body("""{"detail":"Not Found"}""").build())
+
+        val result = client().submitReading(ReadingFixtures.captured(), WeightUnit.KILOGRAMS)
+
+        assertTrue(
+            "a missing endpoint is a base-URL problem, not a verdict on the reading",
+            result is SubmitResult.TransientFailure,
+        )
+        assertEquals(ResponseClassifier.NO_SUCH_ENDPOINT_REASON, (result as SubmitResult.TransientFailure).reason)
     }
 
     @Test
