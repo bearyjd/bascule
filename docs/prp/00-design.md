@@ -72,7 +72,7 @@ app/src/main/kotlin/com/ventouxlabs/bascule/
 │   └── Converters.kt              # ▲ Set<ReadingField> ↔ TEXT
 ├── delivery/
 │   ├── DeliveryCoordinator.kt     # ▲ dedup + status transitions; no HTTP
-│   ├── DeliveryWorker.kt          # ▲ WorkManager drain (one-shot expedited + periodic)
+│   ├── DeliveryWorker.kt          # ▲ WorkManager drain (one-shot, not expedited; kicked by triggers, the 15-min periodic kick, and the retry kick)
 │   └── DedupPolicy.kt             # ▲ §3.3 rules, unit-tested standalone
 ├── network/
 │   ├── VitalForgeApi.kt           # ▲ single versioned interface (§4)
@@ -970,7 +970,7 @@ have left a body-comp-less row that is indistinguishable from a genuine
 weight-only reading — silent partial loss wearing the shape of success. The cost
 is that the E17 window (4 s) is genuinely unprotected; the user re-steps, and the
 window is short by design for exactly this reason. Death *after* `EMITTED` loses
-nothing: the row is `PENDING`, complete, and the periodic `DeliveryWorker` drains
+nothing: the row is `PENDING`, complete, and the next `DeliveryWorker` drain (kicked every 15 min) drains
 it with no in-memory state required. The delivery path never depends on the session process
 still being alive — that is the entire reason delivery is `WorkManager` and not a
 coroutine in the session worker.

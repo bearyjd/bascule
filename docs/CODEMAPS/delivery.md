@@ -8,7 +8,7 @@ From a `PENDING` row to a row on the VitalForge server.
 
 ```
 ReadingIngestor inserts PENDING
-  → DeliveryScheduler.trigger()            # WorkManager, APPEND_OR_REPLACE
+  → DeliveryScheduler.triggerImmediateDrain()  # WorkManager, KEEP (dedupes against a running drain)
   → DeliveryWorker
       → RuntimeApiFactory.create()         # re-reads config every run
       → DeliveryDrainer.drain()
