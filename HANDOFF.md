@@ -18,6 +18,82 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-19: the probe found the missed-weigh-in path, and it was the standard one
+
+The probe ran, no slot was burned, and the day ended with the one thing the
+user asked for proven on hardware: **a weigh-in taken while the phone is
+asleep now reaches the phone and syncs.** `main` is at `c193de9`, 721 tests.
+Full probe record: `docs/prp/03-hardware-validation.md`, "Consented reads,
+2026-09-19" (#27). The fix: #28.
+
+**What the scale does, now known:** an unattended weigh-in is filed under the
+user it recognises and handed over **exactly once, on the next UDS consent for
+that user, as ordinary `2A9D`/`2A9C` indications ~1 s after the consent write
+and before the consent response.** No proprietary fetch — `0x0005` "Copy User
+Measurement List" does nothing observable. Bascule had enabled the measurement
+CCCDs *after* consent (the `TODO(WP-10)` in `GattSession` said so), so every
+such delivery was lost; that is the likely fate of the 09-16 `MISSED`.
+
+**The fix (#28, two review rounds):** UCP CCCD → `2A9D`/`2A9C` CCCDs →
+Register/Consent. A measurement frame arriving mid-handshake is deferred, not
+decoded (not an ack, no E6 retry consumed, correlator untouched), then fed to
+the decoder after `Complete`; a deferred weight without its body-comp frame
+enters E17's correlation window directly instead of the 8-minute wait; the
+stale-event drain before an E6 reissue keeps measurement frames (that race
+turned out to be reachable in the JVM lane, and is pinned). Frames dropped by
+a failed handshake are logged.
+
+**Proven on the Pixel 10, clean run** (Bascule force-stopped and confirmed
+dead at 10:36:21, Pixel 9's Bluetooth off, user stepped on at 10:34:51):
+consent at 10:36:28 → the stack confirmed **three** indications instead of
+one → `deferred frame on 2a9d -> Ignored`, `deferred frame on 2a9c -> Stable`
+→ `session ended: captured a reading` 10 s later. Row: 88.89 kg / 20.3 %,
+`scaleTimestampMillis` 10:34:51, `capturedAtMillis` 10:36:28 — a 97-second
+gap that can only come from the stored path. Two earlier attempts were
+confounded (Bascule was unexpectedly back up during one; the other had no
+stored measurement for P1 — see the P2 note) and are recorded as such.
+
+**The same run proved #20, #24 and #25 in passing.** The Pixel 10's base URL
+was still the bare host: all three of the day's readings sat `PENDING` with
+the 404 person-path hint (#20 — before it, `FAILED_PERMANENT`), the
+`DeliveryWorker` returned success on each failed pass instead of entering
+WorkManager's backoff (#25), and when the user corrected the URL to
+`/p/bash6632` the drain fired within seconds and all three went `SENT` (#24).
+
+**Other hardware facts from the day:**
+- The user's activity level reads **4** from the scale (`0x0004`), the level
+  `ReadingMapper.ACTIVITY_FACTOR = 1.85` was measured under on recollection.
+- `0x0001` written `00` dumps every registered profile (idx, initials, DoB,
+  height, sex, activity). `0x000b` is last weight (0.005 kg) + body fat (0.1 %).
+- **P2 (the Aug-22 probe registration) was deleted from the scale** — UDS UCP
+  `0x03` on the consented user, response `20 03 01`; the user list now holds
+  only P01. It had started winning the scale's closest-last-weight recognition
+  and would have captured the user's weigh-ins where Bascule (slot 1 only)
+  could not reach them. O-08's "how to free a slot" is answered.
+- Both phones now run the fix (APK built from `695d416`, app-identical to the
+  merged `853042e`): Pixel 10 at 09:36, Pixel 9 at 13:53. **Both are
+  registered as slot 1 and contend for the scale**; whichever consents first
+  after an unattended weigh-in receives it and syncs it, so nothing is lost
+  either way, but only one phone gets the row. The Pixel 10 is on contract v1
+  (`WEIGHT` only); the Pixel 9 on v2.
+- The reviewer's device-check recipe (logcat strings, the three-confirms
+  cross-check, the timestamp-gap column pair) is in #28's description and
+  is the right procedure for any future handshake change.
+
+**Follow-ups, decided as follow-ups, in order:**
+1. **A stored reading's `capturedAtMillis` is delivery time.** The scale's
+   timestamp is stored (`scaleTimestampMillis`, RTC verified accurate) but
+   unused, so a weigh-in delivered hours later reaches VitalForge/Garmin
+   stamped at delivery. Preferring the scale time moves `DedupPolicy`'s
+   window with it — a deliberate change, next.
+2. Frames delivered but unacked on E6 exhaustion are logged, not flushed;
+   flushing would change E6's contract (ADR-007).
+3. A malformed *stored* frame is counted `NO_MEASUREMENT`, not
+   `DecodeFailure` — label only; the right fix routes deferred frames through
+   `MeasurementPhase`.
+4. `00-design.md` §2.5 still says 45 s where `FIRST_INDICATION_TIMEOUT` is 8
+   minutes — pre-existing drift.
+
 ## 2026-09-18: the root-compat item closed the other way, and the probe is staged
 
 Picked up the open list. Three things moved; the fourth is waiting on
@@ -68,6 +144,85 @@ Bascule's scanners registered in the stack and running 9.4 h, **zero scan
 results** in that window; last capture attempt 2026-09-16 07:26, `MISSED`.
 The user was away from the scale, which explains it. If that ever shows up
 with the phone at home, it is a different problem — look at the scale first.
+
+### Later the same day: six PRs merged, and a delivery bug bigger than the one being fixed
+
+Everything above shipped: #20 (404 → transient), #21 (icons), #22
+(hw-probe `writeprop`/`readprop`, after a review round fixed a stuck
+standalone-read flag and an odd-length hex parse that silently changed the
+payload), #23 (CI), #24 and #25 (below). `main` is at `be10d11`; **714 tests**
+and detekt clean locally on #25's rebased tree, and `main`'s own CI run on
+the merge commit is green. Stated precisely because #25 was merged before
+its post-rebase PR checks had registered — the `main` run is the evidence
+for the merged tree, not a PR check.
+
+**#23 was a runner-side break, not ours.** Every PR opened today failed in
+13–29 s inside `android-actions/setup-android@v3`: `Failed to find package
+'tools'`. The action's default `packages` is `tools platform-tools`, and the
+SDK repository stopped serving the legacy SDK Tools package some time after
+the 09-12 green run. Fixed by requesting only `platform-tools`. Note for the
+next such break: `gh run rerun` and a close/reopen both reuse or race
+GitHub's cached merge ref — merging `main` into the branch is the only
+deterministic way to get a PR onto a fixed workflow.
+
+**#24 — `saveBaseUrl` now drains after a same-host correction.** Fixing the
+`/p/{slug}` path used to leave rows waiting out their backoff (≤15 min).
+`ReadingDao.makePendingDueNow()` clears only the current wait — `attemptCount`
+stays so a re-saved wrong URL resumes the ladder instead of restarting it,
+`retryEpochMillis` stays so the 14-day expiry is not reset by an edit. A
+**host** change (host+port, same `hostOf` as import) deliberately does nothing
+extra: `importSettings` already treats a host change as indistinguishable
+from a hostile repoint, and the manual path must not become the faster way
+to send the stored credential somewhere new.
+
+**#25 — the review of #24 found the real problem, and it was not in #24.**
+`DeliveryWorker` returned `Result.retry()` on a failed drain. That puts the
+`delivery-drain` unique work into WorkManager's *own* exponential backoff —
+30 s doubling to a **5-hour cap**, and nothing in the app ever set
+`setBackoffCriteria` — while `triggerImmediateDrain` enqueues under
+`ExistingWorkPolicy.KEEP`, which drops a request when the existing one is
+`ENQUEUED` *or* `RUNNING` (confirmed against WorkManager 2.11.2). So once a
+drain had been failing for ~30 min, **every** trigger was silently dropped
+until WM's backoff elapsed: a new capture, `saveToken`, `saveBaseUrl`, and
+the 15-minute periodic kick too. A Tailscale outage of two hours could leave
+a brand-new weigh-in unsynced for five. The row ladder in
+`DeliveryCoordinator` (30 s → 15 min) was meant to be the only retry pacing;
+the worker-level one silently overrode it.
+
+The fix: the drain name must never hold a *delayed* request. A failed drain
+returns success and schedules one delayed kick under its own name
+(`delivery-retry-kick`, REPLACE) via the existing `DeliveryPeriodicKickWorker`,
+timed to the soonest `PENDING` row still inside its backoff — so a row parked
+at a server's `Retry-After` deadline paces the kick and the rest of the batch
+is not walked back into the limiter every 30 s — or, when nothing is waiting
+but rows are due (`Retry-After: 0`), the ladder's 30 s base. Three review
+rounds: the first found the zero case (no kick at all), the second found
+that the reviewer's own `min()` re-hit a mid-batch rate limit every 30 s.
+Worth remembering: the Codex round-5 residual recorded below ("recovers at
+the next periodic drain (≤15 min)") was **false** until #25 — the periodic
+kick was dropped along with everything else while the worker sat in
+backoff. It is true now.
+
+**Accepted residual, new:** a retry kick that fires while a drain is already
+RUNNING is dropped by KEEP (the running drain's `pending()` query predates
+the row becoming due). Bounded by the periodic kick (≤15 min), needs an exact
+interleaving each time, not self-perpetuating. Pre-existing and unchanged:
+`BackOffDrain` parks one row and leaves the rest of the batch due, so a
+`Retry-After` that is really endpoint-wide is honoured per row.
+
+**The phone is behind `main` by #20, #24 and #25** (its 09-14 install already
+carries #21's icons). It was unplugged before the `be10d11` build could be
+installed. `app/build/outputs/apk/debug/app-debug.apk`
+is built from that commit — `adb install -r` it (debug signature, keeps data;
+never uninstall), relaunch, and confirm both scanners re-register. The
+hardware checks that matter, in order: (1) #25 — point the base URL at an
+unreachable host, add a manual entry, then
+`adb shell am broadcast -a androidx.work.diagnostics.REQUEST_DIAGNOSTICS -p com.ventouxlabs.bascule`
+and read logcat: `delivery-retry-kick` ENQUEUED with the ladder delay,
+`delivery-drain` SUCCEEDED, and a second manual entry during the wait
+produces an immediate drain (it used to be dropped); (2) #24 — correct the
+URL and watch the rows flip to `SENT` within seconds; (3) the probe, whenever
+the phone is near the scale.
 
 ## 2026-09-08: v0.1.0 released, Phase 5 closed, and a silent capture killer found
 
@@ -195,10 +350,13 @@ Read `05-retrospective.md` first.
    carries only `main`; the one other local branch,
    `meute/draft-ticket-2026-09-06`, is unrelated to this repo's work and is
    left alone deliberately.
-6. **The proprietary `0xFFFF` / `0xFF00` services remain unexercised** — the
-   only route to a measured AMR, and to stored-measurement fetch that would
-   let sessions be seconds instead of minutes. `tools/hw-probe` is still
-   installed on the Pixel 9 as `com.ventouxlabs.hwprobe`.
+6. ~~**The proprietary `0xFFFF` / `0xFF00` services remain unexercised**~~ —
+   **exercised 2026-09-19 under consent, no slot burned.** Activity level
+   read authoritatively (4); the stored-measurement fetch turned out to be
+   the *standard* path (delivered on consent), not a proprietary one, and
+   Bascule now receives it (#28). Sessions are not seconds instead of
+   minutes — a live weigh-in still needs the client present — but a missed
+   one is no longer lost. `tools/hw-probe` is on both Pixels.
 
 ### Method note
 
@@ -1428,7 +1586,9 @@ follow-up, then push and merge.
   silently drops the new trigger by the same design that prevents a
   periodic and a triggered drain from double-submitting. A row rejected in
   that window recovers at the next periodic drain (≤15 min) or the next
-  capture, not instantly — never lost, never resubmitted twice. Closing it
+  capture, not instantly — never lost, never resubmitted twice. (**That
+  bound only became true on 2026-09-18, #25**: until then a drain in
+  WorkManager's retry backoff dropped the periodic kick as well.) Closing it
   fully would need a dedicated follow-up worker for a race narrower than
   one drain's own runtime; documented at
   `DeliveryDrainer.recoverRowsRejectedUnderAnotherContract`'s KDoc rather
@@ -1447,9 +1607,11 @@ follow-up, then push and merge.
   consent → subscribe, against the scale emitting its single live
   indication ~8-15 s in. A `MISSED_THE_WINDOW` was recorded at 22:28 on
   the Pixel 10 with nobody on the scale, so dispatch latency is real even
-  with the battery exemption. Needs one observed weigh-in to size; the
-  stored-measurement path over Beurer's proprietary service is the
-  structural answer if it bites.
+  with the battery exemption. **Largely defused 2026-09-19 (#28):** a live
+  indication the session arrives too late for is stored by the scale and
+  delivered on that session's consent — the race now costs the reading a
+  few seconds of latency, not the reading. The dispatch latency itself is
+  unchanged.
 
 Everything below predates this session except where noted; this session's
 round-3 review was scoped to specific findings, not a re-litigation of these.
@@ -1460,8 +1622,11 @@ round-3 review was scoped to specific findings, not a re-litigation of these.
 - **`androidx.security:security-crypto` 1.1.0's `EncryptedSharedPreferences`
   is deprecated** by the platform. Both the VitalForge token and scale
   consent codes use it. Pick a successor before v1 ships.
-- **O-08 residues**: the recovery path for a full 8-slot scale registry
-  (read `2A9A` / SIG delete-user op) is unexplored.
+- ~~**O-08 residues**: the recovery path for a full 8-slot scale registry
+  (read `2A9A` / SIG delete-user op) is unexplored.~~ **Explored
+  2026-09-19:** proprietary `0x0001` written `00` lists every slot; UDS UCP
+  `0x03` deletes the consented user (proven, P2 removed). Neither is wired
+  into the app; `tools/hw-probe` has both.
 - **V2 contract field names — verified 2026-09-03, not still waiting on a
   doc.** Re-checking this item during A6 follow-up meant reading VitalForge's
   actual `WeightIn` model directly (`~/Documents/vibe-code/vitalforge`, a
