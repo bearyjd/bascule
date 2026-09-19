@@ -69,6 +69,81 @@ results** in that window; last capture attempt 2026-09-16 07:26, `MISSED`.
 The user was away from the scale, which explains it. If that ever shows up
 with the phone at home, it is a different problem — look at the scale first.
 
+### Later the same day: six PRs merged, and a delivery bug bigger than the one being fixed
+
+Everything above shipped: #20 (404 → transient), #21 (icons), #22
+(hw-probe `writeprop`/`readprop`, after a review round fixed a stuck
+standalone-read flag and an odd-length hex parse that silently changed the
+payload), #23 (CI). `main` is at `be10d11`, **714 tests**, detekt clean, CI
+green on the merge commit.
+
+**#23 was a runner-side break, not ours.** Every PR opened today failed in
+13–29 s inside `android-actions/setup-android@v3`: `Failed to find package
+'tools'`. The action's default `packages` is `tools platform-tools`, and the
+SDK repository stopped serving the legacy SDK Tools package some time after
+the 09-12 green run. Fixed by requesting only `platform-tools`. Note for the
+next such break: `gh run rerun` and a close/reopen both reuse or race
+GitHub's cached merge ref — merging `main` into the branch is the only
+deterministic way to get a PR onto a fixed workflow.
+
+**#24 — `saveBaseUrl` now drains after a same-host correction.** Fixing the
+`/p/{slug}` path used to leave rows waiting out their backoff (≤15 min).
+`ReadingDao.makePendingDueNow()` clears only the current wait — `attemptCount`
+stays so a re-saved wrong URL resumes the ladder instead of restarting it,
+`retryEpochMillis` stays so the 14-day expiry is not reset by an edit. A
+**host** change (host+port, same `hostOf` as import) deliberately does nothing
+extra: `importSettings` already treats a host change as indistinguishable
+from a hostile repoint, and the manual path must not become the faster way
+to send the stored credential somewhere new.
+
+**#25 — the review of #24 found the real problem, and it was not in #24.**
+`DeliveryWorker` returned `Result.retry()` on a failed drain. That puts the
+`delivery-drain` unique work into WorkManager's *own* exponential backoff —
+30 s doubling to a **5-hour cap**, and nothing in the app ever set
+`setBackoffCriteria` — while `triggerImmediateDrain` enqueues under
+`ExistingWorkPolicy.KEEP`, which drops a request when the existing one is
+`ENQUEUED` *or* `RUNNING` (confirmed against WorkManager 2.11.2). So once a
+drain had been failing for ~30 min, **every** trigger was silently dropped
+until WM's backoff elapsed: a new capture, `saveToken`, `saveBaseUrl`, and
+the 15-minute periodic kick too. A Tailscale outage of two hours could leave
+a brand-new weigh-in unsynced for five. The row ladder in
+`DeliveryCoordinator` (30 s → 15 min) was meant to be the only retry pacing;
+the worker-level one silently overrode it.
+
+The fix: the drain name must never hold a *delayed* request. A failed drain
+returns success and schedules one delayed kick under its own name
+(`delivery-retry-kick`, REPLACE) via the existing `DeliveryPeriodicKickWorker`,
+timed to the soonest `PENDING` row still inside its backoff — so a row parked
+at a server's `Retry-After` deadline paces the kick and the rest of the batch
+is not walked back into the limiter every 30 s — or, when nothing is waiting
+but rows are due (`Retry-After: 0`), the ladder's 30 s base. Three review
+rounds: the first found the zero case (no kick at all), the second found
+that the reviewer's own `min()` re-hit a mid-batch rate limit every 30 s.
+Worth remembering: the Codex round-5 residual recorded below ("recovers at
+the next periodic drain (≤15 min)") was **false** until #25 — the periodic
+kick was dropped along with everything else while the worker sat in
+backoff. It is true now.
+
+**Accepted residual, new:** a retry kick that fires while a drain is already
+RUNNING is dropped by KEEP (the running drain's `pending()` query predates
+the row becoming due). Bounded by the periodic kick (≤15 min), needs an exact
+interleaving each time, not self-perpetuating. Pre-existing and unchanged:
+`BackOffDrain` parks one row and leaves the rest of the batch due, so a
+`Retry-After` that is really endpoint-wide is honoured per row.
+
+**The phone is now three fixes behind `main`.** It was unplugged before the
+`be10d11` build could be installed. `app/build/outputs/apk/debug/app-debug.apk`
+is built from that commit — `adb install -r` it (debug signature, keeps data;
+never uninstall), relaunch, and confirm both scanners re-register. The
+hardware checks that matter, in order: (1) #25 — point the base URL at an
+unreachable host, add a manual entry, then
+`adb shell am broadcast -a androidx.work.diagnostics.REQUEST_DIAGNOSTICS -p com.ventouxlabs.bascule`
+and read logcat: `delivery-retry-kick` ENQUEUED with the ladder delay,
+`delivery-drain` SUCCEEDED, and a second manual entry during the wait
+produces an immediate drain (it used to be dropped); (2) #24 — correct the
+URL and watch the rows flip to `SENT` within seconds; (3) the probe, whenever
+the phone is near the scale.
+
 ## 2026-09-08: v0.1.0 released, Phase 5 closed, and a silent capture killer found
 
 **`v0.1.0` is released**: https://github.com/bearyjd/bascule/releases/tag/v0.1.0
@@ -1428,7 +1503,9 @@ follow-up, then push and merge.
   silently drops the new trigger by the same design that prevents a
   periodic and a triggered drain from double-submitting. A row rejected in
   that window recovers at the next periodic drain (≤15 min) or the next
-  capture, not instantly — never lost, never resubmitted twice. Closing it
+  capture, not instantly — never lost, never resubmitted twice. (**That
+  bound only became true on 2026-09-18, #25**: until then a drain in
+  WorkManager's retry backoff dropped the periodic kick as well.) Closing it
   fully would need a dedicated follow-up worker for a race narrower than
   one drain's own runtime; documented at
   `DeliveryDrainer.recoverRowsRejectedUnderAnotherContract`'s KDoc rather
