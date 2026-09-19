@@ -1,5 +1,8 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.ble.fake.scaleReadingFixture
+import com.ventouxlabs.bascule.data.ReadingMapper
+import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.data.WeightUnit
 import java.time.Instant
 import kotlinx.serialization.json.doubleOrNull
@@ -74,6 +77,34 @@ class V2ShaperTest {
         val raw = payload.json.getValue("captured_at").jsonPrimitive
         assertTrue("captured_at must be a JSON string, not a bare number", raw.isString)
         assertTrue(raw.content.endsWith("Z"))
+    }
+
+    /**
+     * End to end from the BLE boundary rather than from a hand-built entity:
+     * a weigh-in the scale stored and handed over 97 s later (#28) must reach
+     * the wire as the time the person stood on the scale — that is what
+     * VitalForge stores as `captured_at` and what Garmin then shows as the
+     * reading's time (A6, 00-design.md §4.4). A hand-built fixture would pass
+     * this whether or not `ReadingMapper` ever looked at the scale's clock.
+     */
+    @Test
+    fun aStoredWeighInIsSentWithTheScalesTimeNotTheDeliveryTime() {
+        val receivedAt = ReadingFixtures.CAPTURED_AT_MILLIS
+        val scaleTime = receivedAt - 97_000L
+        val entity = ReadingMapper.map(
+            measurement = scaleReadingFixture(receivedAtMillis = receivedAt, scaleTimestampMillis = scaleTime),
+            unit = WeightUnit.KILOGRAMS,
+            status = ReadingStatus.PENDING,
+            profileId = null,
+            id = "stored",
+        )
+
+        val payload = V2Shaper.shape(entity, WeightUnit.KILOGRAMS)
+
+        assertEquals(
+            Instant.ofEpochMilli(scaleTime).toString(),
+            payload.json.getValue("captured_at").jsonPrimitive.content,
+        )
     }
 
     @Test

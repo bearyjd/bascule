@@ -246,14 +246,56 @@ class HistoryViewModelTest {
         assertEquals(listOf("r1"), dao.pending(nowMillis = 0L, limit = 10).map { it.id })
     }
 
+    /** The two timestamps deliberately differ, so this pins the anchor and not merely "a PENDING row has an age". */
     @Test
     fun showsPendingBacklogAge() = runTest {
         val dao = FakeReadingDao()
-        dao.insert(readingFixture(status = ReadingStatus.PENDING, capturedAtMillis = 1_000))
-        val vm = viewModel(dao, now = 1_000 + 60_000)
+        dao.insert(readingFixture(status = ReadingStatus.PENDING, capturedAtMillis = 1_000, retryEpochMillis = 31_000))
+        val vm = viewModel(dao, now = 31_000 + 60_000)
         advanceUntilIdle()
 
         assertEquals(60_000L, vm.uiState.value.oldestPendingAgeMillis)
+    }
+
+    /**
+     * The backlog banner measures how long a reading has been *waiting to
+     * sync*, not how old the weigh-in is. `capturedAtMillis` is the scale's
+     * own time since #28 delivers stored weigh-ins hours after they happened,
+     * so keyed on it the ≥1 h banner would trip the instant such a reading
+     * arrived. `retryEpochMillis` is reset on every entry into PENDING, which
+     * makes it exactly "waiting since".
+     */
+    @Test
+    fun backlogAgeIsHowLongARowHasWaitedToSyncNotHowOldTheWeighInIs() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(
+            readingFixture(
+                id = "just-delivered",
+                status = ReadingStatus.PENDING,
+                capturedAtMillis = NOW - 3 * HOUR_MILLIS,
+                retryEpochMillis = NOW,
+            ),
+        )
+        val vm = viewModel(dao, now = NOW)
+        advanceUntilIdle()
+
+        assertEquals(
+            "a stored weigh-in that arrived just now has waited zero time",
+            0L,
+            vm.uiState.value.oldestPendingAgeMillis,
+        )
+
+        dao.insert(
+            readingFixture(
+                id = "stuck",
+                status = ReadingStatus.PENDING,
+                capturedAtMillis = NOW - 2 * HOUR_MILLIS,
+                retryEpochMillis = NOW - 2 * HOUR_MILLIS,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(2 * HOUR_MILLIS, vm.uiState.value.oldestPendingAgeMillis)
     }
 
     @Test
@@ -342,5 +384,12 @@ class HistoryViewModelTest {
     @Test
     fun historyUiStateDefaultConstructorHasNullCaptureState() {
         assertNull(HistoryUiState().captureState)
+    }
+
+    private companion object {
+        const val HOUR_MILLIS = 60 * 60 * 1000L
+
+        /** Ten hours in, so every "hours ago" row still has a non-negative timestamp. */
+        const val NOW = 10 * HOUR_MILLIS
     }
 }

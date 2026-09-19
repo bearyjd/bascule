@@ -126,6 +126,13 @@ interface ReadingDao {
     @Query("SELECT COUNT(*) FROM readings WHERE status = 'PENDING'")
     fun observePendingCount(): Flow<Int>
 
+    /**
+     * The latest *weigh-in*, not the latest insert: `capturedAtMillis` is the
+     * scale's own time when plausible (`CaptureTimestampPolicy`), so a stored
+     * weigh-in delivered today but taken last week does not move this. Feeds
+     * the Scale screen's "Last successful capture" label only — nothing
+     * derives staleness or attention from it.
+     */
     @Query("SELECT MAX(capturedAtMillis) FROM readings WHERE source = 'SCALE'")
     fun observeLastScaleCapture(): Flow<Long?>
 

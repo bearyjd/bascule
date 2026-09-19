@@ -275,7 +275,10 @@ that nothing is discarded at the point of measurement: `muscleMassKg`,
 frame's own flags say so), `softLeanMassKg`, and `impedanceOhms`. Also
 `heightM` and `scaleTimestampMillis`, the latter kept distinct from
 `capturedAtMillis` because the scale's clock and the phone's clock are different
-facts and the dedup rule (§3.3) keys on the phone's.
+facts. *(Amended 2026-09-19: `capturedAtMillis` is now the weigh-in time —
+resolved from the scale's clock when plausible, else the phone's receipt time
+(`00-design.md` §3.1, `CaptureTimestampPolicy`) — and the dedup rule (§3.3)
+keys on that. `scaleTimestampMillis` is kept as the unbounded raw value.)*
 
 ---
 

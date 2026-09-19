@@ -158,10 +158,10 @@ class ReadingIngestorTest {
         val dao = FakeReadingDao()
         val profiles = FakeScaleProfileStore(listOf(profile("p1", 1, active = true)))
         val instance = ingestor(dao, profiles)
-        val firstReading = scaleReadingFixture(weightKg = 71.0, userIndex = 1, capturedAtMillis = 1_000L)
+        val firstReading = scaleReadingFixture(weightKg = 71.0, userIndex = 1, receivedAtMillis = 1_000L)
         val first = instance.ingest(deviceAddress, firstReading)
         assertTrue(first is IngestResult.Inserted)
-        val secondReading = scaleReadingFixture(weightKg = 71.05, userIndex = 1, capturedAtMillis = 1_500L)
+        val secondReading = scaleReadingFixture(weightKg = 71.05, userIndex = 1, receivedAtMillis = 1_500L)
         val second = instance.ingest(deviceAddress, secondReading)
         assertTrue(second is IngestResult.Duplicate)
         assertEquals(1, dao.rows.value.size)
@@ -172,16 +172,80 @@ class ReadingIngestorTest {
         val dao = FakeReadingDao()
         val profiles = FakeScaleProfileStore(listOf(profile("p1", 1, active = true)))
         val instance = ingestor(dao, profiles)
-        instance.ingest(deviceAddress, scaleReadingFixture(weightKg = 71.0, userIndex = 1, capturedAtMillis = 0L))
+        instance.ingest(deviceAddress, scaleReadingFixture(weightKg = 71.0, userIndex = 1, receivedAtMillis = 0L))
         val second = instance.ingest(
             deviceAddress,
-            scaleReadingFixture(weightKg = 71.0, userIndex = 1, capturedAtMillis = JUST_OUTSIDE_DEDUP_WINDOW_MILLIS),
+            scaleReadingFixture(weightKg = 71.0, userIndex = 1, receivedAtMillis = JUST_OUTSIDE_DEDUP_WINDOW_MILLIS),
         )
         assertTrue(second is IngestResult.Inserted)
         assertEquals(2, dao.rows.value.size)
     }
 
+    /**
+     * §3.3's window keys on the *resolved* capture time — the scale's clock —
+     * not on when the phone received the reading. Since #28 the scale can hand
+     * the same stored weigh-in over again in a later session, hours after the
+     * first delivery; keyed on receipt, the two deliveries would land far
+     * outside the 5-minute window and the weigh-in would be persisted twice.
+     */
+    @Test
+    fun theSameStoredWeighInDeliveredAgainHoursLaterIsADuplicate() = runTest {
+        val dao = FakeReadingDao()
+        val profiles = FakeScaleProfileStore(listOf(profile("p1", 1, active = true)))
+        val instance = ingestor(dao, profiles)
+        val weighIn = RECEIVED_AT - 60_000L
+
+        val first = instance.ingest(deviceAddress, storedWeighIn(scaleTime = weighIn, receivedAt = RECEIVED_AT))
+        val second = instance.ingest(
+            deviceAddress,
+            storedWeighIn(scaleTime = weighIn, receivedAt = RECEIVED_AT + THREE_HOURS_MILLIS),
+        )
+
+        assertTrue(first is IngestResult.Inserted)
+        assertTrue(
+            "same weigh-in, same scale time — receipt three hours apart changes nothing",
+            second is IngestResult.Duplicate,
+        )
+        assertEquals(1, dao.rows.value.size)
+    }
+
+    /** The mirror image: two real weigh-ins the scale stored and then handed over back-to-back in one session. */
+    @Test
+    fun twoStoredWeighInsTenMinutesApartDeliveredSecondsApartAreBothKept() = runTest {
+        val dao = FakeReadingDao()
+        val profiles = FakeScaleProfileStore(listOf(profile("p1", 1, active = true)))
+        val instance = ingestor(dao, profiles)
+        val firstWeighIn = RECEIVED_AT - 20 * 60_000L
+        val secondWeighIn = firstWeighIn + 10 * 60_000L
+
+        val first = instance.ingest(deviceAddress, storedWeighIn(scaleTime = firstWeighIn, receivedAt = RECEIVED_AT))
+        val second = instance.ingest(
+            deviceAddress,
+            storedWeighIn(scaleTime = secondWeighIn, receivedAt = RECEIVED_AT + 5_000L),
+        )
+
+        assertTrue(first is IngestResult.Inserted)
+        assertTrue(
+            "ten minutes apart on the scale is two weigh-ins, however close the deliveries",
+            second is IngestResult.Inserted,
+        )
+        assertEquals(2, dao.rows.value.size)
+    }
+
+    /** Same weight and user every time, so the resolved capture time is the only thing the dedup gate can act on. */
+    private fun storedWeighIn(scaleTime: Long, receivedAt: Long) = scaleReadingFixture(
+        weightKg = 71.0,
+        userIndex = 1,
+        receivedAtMillis = receivedAt,
+        scaleTimestampMillis = scaleTime,
+    )
+
     private companion object {
+        /** A realistic epoch: the fixture's default of zero puts any real scale time outside the believable window. */
+        const val RECEIVED_AT = 1_787_000_000_000L
+
+        const val THREE_HOURS_MILLIS = 3 * 60 * 60 * 1000L
+
         // Just past DedupPolicy.TIME_WINDOW_MILLIS so the second reading falls outside the window.
         const val JUST_OUTSIDE_DEDUP_WINDOW_MILLIS = 300_001L
 

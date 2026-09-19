@@ -6,7 +6,7 @@ import com.ventouxlabs.bascule.ble.ScaleReading
 fun scaleReadingFixture(
     weightKg: Double = 70.0,
     userIndex: Int? = 1,
-    capturedAtMillis: Long = 0L,
+    receivedAtMillis: Long = 0L,
     scaleTimestampMillis: Long? = null,
     bodyFatPct: Double? = null,
     bodyWaterMassKg: Double? = null,
@@ -26,7 +26,7 @@ fun scaleReadingFixture(
     heightM = null,
     boneMassKg = null,
     amr = null,
-    capturedAtMillis = capturedAtMillis,
+    receivedAtMillis = receivedAtMillis,
     scaleTimestampMillis = scaleTimestampMillis,
     decoderId = decoderId,
 )

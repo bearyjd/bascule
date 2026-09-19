@@ -63,7 +63,12 @@ object ReadingMapper {
         id: String,
     ): ReadingEntity = ReadingEntity(
         id = id,
-        capturedAtMillis = measurement.capturedAtMillis,
+        // When the weigh-in happened — the scale's clock when believable, else
+        // the phone's. See CaptureTimestampPolicy for why and for the bounds.
+        capturedAtMillis = CaptureTimestampPolicy.resolve(
+            scaleTimestampMillis = measurement.scaleTimestampMillis,
+            receivedAtMillis = measurement.receivedAtMillis,
+        ),
         scaleTimestampMillis = measurement.scaleTimestampMillis,
         userIndex = measurement.userIndex,
         weightKg = measurement.weightKg,
@@ -83,7 +88,11 @@ object ReadingMapper {
         softLeanMassKg = measurement.softLeanMassKg,
         status = status,
         attemptCount = 0,
-        retryEpochMillis = measurement.capturedAtMillis,
+        // The expiry anchor (DeliveryCoordinator.EXPIRY_MILLIS, 14 days) starts
+        // when the phone *got* the reading, never at a scale time that may
+        // already be days old — a stored weigh-in delivered late must get the
+        // same full retry window as a live one. Deliberately not capturedAtMillis.
+        retryEpochMillis = measurement.receivedAtMillis,
         lastAttemptMillis = null,
         lastError = null,
         lastErrorClass = null,

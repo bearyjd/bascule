@@ -399,7 +399,8 @@ data class ScaleReading(
     val bmi: Double?,
     val bmr: Double?,
     val amr: Double?,
-    val capturedAtMillis: Long,    // device clock at EMITTED
+    val receivedAtMillis: Long,    // phone clock at EMITTED — when the phone *obtained* it
+    val scaleTimestampMillis: Long?, // the scale's own clock, when the frame carried one
     val decoderId: String,
 )
 ```
@@ -432,8 +433,8 @@ the additions below.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `String` (UUID) | ▲ client-generated; becomes the `client_id` idempotency key under contract v2 only (§4.4) |
-| `capturedAtMillis` | `Long` | device clock at `EMITTED` |
-| `scaleTimestampMillis` | `Long?` | ▲ the scale's own clock from the Weight Measurement frame, null when the frame carried none. Kept **alongside** `capturedAtMillis`, not instead of it: dedup (§3.3) and the history sort key run on the phone clock, but a reading the scale buffered and delivered later would otherwise record its *delivery* time as its capture time. Which of the two a v2 replay joins on is part of the A6 escalation (§4.4) |
+| `capturedAtMillis` | `Long` | **when the weigh-in happened.** `CaptureTimestampPolicy` resolves it at the persistence boundary: the scale's own timestamp when the frame carried one and it lies within `[received − 365 d, received + 30 s]`, otherwise the phone clock at `EMITTED`. A weigh-in taken with no phone present is stored on the scale and handed over at the next consent, possibly hours later; keyed on the phone clock this column recorded the *delivery* time (verified on hardware 2026-09-19: a 10:34:51 weigh-in delivered at 10:36:28 landed as 10:36:28). The scale's clock is believed because Bascule writes Current Time (`2A2B`) at the start of every session. The past bound exists only to reject a reset RTC's default epoch (`FrameReader` accepts years from 2000, so 2000-01-01 decodes); the future bound is small because the received time is never earlier than the truth, so anything ahead of it is skew the received time beats, and it must stay under VitalForge's `CAPTURED_AT_FUTURE_TOLERANCE_SECONDS` (60 s — beyond it `captured_at` is a 422, permanent). Dedup (§3.3), the History sort and its relative-age label, the remote-duplicate check and the v2 `captured_at` field all read this column, so all of them now key on the weigh-in time. **The wire effect exists only under contract v2**: v1 sends no `captured_at`, so the server stamps a v1 row with its delivery time; a stored weigh-in delivered under v1 and later replayed under v2 lands at the scale time with a `client_id` the server has never seen and misses the server's 60-s dedup window — the §4.4 residual, which now applies to every stored weigh-in delivered under v1 |
+| `scaleTimestampMillis` | `Long?` | ▲ the scale's own clock from the Weight Measurement frame, null when the frame carried none. Stored as received, unbounded — the raw fact `capturedAtMillis` was resolved from, kept so a wrong clock can be seen rather than silently corrected |
 | `userIndex` | `Int?` | nullable — see §7 |
 | `weightKg` | `Double` | ▲ canonical kg (PRP said `weightValue` + `unit`) |
 | `displayUnit` | `String` | ▲ user's configured unit at capture time, for history rendering |
@@ -441,7 +442,7 @@ the additions below.
 | `impedanceOhms`, `softLeanMassKg` | `Double?` | ▲ both decoded from the captured frame and both previously homeless. Impedance is the **raw measured signal** every other body-comp number is a formula over; discarding it would make body composition permanently non-recomputable, which is precisely what PRP §2's "nothing is discarded at the point of measurement" exists to prevent |
 | `status` | `String` | `PENDING` / `HELD_CONFIRM` / `SENT` / `BLOCKED_AUTH` / `FAILED_PERMANENT` / `DECLINED` |
 | `attemptCount` | `Int` | transient failures only |
-| `retryEpochMillis` | `Long` | ▲ start of the current retriable period — **the expiry anchor** (§3.4). Set to `capturedAtMillis` on insert and **reset to `now` on every re-entry into `PENDING`** (new token saved, "Retry" tapped, confirmation granted, replay requeue) |
+| `retryEpochMillis` | `Long` | ▲ start of the current retriable period — **the expiry anchor** (§3.4). Set to the phone's *received* time on insert — never to `capturedAtMillis`, which for a stored weigh-in may already be days old — and **reset to `now` on every re-entry into `PENDING`** (new token saved, "Retry" tapped, confirmation granted, replay requeue) |
 | `lastAttemptMillis` | `Long?` | |
 | `lastError` | `String?` | sanitised — never contains the token or a response body verbatim |
 | `lastErrorClass` | `String?` | ▲ `TRANSIENT` / `AUTH` / `PERMANENT` |
@@ -517,7 +518,11 @@ A candidate reading is a **duplicate** of an existing row when *all* hold:
 2. **user match**: `candidate.userIndex == existing.userIndex`, where two nulls
    count as equal (the userIndex-absent branch, §7), **and**
 3. `abs(candidate.weightKg - existing.weightKg) <= 0.20`, **and**
-4. `abs(candidate.capturedAtMillis - existing.capturedAtMillis) <= 300_000` (5 min).
+4. `abs(candidate.capturedAtMillis - existing.capturedAtMillis) <= 300_000` (5 min) —
+   on the weigh-in time (§3.1), so the same stored weigh-in handed over again in
+   a later session collides with its first delivery however far apart the two
+   deliveries were, and two weigh-ins ten minutes apart on the scale stay
+   distinct however close together the scale delivers them.
 
 Compared against **all** rows in the window regardless of status, **except
 `DECLINED` rows**, which are excluded from the dedup corpus entirely. Not just
@@ -600,9 +605,12 @@ marked `FAILED_PERMANENT` again on its very first transient failure — includin
 the `BLOCKED_AUTH` backlog whose whole purpose is to survive exactly that. Each
 re-entry into `PENDING` therefore sets `retryEpochMillis = now` and
 `attemptCount = 0`, which gives every row a full fresh 14-day retriable window
-from the moment it becomes retriable again. `capturedAtMillis` is never used for
-expiry; it is capture provenance, the dedup time key (§3.3), and the history sort
-key only.
+from the moment it becomes retriable again. The insert-time anchor is the phone's
+*received* time for the same reason: a weigh-in the scale stored and handed over
+days later (§3.1) must start its window when the phone got it, not when it
+happened. `capturedAtMillis` is never used for expiry; it is the weigh-in time —
+the dedup key (§3.3), the history sort key, the relative-age label, and the wire
+`captured_at` — and nothing else.
 
 Rows in `BLOCKED_AUTH` and `HELD_CONFIRM` **never expire** and never accrue
 attempts — no clock of any kind runs against them. Token rotation must not
@@ -763,18 +771,17 @@ it is the harder half of it, and it is why the question goes to JD before replay
 is enabled rather than after.
 
 One line added to that same escalation, not a new one: **there are now two
-clocks**, and the design must ask which one VitalForge holds. `capturedAtMillis`
-is the phone's clock at `EMITTED`; `scaleTimestampMillis` (§3.1) is the scale's
-own. **Decided: Bascule writes the Current Time characteristic (`2A2B`) as the
+clocks**, and the design must ask which one VitalForge holds. At the time this
+was raised `capturedAtMillis` was the phone's clock at `EMITTED` and
+`scaleTimestampMillis` (§3.1) the scale's own; since 2026-09-19 the former is
+resolved from the latter when believable (§3.1), and the amendment at the end
+of this section says what that means for the wire. **Decided: Bascule writes the Current Time characteristic (`2A2B`) as the
 first step of every handshake**, before Register or Consent — the probe did
 exactly this and the resulting frame timestamp matched the written value to the
 second (`03-hardware-validation.md` §5), which is the only reason the scale's
 timestamp is trustworthy at all. An unset RTC drifts or resets on a battery
 change, and a timestamp nobody sets is garbage the design would be lucky not to
-read. *Implementation gap:* `BeurerDecoder.beginHandshake` currently opens with
-Register/Consent and does not issue the CTS write; adding it is WP-07's job, and
-it is listed as such in `02-phase2-dispositions.md`. For a live
-wake-on-advertisement session the two clocks differ by
+read. For a live wake-on-advertisement session the two clocks differ by
 seconds, well inside the 5-minute dedup window. But if Atlas's `ble-scale-sync`
 delivered the same weigh-in and VitalForge stored the *scale's* timestamp, a
 replay join on `captured_at` misses and produces exactly the duplicates this
@@ -786,12 +793,23 @@ reopening of it.
 
 **Resolved alongside A6, 2026-09-02.** VitalForge doesn't impose an answer —
 its new `captured_at` field stores whatever the client sends and has no
-opinion about which clock it came from. `V2Shaper` sends `capturedAtMillis`
-(the phone clock at `EMITTED`), not `scaleTimestampMillis`, matching what
-§3.3's local dedup already uses and staying consistent with this section's
-own "seconds apart, well inside the window" reasoning for a live session. If
-Atlas ever proves to deliver the *scale's* clock instead, this is a one-line
-shaper change (swap which field feeds `captured_at`), not a VitalForge change.
+opinion about which clock it came from. `V2Shaper` sends `capturedAtMillis`,
+not `scaleTimestampMillis`, matching what §3.3's local dedup already uses.
+*Amended 2026-09-19:* `capturedAtMillis` is no longer the phone clock at
+`EMITTED` — since #28 delivers weigh-ins the scale stored while no phone was
+present, it is resolved at the persistence boundary to the scale's own
+timestamp when believable (§3.1, `CaptureTimestampPolicy`). The shaper is
+unchanged; what it sends is now the weigh-in time for a stored reading and,
+as before, within seconds of it for a live one. That is also what Atlas's
+`ble-scale-sync` would send if it forwards the scale's clock, so the replay
+join this paragraph worried about lands on the same instant from either
+bridge. Under contract **v1** none of this reaches the wire — v1 carries no
+`captured_at`, so the server stamps the row with its delivery time. A stored
+weigh-in delivered under v1 and later replayed under v2 therefore lands at the
+scale time with a `client_id` the server has never seen and misses the server's
+60-s dedup window: the residual above, which now applies to every stored
+weigh-in delivered under v1, not only to rows whose original delivery was
+itself delayed.
 
 ### 4.5 HTTP response classification
 
