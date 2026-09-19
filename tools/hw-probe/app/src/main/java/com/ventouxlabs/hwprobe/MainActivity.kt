@@ -44,6 +44,7 @@ private val USER_CONTROL_POINT_UUID = UUID.fromString("00002a9f-0000-1000-8000-0
 // here from protocol understanding, no source copied.
 private const val UDS_CP_REGISTER_NEW_USER = 0x01
 private const val UDS_CP_CONSENT = 0x02
+private const val UDS_CP_DELETE_USER_DATA = 0x03 // UDS: deletes the *currently consented* user only
 private const val UDS_CP_LIST_ALL_USERS = 0x04
 private const val UDS_CP_RESPONSE = 0x20
 
@@ -127,6 +128,7 @@ class MainActivity : AppCompatActivity() {
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd listusers
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd register --ei consent 1234
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd consent --ei idx 2 --ei consent 1234
+    // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd deleteuser   (consent first; deletes that user)
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd dumpprop
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd writeprop --es uuid 0005 --es hex 01
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd readprop --es uuid 0004
@@ -150,6 +152,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 "synctime" -> syncTime()
                 "listusers" -> writeUserControlPoint(byteArrayOf(UDS_CP_LIST_ALL_USERS.toByte()), "LIST_ALL_USERS")
+                // Destructive: frees the scale slot of whichever user this session last
+                // consented as. Consent first, deliberately, so the target is explicit.
+                "deleteuser" -> writeUserControlPoint(byteArrayOf(UDS_CP_DELETE_USER_DATA.toByte()), "DELETE_USER_DATA (consented user)")
                 "register" -> {
                     lastRegisteredConsent = intent.getIntExtra("consent", 1234)
                     val payload = byteArrayOf(

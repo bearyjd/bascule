@@ -273,6 +273,112 @@ echo "sdk.dir=$ANDROID_HOME" > tools/hw-probe/local.properties
 ./gradlew -p tools/hw-probe assembleDebug
 ```
 
+## Consented reads, 2026-09-19 — no slot burned, and the stored-measurement path found
+
+Device: Pixel 9 Pro Fold `4A111FDKD0000C`, Bascule force-stopped for the
+duration so it could not hold the link. hw-probe from `probe/proprietary-write-read`
+(`writeprop`/`readprop`). Scale at 100 %. Two consent codes were already on
+record — slot 2 / `1234` (the Aug-22 probe registration) and slot 1 / `3907`
+(the user's own, HANDOFF 2026-08-31) — so the "register a new user and burn a
+slot" experiment was never needed. Full logs: `probe-2026-09-19-part{1,2}.txt`
+in the session scratchpad.
+
+### Consent unlocks every user-scoped value
+
+Both consents were accepted (`20 02 01`). Under each, the `0xFFFF` values that
+read `ff` on 09-12 are populated:
+
+| Char | Slot 1 (`P01`, the user) | Slot 2 (`P02`, probe) |
+|---|---|---|
+| `0x0002` Initials | `50 30 31` "P01" | `50 30 32` "P02" |
+| `0x0004` Acitivity Level | **`04`** | `03` |
+| `0x000b` Refer Weight/BF | `74 48 e6 00` → 92.74 kg / 23.0 % | `12 47 a8 01` → 90.97 kg / 42.4 % |
+| `0x0005` Copy Measurement List | `00` | `00` |
+| `0x0006` Take Measurement | `01` | `01` |
+
+**The activity level is authoritative now: the user's slot is at 4**, which is
+the level `ReadingMapper.ACTIVITY_FACTOR = 1.85` was measured under on the
+user's recollection alone. Encoding: one byte, the plain 1–5 integer.
+
+`0x000b` is two little-endian u16s: weight in 0.005 kg, body fat in 0.1 %.
+Slot 2's 42.4 % is what a ~90 kg body reads as under its bogus profile
+(female, 170 cm — see the user list below), exactly as the 09-06 handoff
+predicted. Slot 1's 92.74 kg / 23.0 % is a reading Bascule never received.
+
+### `0x0001` User List dumps every profile
+
+Writing `01`, `02` or `03` to `0x0001` notifies a single byte `12` (meaning
+unknown). Writing **`00`** notifies one 12-byte record per registered user and
+then a `01` terminator:
+
+```
+00 01  50 30 31  bc 07  01 19  b9  00  04    idx 1 "P01" 1980-01-25 185 cm sex 0 activity 4
+00 02  50 30 32  c4 07  02 01  aa  01  03    idx 2 "P02" 1988-02-01 170 cm sex 1 activity 3
+01
+```
+
+Layout: `00`, user index, 3 ASCII initials, birth year u16 LE, month, day,
+height cm, sex, activity level. This is the proprietary equivalent of the UDS
+profile characteristics, in one shot, for every slot — the `0x2A9A` / 8-slot
+recovery question in HANDOFF (O-08) now has a read side.
+
+### `0x0005` "Copy User Measurement List" does nothing observable
+
+Written `01` and `02` under both slots, followed by re-dumps, by `00` to
+`0x0006`, and by a re-consent. Every write was accepted (`status=0`), the
+value snapped back to `00` each time, and nothing arrived on any channel —
+`0x0001`, `0x0006`, `0xFF01`, `2A9D`, `2A9C`. Either it copies a list this
+firmware never exposes, or the list was empty. Not the route to anything.
+
+### The stored-measurement path is the *standard* one, and it works
+
+The decisive run. hw-probe disconnected, Bascule off, no client on the scale
+(`ACL LE:N` confirmed). The user stepped on barefoot at 08:24. The scale
+showed **P2** — user recognition by closest last weight: P2's reference was
+90.97 kg, P1's 92.74, the new reading 88.37. Reconnected; consent as slot 1
+delivered nothing. Consent as slot 2:
+
+```
+08:25:12.766 → UCP CONSENT idx=2 consent=1234
+08:25:13.917 NOTIFY 2a9d len=15  0e 0a 45 ea 07 09 13 08 18 13 02 31 01 a4 06
+08:25:13.943 NOTIFY 2a9c len=14  98 03 96 01 16 1a 35 01 5e 26 ca 1c fe 10
+08:25:13.985 NOTIFY 2a9f len=3   20 02 01
+```
+
+The weigh-in arrived as ordinary SIG indications — Weight Measurement (flags
+`0e`: kg, timestamp, user index, BMI + height): **88.37 kg, 2026-09-19
+08:24:19, user 2**, BMI 30.5, height 170.0; Body Composition (flags `0398`):
+fat 40.6 %, BMR 6678 kJ, muscle 30.9 %, soft lean 49.11 kg, water 36.85 kg,
+impedance 435.0 Ω — ~1 s after the consent write and **before** the consent
+response. `0x000b` for slot 2 read `0a 45 96 01` afterwards: 88.37 / 40.6,
+the same reading. A second consent on slot 2 delivered nothing: **stored
+measurements are handed over exactly once, on the consent that follows them.**
+
+So: **a weigh-in taken while the phone is asleep is not lost by the scale.**
+It is delivered on the next consent for that user, through the two
+characteristics Bascule already decodes — provided their indications are
+enabled *before* the consent write. Bascule enabled them *after* (the
+`TODO(WP-10)` in `GattSession.awaitNonWaitDirective` said as much), so every
+such delivery went into the void. That is the most likely fate of the
+2026-09-16 07:26 `MISSED` weigh-in. Fixed in
+`fix/receive-stored-measurement-on-consent`.
+
+### The scale's user recognition is now a Bascule problem
+
+P2 exists only because the Aug-22 probe registered it. The scale assigns an
+unattended weigh-in to whichever user's last weight is closest, and after
+today P2's reference (88.37) is closer to the user than P1's (92.74). Bascule
+consents only as P1, so a weigh-in the scale files under P2 is never
+delivered to it. The fix is to delete P2 from the scale: UDS UCP opcode
+`0x03` (Delete User Data) removes the *currently consented* user — consent as
+slot 2, then send it. hw-probe gained `deleteuser` for this; it has not been
+run (the user's call; it is destructive on the scale).
+
+### Costs
+
+One weigh-in (88.37 kg, filed under P2), not delivered to Bascule by design
+of the experiment; it is fully decoded above if it is ever wanted.
+
 ## Tooling used
 
 `tools/hw-probe/` — a standalone, throwaway Android app (not part of the
