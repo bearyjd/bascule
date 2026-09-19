@@ -106,10 +106,12 @@ Ignored | RegistrationResult(scaleIndex, success) | ConsentResult(success)
 new cases. It modelled a single undifferentiated "the handshake was acked", and
 under ADR-007 there is no such event: there are two acks, they carry different
 payloads (`[0x20, 0x01, 0x01, scaleIndex]` vs `[0x20, 0x02, 0x01]`), and they
-drive different follow-on actions (send Consent vs. subscribe). Keeping it would
+drive different follow-on actions (send Consent vs. listen). Keeping it would
 leave a case in a sealed type that nothing can ever construct, and the E6 gate
-that `01-plan.md` WP-07 exists to enforce — "do not subscribe before the
-handshake is acknowledged" — would be checking the wrong predicate.
+that `01-plan.md` WP-07 exists to enforce — "do not listen before the
+handshake is acknowledged" (the CCCDs themselves are enabled before the first
+handshake write, see `00-design.md` §2.1) — would be checking the wrong
+predicate.
 
 `Live` is kept despite the BF720 never emitting it. That is a deliberate
 asymmetry with `InitAcknowledged`: `InitAcknowledged` is *wrong* (it describes an
@@ -149,7 +151,7 @@ the "Status: complete" banner is true of the whole type:
 |---|---|
 | `val id: String` | Decoder identity, used by `MeasurementCorrelator` and diagnostics |
 | `val requiredServices: Set<UUID>` | Dispatch and discovery check |
-| `val measurementCharacteristics: Set<UUID>` | What the session subscribes to once the handshake completes |
+| `val measurementCharacteristics: Set<UUID>` | What the session subscribes to before the first handshake write (after the UCP CCCD), so a weigh-in the scale stored and delivers on the Consent write itself is not lost — `03-hardware-validation.md`, "Consented reads, 2026-09-19" |
 | `fun openingSequence(discovered, nowMillis): List<GattOp>` | Ops run after discovery, **before** the handshake — the SIG Current Time write, so the scale's own frame timestamps are trustworthy. Best-effort: the session waits for each write's transport-level completion but never aborts over it, since an unset RTC yields a garbage `scaleTimestampMillis`, not a failed weigh-in. `nowMillis` is passed in because reading the wall clock is I/O the decoder is otherwise free of |
 | `val handshakeSawUnverifiableResponse: Boolean` | True once the decoder has returned `Wait` *specifically* because a response could not be ruled out as a stale answer to a superseded write — never merely because an event was irrelevant. Read-only observation with no effect on control flow: the session reads it only when its E6 ack ladder is about to exhaust, so the abort can say "a response arrived but couldn't be attributed" rather than the misleading "no ack at all" |
 | `fun teardownSequence(): List<GattOp>` | Best-effort clean shutdown ops; failures here never fail a session |

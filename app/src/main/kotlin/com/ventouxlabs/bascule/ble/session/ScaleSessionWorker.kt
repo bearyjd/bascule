@@ -423,9 +423,13 @@ internal fun cooldownDispositionFor(reason: SessionExitReason): CooldownDisposit
     SessionExitReason.STALE_ADVERTISEMENT -> CooldownDisposition.RELEASE
 
     // Reconnect promptly and keep listening. The BF720 advertises whenever it
-    // is awake and only ever indicates a *live* weigh-in to an already
-    // consented client, so coverage — the fraction of time a session is
-    // connected — is what decides whether stepping on works.
+    // is awake, and a *live* weigh-in reaches only a client that is already
+    // consented and subscribed at the time, so coverage — the fraction of
+    // time a session is connected — is what decides whether stepping on
+    // works. (A weigh-in taken with no client connected is stored and
+    // delivered once on that user's next Consent; `GattSession` enables the
+    // measurement CCCDs before the handshake to receive it. That does not
+    // change this disposition: the live case still needs the phone present.)
     SessionExitReason.IDLE -> CooldownDisposition.PAUSE
 
     // A reading is already stored; a second session would only re-capture it.

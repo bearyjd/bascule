@@ -122,8 +122,16 @@ class ScaleSessionContractTest {
         )
     }
 
+    /**
+     * The BF720 delivers a weigh-in it stored while no phone was connected
+     * exactly once, on the next Consent for that user, ~1 s after the write
+     * and before the consent response (`03-hardware-validation.md`, "Consented
+     * reads, 2026-09-19"). An indication on a CCCD that is not yet enabled is
+     * the measurement subscriptions must be in place before the first UCP
+     * write — not, as the design first had it, only once consent is granted.
+     */
     @Test
-    fun theSessionSubscribesOnlyAfterConsentIsGranted() = runTest {
+    fun theSessionSubscribesBeforeTheHandshakeSoAStoredWeighInIsNotLost() = runTest {
         val transport = scale()
         session(transport).run()
 
@@ -133,22 +141,21 @@ class ScaleSessionContractTest {
         }
         assertTrue("the session never sent Consent", consentIndex >= 0)
         assertTrue(
-            "measurement indications must be enabled, and only after consent",
+            "measurement indications must be enabled",
             SigWeightProfile.WEIGHT_MEASUREMENT in transport.subscribedCharacteristics,
         )
 
-        // Membership alone doesn't prove *order* — the Consent write is always
-        // the last UCP write in a granted handshake, so its call-order position
-        // must precede the subscribe call, not merely both have happened.
-        val lastUcpWriteOrderIndex = transport.callOrder.indexOfLast {
+        // Membership alone doesn't prove *order*: the subscribe must precede
+        // the first UCP write in call order, not merely both have happened.
+        val firstUcpWriteOrderIndex = transport.callOrder.indexOfFirst {
             it == "write:${SigWeightProfile.USER_CONTROL_POINT}"
         }
         val subscribeOrderIndex = transport.callOrder.indexOfFirst {
             it == "subscribe:${SigWeightProfile.WEIGHT_MEASUREMENT}"
         }
         assertTrue(
-            "subscribe must come after the granting Consent write, got ${transport.callOrder}",
-            lastUcpWriteOrderIndex in 0 until subscribeOrderIndex,
+            "subscribe must come before the first UCP write, got ${transport.callOrder}",
+            subscribeOrderIndex in 0 until firstUcpWriteOrderIndex,
         )
     }
 

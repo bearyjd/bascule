@@ -99,11 +99,12 @@ flowchart TD
     D -->|enqueue expedited| E[ScaleSessionWorker<br/>setForeground: connectedDevice]
     E --> F[GattSession state machine]
     F -->|GattOps| G[GattTransport → BluetoothGatt]
-    G --> HS[UDS handshake on 2A9F<br/>Register New User → Consent<br/>ADR-007]
+    G --> SUB[Enable indications: 2A9F,<br/>then 2A9D + 2A9C<br/>indications, not notifications]
+    SUB --> HS[UDS handshake on 2A9F<br/>Register New User → Consent<br/>ADR-007]
     CS[(EncryptedConsentStore<br/>scaleIndex + consentCode)] <--> HS
     HS -->|registration or consent refused| Y[HandshakeFailed<br/>E6 / E19 — never a silent E7]
-    HS -->|consent granted| SUB[Subscribe 2A9D + 2A9C<br/>indications, not notifications]
-    SUB -->|indication bytes| H[BeurerDecoder]
+    HS -->|consent granted| LISTEN[Listen — a weigh-in the scale stored<br/>while no phone was connected arrives<br/>on the Consent write itself]
+    LISTEN -->|indication bytes| H[BeurerDecoder]
     H --> CORR[MeasurementCorrelator<br/>Weight 2A9D + BodyComp 2A9C<br/>= one weigh-in, one Stable]
     CORR -->|DecodeEvent.Stable| U{User attribution<br/>§7}
     U -->|Branch A index match, or<br/>Branch B Δ ≤ 1.5 kg| I[(Room: ReadingEntity<br/>status = PENDING)]
@@ -159,7 +160,7 @@ stateDiagram-v2
     DISCOVERING --> BONDING: E5 insufficient authentication
     BONDING --> CONNECTING: BOND_BONDED
     BONDING --> TEARDOWN: E5b bond failed / timeout
-    HANDSHAKING --> SUBSCRIBED: init ack received
+    HANDSHAKING --> SUBSCRIBED: consent granted (CCCDs already on)
     HANDSHAKING --> TEARDOWN: E6 no ack after retries
     SUBSCRIBED --> MEASURING: first measurement frame
     SUBSCRIBED --> TEARDOWN: E7 no notification within 45 s
@@ -171,6 +172,24 @@ stateDiagram-v2
     EMITTED --> TEARDOWN: E9 duplicate stable frame (latched) /<br/>E18 unpairable frame /<br/>session complete / idle 10 s
     TEARDOWN --> SCAN_ARMED: gatt.close(), release wakelock,<br/>stopForeground
 ```
+
+> **Order correction (`03-hardware-validation.md`, "Consented reads,
+> 2026-09-19").** Every CCCD — the User Control Point's and both measurement
+> characteristics' — is enabled in `HANDSHAKING` *before* the first UCP
+> write, not on entry to `SUBSCRIBED` as this section first had it. The BF720
+> stores a weigh-in taken while no phone was connected under the user it
+> recognised and delivers it exactly once, on that user's next Consent: the
+> `2A9D` and `2A9C` indications land ~1 s after the Consent write, *ahead of*
+> the consent response, and are cleared as they go. An indication on a CCCD
+> that is still off is simply lost, which is what the original order did to
+> that weigh-in. `SUBSCRIBED` therefore means *consented and listening*:
+> measurement frames that arrive during the handshake are held, never decoded
+> there (the handshake would answer a `Stable` with `Wait` and drop it), and
+> are decoded on entering `SUBSCRIBED` before the session waits for a live
+> weigh-in. A held `2A9D` whose `2A9C` has not yet arrived enters E17's
+> correlation window directly, as a live weight frame would, not E7's long
+> wait. What remains gated on consent is the listening itself, so E6/E7 keep
+> their separation.
 
 > **Retired edge — `EMITTED --> MEASURING: second distinct userIndex (max 2)`.**
 > Removed under O-03: a Body Composition frame identifies neither its user nor
@@ -224,8 +243,8 @@ Every edge has a concrete number and a concrete action.
 | **E4** | Service discovery timeout or required service absent | no `onServicesDiscovered` within **5 s**, or service UUID not in result | `TEARDOWN`, outcome `Incompatible`. Counter `incompatibleStreak`; at **3** consecutive, ConfigScreen shows "Scale not recognised — this device does not expose the Beurer service" and scan arming is suspended until the user re-selects a device. Prevents an infinite wake-connect-fail battery loop against a neighbour's device that matched the filter. |
 | **E5** | `GATT_INSUFFICIENT_AUTHENTICATION` / `_ENCRYPTION` on read/write | GATT status 5 / 15 | Call `createBond()`, wait max **30 s** for `BOND_BONDED`, then one full reconnect. |
 | **E5b** | Bond fails or times out | `BOND_NONE` after request, or 30 s elapsed | `TEARDOWN`. Persistent notification: "Pair the BF720 in Android Bluetooth settings, then step on the scale again." Not retried automatically — bonding needs user interaction. |
-| **E6** | Handshake step never acknowledged | no User Control Point indication within **3 s** of a Register or Consent write | Re-issue that write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to subscribe: **`SUBSCRIBED` is gated on `DecodeEvent.ConsentResult(success = true)`**, because ADR-007 established that an unconsented subscriber receives nothing at all. Without that gate a lost consent would present as 45 s of silence (E7) rather than as the handshake failure it is. |
-| **E7** | Indications never arrive **after a successful consent** | no measurement frame within **45 s** of `SUBSCRIBED` | `TEARDOWN`, outcome `NoMeasurement`, counter `noMeasurement`. 45 s covers weight stabilization (~5–15 s) plus the BIA impedance pass, with margin for a user who steps on, off, and back on. Because E6 now gates subscription on consent, E7 no longer absorbs consent failures — but it still absorbs a **starving connect** under Atlas contention (§8.3), so **3** consecutive `NoMeasurement` sessions raise an E4-style notification suggesting re-pairing, rather than repeating silently forever. |
+| **E6** | Handshake step never acknowledged | no User Control Point indication within **3 s** of a Register or Consent write | Re-issue that write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to listen: **`SUBSCRIBED` is gated on `DecodeEvent.ConsentResult(success = true)`**, because ADR-007 established that an unconsented subscriber receives nothing at all. (The CCCDs themselves are enabled *before* the first UCP write — see the order correction under §2.1 — because a weigh-in the scale stored is delivered on the Consent write itself and is lost if they are still off; enabling them is not what this gate protects.) Without that gate a lost consent would present as 45 s of silence (E7) rather than as the handshake failure it is. |
+| **E7** | Indications never arrive **after a successful consent** | no measurement frame within **45 s** of `SUBSCRIBED` | `TEARDOWN`, outcome `NoMeasurement`, counter `noMeasurement`. 45 s covers weight stabilization (~5–15 s) plus the BIA impedance pass, with margin for a user who steps on, off, and back on. Because E6 gates listening on consent, E7 no longer absorbs consent failures — but it still absorbs a **starving connect** under Atlas contention (§8.3), so **3** consecutive `NoMeasurement` sessions raise an E4-style notification suggesting re-pairing, rather than repeating silently forever. |
 | **E8** | Disconnect mid-measurement, before stability | `onConnectionStateChange(DISCONNECTED)` while in `MEASURING` | Partial data is **discarded, never persisted** (an unstable weight is not a measurement). Exactly **one** reconnect attempt within a **5 s** window — the scale is often still powered. If it fails, `TEARDOWN` with `Missed(DROPPED)`. |
 | **E9** | Duplicate stable frames in one session | a frame whose identity `(userIndex, scale timestamp, raw weight)` was already emitted | In-session latch, now owned by `MeasurementCorrelator` rather than `GattSession` (`02-interface-revision.md` §3): **one emission per session, full stop**. Counter `duplicateFramesSuppressed`; nothing is written to Room. The original "at most 2 distinct userIndexes" is retired for this decoder — see the note under §2.1's diagram. Cross-session duplicates are caught separately by the persistence dedup (§3.3). |
 | **E10** | Session worker not runnable in time | `now - enqueuedAt > 20 s` at worker start | Abort before connecting; `Missed(QUOTA)`; see §2.2. |
@@ -281,7 +300,7 @@ Phase 3.
 | Service discovery | 5 s | `discoverServices()` |
 | Bond wait | 30 s | `createBond()` |
 | Handshake ack (Register or Consent) | 3 s | each User Control Point write |
-| First indication | 45 s | subscribe |
+| First indication | 45 s | consent granted (entry to `SUBSCRIBED`; the CCCDs were enabled before the handshake — see §2.1) |
 | **Body-composition correlation (E17)** | **4 s** | **the buffered Weight Measurement** — expiry flushes a weight-only reading, it does not discard |
 | Post-emission idle | 10 s | `EMITTED` |
 | **Hard session ceiling** | **90 s** | worker start — unconditional teardown, guards against every timer above being defeated by a device that keeps the connection alive but sends nothing useful. **The bond wait is excluded** — see below |

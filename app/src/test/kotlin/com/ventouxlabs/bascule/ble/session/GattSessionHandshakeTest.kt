@@ -7,14 +7,18 @@ import com.ventouxlabs.bascule.ble.fake.FakeGattTransport
 import com.ventouxlabs.bascule.ble.fake.InMemoryConsentStore
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
+import java.util.UUID
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -42,14 +46,55 @@ class GattSessionHandshakeTest {
         transport: FakeGattTransport,
         consentStore: InMemoryConsentStore = InMemoryConsentStore(),
         diagnostics: InMemoryDiagnosticsCounters = InMemoryDiagnosticsCounters(),
+        stopAfterHandshake: Boolean = false,
     ) = GattSession(
         transport = transport,
         decoder = BeurerDecoder(),
         consentStore = consentStore,
         deviceAddress = DEVICE_ADDRESS,
         diagnostics = diagnostics,
+        stopAfterHandshake = stopAfterHandshake,
         clock = { Bf720Capture.expectedTimestampMillis },
     )
+
+    /** A scale this phone has already registered with, so the handshake goes straight to Consent. */
+    private fun storedCredential(): InMemoryConsentStore = InMemoryConsentStore().apply {
+        save(DEVICE_ADDRESS, ScaleCredential(scaleIndex = Bf720Capture.EXPECTED_USER_INDEX, consentCode = 0x1234))
+    }
+
+    /**
+     * A scale whose Consent writes are never answered automatically: the test
+     * scripts the stored weigh-in and the consent response by hand, so it
+     * controls exactly when each lands. Register is answered as usual.
+     */
+    private fun scaleAnsweringConsentByHand(): FakeGattTransport = consentingScale { opcode ->
+        if (opcode == SigWeightProfile.UCP_REGISTER_NEW_USER) Bf720Capture.registrationSuccess() else null
+    }
+
+    /**
+     * Delivers a weigh-in the BF720 took while no phone was connected, the way
+     * the scale does (`03-hardware-validation.md`, "Consented reads,
+     * 2026-09-19"): stored under the user it recognised and indicated exactly
+     * once, ~1 s after that user's Consent write and *before* the consent
+     * response — and, like any indication, only on a CCCD that is already
+     * enabled. A frame indicated while its CCCD is off is simply gone, which
+     * this models by checking the subscription table at delivery time. Call
+     * with the Consent write already out; the consent response is the caller's.
+     */
+    private fun TestScope.deliverStoredWeighIn(
+        transport: FakeGattTransport,
+        frames: List<Pair<UUID, ByteArray>> = STORED_WEIGH_IN,
+    ) {
+        advanceTimeBy(STORED_DELIVERY_DELAY_MILLIS)
+        indicateOnEnabledCccds(transport, frames)
+        runCurrent()
+    }
+
+    private fun indicateOnEnabledCccds(transport: FakeGattTransport, frames: List<Pair<UUID, ByteArray>>) {
+        for ((char, value) in frames) {
+            if (char in transport.subscribedCharacteristics) transport.indicate(char, value)
+        }
+    }
 
     /** A scale that answers Register+Consent and consents. */
     private fun consentingScale(onUcpWrite: (Int?) -> ByteArray?): FakeGattTransport =
@@ -217,18 +262,236 @@ class GattSessionHandshakeTest {
         assertTrue("UCP subscription must complete before Register/Consent", subscription < firstWrite)
     }
 
-    /** The E6 gate that exists in prose only until this test enforces it (O-11 item 1). */
+    /**
+     * The scale's one delivery of a stored weigh-in lands ~1 s after the Consent
+     * write, so the measurement CCCDs must already be enabled by then — after
+     * the UCP CCCD (which has to precede the first UCP write) and before that
+     * first write goes out. Order pinned on the transport, not membership.
+     */
     @Test
-    fun doesNotSubscribeBeforeConsentIsGranted() = runTest {
+    fun measurementIndicationsAreEnabledAfterTheUcpCccdAndBeforeTheFirstHandshakeWrite() = runTest {
+        val transport = happyPathScale()
+
+        session(transport).run()
+
+        val order = transport.callOrder
+        val ucpSubscription = order.indexOf("subscribe:${SigWeightProfile.USER_CONTROL_POINT}")
+        val firstWrite = order.indexOf("write:${SigWeightProfile.USER_CONTROL_POINT}")
+        for (char in listOf(SigWeightProfile.WEIGHT_MEASUREMENT, SigWeightProfile.BODY_COMPOSITION_MEASUREMENT)) {
+            val subscription = order.indexOf("subscribe:$char")
+            assertTrue("$char was never subscribed, got $order", subscription >= 0)
+            assertTrue("$char must be subscribed after the UCP CCCD, got $order", subscription > ucpSubscription)
+            assertTrue("$char must be subscribed before the first UCP write, got $order", subscription < firstWrite)
+        }
+    }
+
+    /**
+     * The one that pins the whole change: a weigh-in taken while no phone was
+     * connected reaches the phone on the next consent. Before this, the frames
+     * arrived while the session was still waiting for the consent response and
+     * were decoded on the spot — the decoder answered `Wait`, the `Stable`
+     * reading was dropped, and the session sat out the measurement window for a
+     * weigh-in it had already been handed.
+     */
+    @Test
+    fun aWeighInStoredOnTheScaleIsDeliveredOnConsentAndCaptured() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, storedCredential()).run() }
+
+        runCurrent() // the Consent write is out
+        deliverStoredWeighIn(transport)
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+        val reading = requireNotNull((outcome as? SessionOutcome.Completed)?.reading) {
+            "the stored weigh-in must become this session's reading, got $outcome"
+        }
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+        assertEquals(Bf720Capture.EXPECTED_USER_INDEX, reading.userIndex)
+        assertEquals(
+            "the body-composition half must be paired, not flushed weight-only",
+            Bf720Capture.EXPECTED_BODY_FAT_PCT,
+            reading.bodyFatPct ?: 0.0,
+            TOLERANCE,
+        )
+        assertTrue(
+            "captured from the deferred frames, never by waiting out the measurement window",
+            currentTime < SessionBudget.FIRST_INDICATION_TIMEOUT.inWholeMilliseconds,
+        )
+    }
+
+    /**
+     * A stored-measurement frame arriving mid-handshake is not the ack the
+     * write is waiting for, and must neither satisfy nor extend E6: the write
+     * is reissued on the same 3 s timer as if nothing had arrived, and the
+     * frames deferred across that reissue still become the reading. The
+     * frames land ~1 s in, as on hardware, so "reissued at exactly 3 s" also
+     * rules out a timer that restarts on the frame (which would fire at 4 s).
+     */
+    @Test
+    fun aStoredMeasurementFrameIsNotAnAckAndDoesNotConsumeAnE6Retry() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, storedCredential()).run() }
+
+        runCurrent()
+        assertEquals(1, ucpWriteCount(transport))
+        // Consent #1's response is lost; only the stored weigh-in arrives.
+        deliverStoredWeighIn(transport)
+
+        advanceTimeBy(SessionBudget.HANDSHAKE_ACK_TIMEOUT.inWholeMilliseconds - STORED_DELIVERY_DELAY_MILLIS - 1)
+        runCurrent()
+        assertEquals(
+            "the frames must not read as the ack — the write is still outstanding at 2999 ms",
+            1,
+            ucpWriteCount(transport),
+        )
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals("E6 reissues at 3000 ms, exactly as if no frame had arrived", 2, ucpWriteCount(transport))
+
+        // The reissue is answered; nothing stored is left to deliver.
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+        val outcome = deferred.await()
+        val reading = requireNotNull((outcome as? SessionOutcome.Completed)?.reading) {
+            "frames deferred across the reissue must still be delivered after the ack, got $outcome"
+        }
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+    }
+
+    /**
+     * The narrow race the drain before a reissue used to lose: a frame that is
+     * *in the channel* — indicated, but not yet received — at the instant the
+     * ack timer fires. `drainStaleEvents` exists to discard responses to the
+     * write being superseded; a measurement frame is never stale in that
+     * sense, and the session's own drain now keeps it.
+     */
+    @Test
+    fun aStoredMeasurementFrameLandingAsTheAckTimerFiresIsKeptNotDrained() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, storedCredential()).run() }
+
+        runCurrent()
+        // Clock at the timer's instant, the timeout task pending but not yet
+        // run; the frames go in ahead of it in the same instant.
+        advanceTimeBy(SessionBudget.HANDSHAKE_ACK_TIMEOUT.inWholeMilliseconds)
+        assertEquals("precondition: the reissue must not have gone out yet", 1, ucpWriteCount(transport))
+        indicateOnEnabledCccds(transport, STORED_WEIGH_IN)
+        runCurrent()
+        assertEquals("the reissue must have fired with the frames in the channel", 2, ucpWriteCount(transport))
+
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+        val outcome = deferred.await()
+        val reading = requireNotNull((outcome as? SessionOutcome.Completed)?.reading) {
+            "a frame in the channel at the timer's instant must not be drained away, got $outcome"
+        }
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+    }
+
+    /**
+     * Only the weight half arrives during the handshake and its body-composition
+     * pair follows just after the consent response — the session must pair
+     * them, and end well inside the correlation window plus post-emission idle,
+     * never sit out the first-indication wait.
+     */
+    @Test
+    fun aDeferredWeightFramePairsWithTheBodyCompositionThatFollowsTheConsentResponse() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, storedCredential()).run() }
+
+        runCurrent()
+        deliverStoredWeighIn(transport, STORED_WEIGH_IN.take(1))
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceTimeBy(PAIR_AFTER_CONSENT_MILLIS)
+        transport.indicate(SigWeightProfile.BODY_COMPOSITION_MEASUREMENT, Bf720Capture.BODY_COMPOSITION_MEASUREMENT)
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+        val reading = requireNotNull((outcome as? SessionOutcome.Completed)?.reading) { "got $outcome" }
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+        assertEquals(
+            "the late body-composition half must be paired with the deferred weight",
+            Bf720Capture.EXPECTED_BODY_FAT_PCT,
+            reading.bodyFatPct ?: 0.0,
+            TOLERANCE,
+        )
+        assertTrue(
+            "ended at ${currentTime}ms: the pair landed, so only the post-emission idle should remain",
+            currentTime <= STORED_DELIVERY_DELAY_MILLIS + PAIR_AFTER_CONSENT_MILLIS +
+                SessionBudget.POST_EMISSION_IDLE.inWholeMilliseconds,
+        )
+    }
+
+    /**
+     * E17 for a deferred weight: its pair is owed the 4 s correlation window,
+     * measured from the weight the session already holds — not E7's long
+     * first-indication wait, which is for a weigh-in that has not started.
+     */
+    @Test
+    fun aDeferredWeightFrameWhosePairNeverComesIsFlushedAtTheCorrelationBudget() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, storedCredential()).run() }
+
+        runCurrent()
+        deliverStoredWeighIn(transport, STORED_WEIGH_IN.take(1))
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+        val reading = requireNotNull((outcome as? SessionOutcome.Completed)?.reading) { "got $outcome" }
+        assertEquals(Bf720Capture.EXPECTED_WEIGHT_KG, reading.weightKg, TOLERANCE)
+        assertNull("no body-composition frame ever arrived", reading.bodyFatPct)
+        assertEquals(
+            "flushed at the correlation budget, not the first-indication timeout",
+            STORED_DELIVERY_DELAY_MILLIS + SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW.inWholeMilliseconds,
+            currentTime,
+        )
+    }
+
+    /**
+     * A registration-only session stops at the handshake with no reading
+     * (`ScaleSessionContractTest.aRegistrationOnlySessionCompletesWithNoReading`),
+     * and that holds even if frames arrive during it — a just-registered user
+     * has nothing stored against them, so a frame here is a log line, not a
+     * reading.
+     */
+    @Test
+    fun aRegistrationOnlySessionStillCompletesWithNoReadingWhenFramesArriveDuringTheHandshake() = runTest {
+        val transport = scaleAnsweringConsentByHand()
+        val deferred = async { session(transport, stopAfterHandshake = true).run() }
+
+        runCurrent() // Register answered on the spot; the Consent write is out
+        deliverStoredWeighIn(transport)
+        transport.indicate(SigWeightProfile.USER_CONTROL_POINT, Bf720Capture.consentSuccess())
+        advanceUntilIdle()
+
+        val outcome = deferred.await()
+        assertTrue("expected Completed, got $outcome", outcome is SessionOutcome.Completed)
+        assertNull("registration stops at the handshake", (outcome as SessionOutcome.Completed).reading)
+    }
+
+    /**
+     * The E6 gate (O-11 item 1), restated for where it now lives. Enabling the
+     * measurement CCCDs early is what lets a stored weigh-in through; *listening*
+     * is still gated on `ConsentResult(success = true)`. A lost consent must
+     * therefore surface as the handshake failure it is, inside E6's own ack
+     * ladder — never as a measurement window of silence.
+     */
+    @Test
+    fun aLostConsentIsAHandshakeFailureNotAMeasurementWindowOfSilence() = runTest {
         val transport = consentingScale { opcode ->
             if (opcode == SigWeightProfile.UCP_REGISTER_NEW_USER) Bf720Capture.registrationSuccess() else null
         }
 
-        session(transport).run()
+        val outcome = session(transport).run()
 
+        assertTrue("expected HandshakeFailed, got $outcome", outcome is SessionOutcome.HandshakeFailed)
         assertTrue(
-            "the UCP indication is required to receive consent, but measurement characteristics stay gated",
-            transport.subscribedCharacteristics.keys == setOf(SigWeightProfile.USER_CONTROL_POINT),
+            "the session must end inside E6's ack ladder, never reach the measurement wait",
+            currentTime < SessionBudget.FIRST_INDICATION_TIMEOUT.inWholeMilliseconds,
         )
     }
 
@@ -624,5 +887,18 @@ class GattSessionHandshakeTest {
 
     private companion object {
         const val DEVICE_ADDRESS = "E7:DB:51:F1:36:91"
+        const val TOLERANCE = 1e-6
+
+        /** The stored pair, Weight first, as the BF720 indicates it. */
+        val STORED_WEIGH_IN: List<Pair<UUID, ByteArray>> = listOf(
+            SigWeightProfile.WEIGHT_MEASUREMENT to Bf720Capture.WEIGHT_MEASUREMENT,
+            SigWeightProfile.BODY_COMPOSITION_MEASUREMENT to Bf720Capture.BODY_COMPOSITION_MEASUREMENT,
+        )
+
+        /** Observed: the stored pair lands ~1.15 s after the Consent write, ahead of its response. */
+        const val STORED_DELIVERY_DELAY_MILLIS = 1_000L
+
+        /** A body-composition half that trails the consent response; inside E17's window, not immediate. */
+        const val PAIR_AFTER_CONSENT_MILLIS = 500L
     }
 }

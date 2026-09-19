@@ -66,13 +66,19 @@ object SessionBudget {
      * Was 45 s, on the assumption that a session begins when the user steps
      * on. Hardware showed the opposite: the BF720 advertises continuously
      * while awake, so sessions begin whenever the phone happens to reconnect,
-     * and it only ever indicates a *live* weigh-in to a client that is already
-     * consented and subscribed — nothing stored is forwarded on the SIG path.
-     * A 45 s listen every few minutes therefore made capture a lottery on
-     * whether the user stepped on inside the window (observed: 105 straight
-     * idle sessions, one capture ever). Coverage — the fraction of time a
-     * session is connected — is what decides whether stepping on works, and
-     * the scale itself holds a link open for minutes.
+     * and a *live* weigh-in reaches only a client that is already consented
+     * and subscribed at the time. A 45 s listen every few minutes therefore
+     * made capture a lottery on whether the user stepped on inside the window
+     * (observed: 105 straight idle sessions, one capture ever). Coverage — the
+     * fraction of time a session is connected — is what decides whether
+     * stepping on works, and the scale itself holds a link open for minutes.
+     *
+     * A weigh-in taken with *no* client connected is not lost, though: the
+     * scale stores it under the user it recognised and delivers it once, on
+     * that user's next Consent, before the consent response
+     * (`03-hardware-validation.md`, "Consented reads, 2026-09-19") — which is
+     * why `GattSession` enables the measurement CCCDs before the handshake.
+     * This long listen covers the live case only.
      */
     val FIRST_INDICATION_TIMEOUT: Duration = 8.minutes
 
