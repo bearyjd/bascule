@@ -70,6 +70,13 @@ class FakeReadingDao(
         }
     }
 
+    /** Mirrors the live statement's narrowness: the wait goes, every other column on the row stays. */
+    override suspend fun makePendingDueNow() {
+        _rows.value = _rows.value.map {
+            if (it.status == ReadingStatus.PENDING) it.copy(nextAttemptMillis = null) else it
+        }
+    }
+
     override suspend fun blockAllPendingForAuth() {
         _rows.value = _rows.value.map {
             if (it.status == ReadingStatus.PENDING) it.copy(status = ReadingStatus.BLOCKED_AUTH) else it
