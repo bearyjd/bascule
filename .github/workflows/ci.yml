@@ -28,6 +28,14 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default is `tools platform-tools`. `tools` is the
+          # legacy SDK Tools package, which the SDK repository stopped
+          # serving between 2026-09-12 (last green run) and 2026-09-18, so
+          # sdkmanager exits 1 before Gradle runs. Nothing here needs it:
+          # the runner image carries the platforms and build-tools, and
+          # AGP resolves the rest.
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
