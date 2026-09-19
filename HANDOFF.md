@@ -74,8 +74,11 @@ with the phone at home, it is a different problem — look at the scale first.
 Everything above shipped: #20 (404 → transient), #21 (icons), #22
 (hw-probe `writeprop`/`readprop`, after a review round fixed a stuck
 standalone-read flag and an odd-length hex parse that silently changed the
-payload), #23 (CI). `main` is at `be10d11`, **714 tests**, detekt clean, CI
-green on the merge commit.
+payload), #23 (CI), #24 and #25 (below). `main` is at `be10d11`; **714 tests**
+and detekt clean locally on #25's rebased tree, and `main`'s own CI run on
+the merge commit is green. Stated precisely because #25 was merged before
+its post-rebase PR checks had registered — the `main` run is the evidence
+for the merged tree, not a PR check.
 
 **#23 was a runner-side break, not ours.** Every PR opened today failed in
 13–29 s inside `android-actions/setup-android@v3`: `Failed to find package
@@ -131,8 +134,9 @@ interleaving each time, not self-perpetuating. Pre-existing and unchanged:
 `BackOffDrain` parks one row and leaves the rest of the batch due, so a
 `Retry-After` that is really endpoint-wide is honoured per row.
 
-**The phone is now three fixes behind `main`.** It was unplugged before the
-`be10d11` build could be installed. `app/build/outputs/apk/debug/app-debug.apk`
+**The phone is behind `main` by #20, #24 and #25** (its 09-14 install already
+carries #21's icons). It was unplugged before the `be10d11` build could be
+installed. `app/build/outputs/apk/debug/app-debug.apk`
 is built from that commit — `adb install -r` it (debug signature, keeps data;
 never uninstall), relaunch, and confirm both scanners re-register. The
 hardware checks that matter, in order: (1) #25 — point the base URL at an
