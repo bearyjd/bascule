@@ -26,15 +26,16 @@ import kotlinx.coroutines.yield
  *
  * WP-06: `DISARMED` through `DISCOVERING`, plus teardown discipline (E1, E2,
  * E3, E4, E12, E15). WP-07 (this package) adds `DISCOVERING` → `SUBSCRIBED`:
- * the Current Time opening write (00-design.md §4.4), the UDS register/consent
- * handshake (E6, E19), and subscribing to the decoder's measurement
- * characteristics once consent is granted. WP-10 adds `MEASURING` → `EMITTED`.
+ * the Current Time opening write (00-design.md §4.4), subscribing to the UCP
+ * and the decoder's measurement characteristics, then the UDS register/consent
+ * handshake (E6, E19) — see [handshake] for why the measurement CCCDs precede
+ * it. WP-10 adds `MEASURING` → `EMITTED`.
  * Until that lands, a session that reaches `SUBSCRIBED` successfully still
  * reports [SessionOutcome.Missed] with [MissReason.NO_MEASUREMENT] — the same
  * outcome the earlier stub reported, so nothing downstream has to change shape
  * as later work packages land. See docs/prp/02-ci-notes.md.
  */
-// 24 small, single-purpose members, one per protocol step. Merging any of them
+// 29 small, single-purpose members, one per protocol step. Merging any of them
 // to reach the threshold of 20 would hide a distinct BLE failure edge inside a
 // larger function, in the one area validated against physical hardware.
 @Suppress("TooManyFunctions")
@@ -276,9 +277,14 @@ class GattSession(
 
     private enum class BondWait { Bonded, Refused, TimedOut, Dropped, AdapterOff }
 
-    private suspend fun awaitBond(events: Channel<TransportEvent>): BondWait {
+    private suspend fun awaitBond(
+        events: Channel<TransportEvent>,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>? = null,
+    ): BondWait {
         log("scale requested pairing; waiting up to ${SessionBudget.BOND_WAIT} for the user to accept")
-        val outcome = withTimeoutOrNull(SessionBudget.BOND_WAIT) { receiveBondOutcome(events) } ?: BondWait.TimedOut
+        val outcome = withTimeoutOrNull(SessionBudget.BOND_WAIT) {
+            receiveBondOutcome(events, deferredFrames)
+        } ?: BondWait.TimedOut
         log("pairing wait ended: $outcome")
         // A bond that landed is consumed: a later timeout is a plain timeout
         // again, not a second 30 s wait for a pairing that already happened.
@@ -287,7 +293,10 @@ class GattSession(
     }
 
     /** A function, not a lambda, for the reason [receiveSubscriptionOutcome] gives. */
-    private suspend fun receiveBondOutcome(events: Channel<TransportEvent>): BondWait {
+    private suspend fun receiveBondOutcome(
+        events: Channel<TransportEvent>,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>?,
+    ): BondWait {
         while (true) {
             when (val event = events.receive()) {
                 is TransportEvent.AdapterOff -> return BondWait.AdapterOff
@@ -296,8 +305,9 @@ class GattSession(
                     BOND_BONDED -> return BondWait.Bonded
                     BOND_NONE -> return BondWait.Refused
                 }
+                // Kept for the phase that can still use it, never decoded here.
+                is TransportEvent.CharacteristicChanged -> deferredFrames?.add(event)
                 is TransportEvent.ServicesDiscovered,
-                is TransportEvent.CharacteristicChanged,
                 is TransportEvent.WriteComplete,
                 is TransportEvent.SubscriptionEnabled,
                 is TransportEvent.MtuChanged,
@@ -309,8 +319,19 @@ class GattSession(
     /**
      * Drives `beginHandshake`/`onHandshakeEvent` (ADR-007, RISK-1) — one step
      * per acknowledging indication, gated on `DecodeEvent.ConsentResult(success
-     * = true)` rather than an undifferentiated ack (E6). Subscribes to the
-     * decoder's measurement characteristics only once `Complete` is reached.
+     * = true)` rather than an undifferentiated ack (E6).
+     *
+     * Every CCCD is enabled *before* the first UCP write, the measurement ones
+     * included. Found on the BF720 (`03-hardware-validation.md`, "Consented
+     * reads, 2026-09-19"): a weigh-in taken while no phone was connected is
+     * stored under the user the scale recognised and delivered exactly once,
+     * on that user's next Consent — the Weight and Body Composition
+     * indications land ~1 s after the write, *before* the consent response,
+     * and are cleared as they go. With the measurement CCCDs still off at
+     * that moment the scale's one delivery was lost, which is the likely
+     * cause of the 2026-09-16 `MISSED` weigh-in.
+     * Only *listening* stays gated on consent: a lost consent is still E6's
+     * `HandshakeFailed`, never a measurement window of silence.
      *
      * A mid-handshake disconnect that is *not* adapter-off (no dedicated edge
      * names this — E8 is MEASURING-only) is deliberately left to E6's own ack
@@ -324,15 +345,24 @@ class GattSession(
     @Suppress("ReturnCount")
     private suspend fun handshake(events: Channel<TransportEvent>, discovered: DiscoveredServices): SessionOutcome {
         var directive = decoder.beginHandshake(discovered, handshakeContext())
-        prepareHandshakeResponseChannel(events, directive)?.let { return it }
+        val deferredFrames = mutableListOf<TransportEvent.CharacteristicChanged>()
+        // Not `is Send`: a decoder whose first directive is `Complete` still
+        // needs its measurement CCCDs, or it would listen deaf.
+        if (directive !is HandshakeDirective.Abort && directive !is HandshakeDirective.Wait) {
+            prepareHandshakeResponseChannel(events, directive)?.let { return it }
+            subscribeMeasurementCharacteristics(events, deferredFrames)?.let { return it }
+        }
         while (true) {
             when (val current = directive) {
                 is HandshakeDirective.Send -> {
                     val write = current.op as? GattOp.Write
                         ?: return SessionOutcome.HandshakeFailed("handshake directive was not a Write")
-                    issueHandshakeWrite(events, write)
-                    when (val step = awaitHandshakeStep(events, write, current.expectAckWithin)) {
-                        HandshakeStep.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                    issueHandshakeWrite(events, write, deferredFrames)
+                    when (val step = awaitHandshakeStep(events, write, current.expectAckWithin, deferredFrames)) {
+                        HandshakeStep.AdapterOff -> {
+                            logDroppedFrames(deferredFrames)
+                            return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                        }
                         is HandshakeStep.Directive -> directive = step.directive
                     }
                 }
@@ -340,22 +370,42 @@ class GattSession(
                 HandshakeDirective.Wait ->
                     return SessionOutcome.HandshakeFailed("beginHandshake returned Wait with nothing sent")
 
-                is HandshakeDirective.Complete -> {
-                    current.credential?.let(::rememberCredential)
-                    log("handshake complete (consented); subscribing for measurement")
-                    if (stopAfterHandshake) return SessionOutcome.Completed(null)
-                    return subscribeAndMeasure(events)
-                }
+                is HandshakeDirective.Complete -> return completeHandshake(events, current, deferredFrames)
 
                 is HandshakeDirective.Abort -> {
                     if (current.registrationRejected) {
                         diagnostics.increment(DiagnosticsCounterKey.REGISTRATION_REJECTED)
                     }
                     log("handshake aborted: ${current.reason}")
+                    logDroppedFrames(deferredFrames)
                     return SessionOutcome.HandshakeFailed(current.reason)
                 }
             }
         }
+    }
+
+    /** Log only — whether to flush a stored weigh-in the handshake then failed under is a separate decision. */
+    private fun logDroppedFrames(deferredFrames: List<TransportEvent.CharacteristicChanged>) {
+        if (deferredFrames.isEmpty()) return
+        log("handshake failed; ${deferredFrames.size} measurement frame(s) delivered mid-handshake, dropped")
+    }
+
+    private suspend fun completeHandshake(
+        events: Channel<TransportEvent>,
+        complete: HandshakeDirective.Complete,
+        deferredFrames: List<TransportEvent.CharacteristicChanged>,
+    ): SessionOutcome {
+        complete.credential?.let(::rememberCredential)
+        if (!stopAfterHandshake) {
+            log("handshake complete (consented); listening for measurement")
+            return measureAfterHandshake(events, deferredFrames)
+        }
+        // A just-registered user has no weigh-in stored against them, so a
+        // frame here is worth a line in the log, not a behaviour.
+        if (deferredFrames.isNotEmpty()) {
+            log("registration complete; ${deferredFrames.size} measurement frame(s) arrived mid-handshake, ignored")
+        }
+        return SessionOutcome.Completed(null)
     }
 
     private suspend fun prepareHandshakeResponseChannel(
@@ -381,6 +431,30 @@ class GattSession(
         }
     }
 
+    /**
+     * After the UCP CCCD and before the first UCP write — see [handshake] for
+     * the hardware reason. Null once every measurement CCCD is enabled.
+     */
+    private suspend fun subscribeMeasurementCharacteristics(
+        events: Channel<TransportEvent>,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>,
+    ): SessionOutcome? {
+        for (characteristic in decoder.measurementCharacteristics) {
+            transport.enableIndications(characteristic)
+            when (awaitSubscription(events, characteristic, deferredFrames)) {
+                SubscriptionOutcome.Enabled -> Unit
+                SubscriptionOutcome.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
+                SubscriptionOutcome.PairingRequired -> return SessionOutcome.PairingRequired
+                SubscriptionOutcome.Dropped -> return reconnectOnce(events)
+                SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
+                SubscriptionOutcome.Failed -> return SessionOutcome.HandshakeFailed(
+                    "could not enable a measurement indication",
+                )
+            }
+        }
+        return null
+    }
+
     private suspend fun awaitSubscription(
         events: Channel<TransportEvent>,
         char: UUID,
@@ -392,7 +466,7 @@ class GattSession(
         if (first == SubscriptionOutcome.Bonding || (first == null && pairingObserved)) {
             // Same shape as the opening write: the CCCD write is held behind
             // pairing and completes on its own once the link is encrypted.
-            return when (awaitBond(events)) {
+            return when (awaitBond(events, deferredFrames)) {
                 BondWait.Bonded -> withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
                     receiveSubscriptionOutcome(events, char, deferredFrames)
                 } ?: SubscriptionOutcome.Failed.also { log("subscription to $char unanswered even after bonding") }
@@ -451,30 +525,37 @@ class GattSession(
      */
     private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff, Bonding, PairingRequired, Dropped }
 
-    private suspend fun subscribeAndMeasure(events: Channel<TransportEvent>): SessionOutcome {
-        val deferredFrames = mutableListOf<TransportEvent.CharacteristicChanged>()
-        for (characteristic in decoder.measurementCharacteristics) {
-            transport.enableIndications(characteristic)
-            when (awaitSubscription(events, characteristic, deferredFrames)) {
-                SubscriptionOutcome.Enabled -> Unit
-                SubscriptionOutcome.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
-                SubscriptionOutcome.PairingRequired -> return SessionOutcome.PairingRequired
-                SubscriptionOutcome.Dropped -> return reconnectOnce(events)
-                SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
-                SubscriptionOutcome.Failed -> return SessionOutcome.HandshakeFailed(
-                    "could not enable a measurement indication",
-                )
-            }
-        }
+    /**
+     * [deferredFrames] first: the scale's stored weigh-in, if it had one, was
+     * delivered during the handshake and is decoded only now, so the correlator
+     * sees it exactly once and in the one phase that can emit it. Every frame
+     * is fed, not just up to the first `Stable`, so the correlator's own
+     * duplicate/drop counters stay right (as `finishEmission` does). Then the
+     * ordinary wait — except that a deferred weight still awaiting its
+     * body-composition pair is owed E17's short window, exactly as a live one
+     * that has just arrived, not E7's long one.
+     */
+    private suspend fun measureAfterHandshake(
+        events: Channel<TransportEvent>,
+        deferredFrames: List<TransportEvent.CharacteristicChanged>,
+    ): SessionOutcome {
+        var stable: DecodeEvent.Stable? = null
         for (frame in deferredFrames) {
             val decoded = decoder.onNotification(frame.char, frame.value)
-            if (decoded is DecodeEvent.Stable) return measurement.finishEmission(events, decoded.reading)
+            log("deferred frame on ${frame.char} (${frame.value.size} bytes) -> ${decoded::class.simpleName}")
+            if (stable == null && decoded is DecodeEvent.Stable) stable = decoded
         }
+        stable?.let { return measurement.finishEmission(events, it.reading) }
         // Settling in to listen, possibly for minutes: drop to a low-duty
         // interval so the wait costs the scale's batteries as little as possible.
         transport.requestLowPower()
-        log("subscribed; listening for a weigh-in for up to ${SessionBudget.FIRST_INDICATION_TIMEOUT}")
-        return measurement.run(events)
+        val pairPending = deferredFrames.isNotEmpty() && decoder.hasPendingCorrelation
+        if (pairPending) {
+            log("deferred weight awaiting its pair for ${SessionBudget.BODY_COMPOSITION_CORRELATION_WINDOW}")
+        } else {
+            log("subscribed; listening for a weigh-in for up to ${SessionBudget.FIRST_INDICATION_TIMEOUT}")
+        }
+        return measurement.run(events, startInCorrelationWindow = pairPending)
     }
 
     /**
@@ -552,10 +633,42 @@ class GattSession(
      * stale (bounded by `SessionBudget.HANDSHAKE_ACK_MAX_RETRIES`) before
      * treating the next one as genuine.
      */
-    private suspend fun issueHandshakeWrite(events: Channel<TransportEvent>, op: GattOp.Write) {
+    private suspend fun issueHandshakeWrite(
+        events: Channel<TransportEvent>,
+        op: GattOp.Write,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>? = null,
+    ) {
         yield()
-        ladder.drainStaleEvents(events)
+        drainStaleHandshakeEvents(events, deferredFrames)
         transport.write(op.char, op.bytes)
+    }
+
+    /**
+     * [ConnectLadder.drainStaleEvents], minus one class of event. A measurement
+     * frame is never stale in the correlation-ID sense the drain exists for —
+     * it is the scale's stored weigh-in, whichever write it happened to land
+     * behind — so one sitting in the channel at the instant the ack timer
+     * fired is kept for [deferredFrames] rather than discarded with the rest.
+     * Adapter-off is put back and stops the drain, exactly as the ladder's does.
+     * A null [deferredFrames] (the opening write, before any consent) keeps the
+     * ladder's behaviour in full.
+     */
+    private fun drainStaleHandshakeEvents(
+        events: Channel<TransportEvent>,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>?,
+    ) {
+        while (true) {
+            val event = events.tryReceive().getOrNull() ?: return
+            when {
+                event is TransportEvent.AdapterOff -> {
+                    check(events.trySend(event).isSuccess) { "unreachable: UNLIMITED channel send failed" }
+                    return
+                }
+                event is TransportEvent.CharacteristicChanged && event.char in decoder.measurementCharacteristics ->
+                    deferredFrames?.add(event)
+                else -> Unit // superseded by the write about to go out
+            }
+        }
     }
 
     /**
@@ -564,15 +677,18 @@ class GattSession(
      * returns something other than [HandshakeDirective.Wait] — an unrelated
      * indication comes back as `Wait` from the decoder itself, so this loop
      * naturally keeps waiting rather than misreading it as the step's answer.
+     * A measurement frame is not fed through at all: it goes to
+     * [deferredFrames] and neither satisfies nor extends the ack timer.
      */
     private suspend fun awaitHandshakeStep(
         events: Channel<TransportEvent>,
         write: GattOp.Write,
         ackTimeout: Duration,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>,
     ): HandshakeStep {
         var retries = 0
         while (true) {
-            val step = withTimeoutOrNull(ackTimeout) { awaitNonWaitDirective(events) }
+            val step = withTimeoutOrNull(ackTimeout) { awaitNonWaitDirective(events, deferredFrames) }
             when {
                 step == null -> {
                     // E6: no ack within timeout — re-issue the same write, max 2 retries.
@@ -580,7 +696,7 @@ class GattSession(
                         return HandshakeStep.Directive(HandshakeDirective.Abort(ackExhaustedReason()))
                     }
                     retries++
-                    issueHandshakeWrite(events, write)
+                    issueHandshakeWrite(events, write, deferredFrames)
                 }
 
                 else -> return step
@@ -605,20 +721,15 @@ class GattSession(
         }
     }
 
-    private suspend fun awaitNonWaitDirective(events: Channel<TransportEvent>): HandshakeStep {
+    private suspend fun awaitNonWaitDirective(
+        events: Channel<TransportEvent>,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>,
+    ): HandshakeStep {
         while (true) {
             when (val event = events.receive()) {
                 is TransportEvent.AdapterOff -> return HandshakeStep.AdapterOff
-                is TransportEvent.CharacteristicChanged -> {
-                    // TODO(WP-10): a measurement indication cannot reach here on
-                    //  real hardware (indications aren't enabled until consent
-                    //  is granted), but if that ever changes, decoding it here
-                    //  primes the correlator with a frame this session-phase
-                    //  will never pair or flush.
-                    val decoded = decoder.onNotification(event.char, event.value)
-                    val next = decoder.onHandshakeEvent(decoded)
-                    if (next !is HandshakeDirective.Wait) return HandshakeStep.Directive(next)
-                }
+                is TransportEvent.CharacteristicChanged ->
+                    advanceHandshake(event, deferredFrames)?.let { return HandshakeStep.Directive(it) }
                 is TransportEvent.ConnectionStateChanged,
                 is TransportEvent.ServicesDiscovered,
                 is TransportEvent.WriteComplete,
@@ -628,6 +739,27 @@ class GattSession(
                 -> continue // WriteComplete and other transport plumbing, not relevant here
             }
         }
+    }
+
+    /**
+     * Null when the frame moved the handshake nowhere. Measurement frames can
+     * and do arrive here: they are the scale's stored weigh-in, delivered on
+     * the Consent write and ahead of its response (see [handshake]). Deferred,
+     * not decoded — decoding now would hand the correlator a `Stable` that
+     * this phase answers with `Wait` and drops. The correlator sees them once
+     * the handshake is complete. Everything else is a UCP response and goes
+     * through the decoder as before.
+     */
+    private fun advanceHandshake(
+        event: TransportEvent.CharacteristicChanged,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>,
+    ): HandshakeDirective? {
+        if (event.char in decoder.measurementCharacteristics) {
+            deferredFrames += event
+            return null
+        }
+        val next = decoder.onHandshakeEvent(decoder.onNotification(event.char, event.value))
+        return next.takeUnless { it is HandshakeDirective.Wait }
     }
 
     private sealed interface HandshakeStep {

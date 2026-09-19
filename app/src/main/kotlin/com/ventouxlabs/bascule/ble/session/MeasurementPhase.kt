@@ -127,19 +127,26 @@ internal class MeasurementPhase(
      * E7 + E17. The 45 s wait for a first frame, then — and only once the
      * decoder is holding a weight for correlation — the short window for its
      * body-composition pair.
+     *
+     * [startInCorrelationWindow] skips the first wait: the caller has itself
+     * just fed the decoder a weight frame (one the scale delivered during the
+     * handshake) and it is pending exactly as a live one would be, so the
+     * session owes its pair E17's window, not E7's.
      */
-    suspend fun run(events: Channel<TransportEvent>): SessionOutcome {
+    suspend fun run(events: Channel<TransportEvent>, startInCorrelationWindow: Boolean = false): SessionOutcome {
         var malformed = 0
         val onMalformed: () -> Unit = { malformed++ }
 
-        val first = awaitMeasureStep(
-            events,
-            SessionBudget.FIRST_INDICATION_TIMEOUT,
-            stopAfterFirstFrame = true,
-            onMalformed,
-        ) ?: return flushOrElse(noMeasurement(malformed))
+        if (!startInCorrelationWindow) {
+            val first = awaitMeasureStep(
+                events,
+                SessionBudget.FIRST_INDICATION_TIMEOUT,
+                stopAfterFirstFrame = true,
+                onMalformed,
+            ) ?: return flushOrElse(noMeasurement(malformed))
 
-        if (first !is MeasureStep.Pending) return settle(events, first) { noMeasurement(malformed) }
+            if (first !is MeasureStep.Pending) return settle(events, first) { noMeasurement(malformed) }
+        }
 
         val paired = awaitMeasureStep(
             events,

@@ -28,7 +28,12 @@ interface ScaleDecoder {
     /** Dispatch and discovery check. */
     val requiredServices: Set<UUID>
 
-    /** Characteristics the session subscribes to once the handshake completes. */
+    /**
+     * Characteristics the session subscribes to *before* the handshake — after
+     * the User Control Point's CCCD, before the first UCP write — so a weigh-in
+     * the scale delivers on the Consent write itself is not lost. Frames on
+     * these that arrive mid-handshake are held and decoded once it completes.
+     */
     val measurementCharacteristics: Set<UUID>
 
     /**
