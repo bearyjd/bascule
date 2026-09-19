@@ -142,13 +142,21 @@ class ConfigViewModelTest {
 
     @Test
     fun baseUrlRejectsNonHttpScheme() = runTest {
-        val vm = viewModel()
+        val deliveryTrigger = FakeDeliveryTrigger()
+        val dao = FakeReadingDao()
+        dao.insert(
+            readingFixture(id = "backing-off", status = ReadingStatus.PENDING, nextAttemptMillis = Long.MAX_VALUE),
+        )
+        val vm = viewModel(deliveryTrigger = deliveryTrigger, dao = dao)
         advanceUntilIdle()
 
         vm.saveBaseUrl("ftp://example.com")
         advanceUntilIdle()
 
         assertNotNull(vm.uiState.value.baseUrlError)
+        // A rejected URL changes nothing, so nothing has become worth retrying.
+        assertEquals(Long.MAX_VALUE, dao.rows.value.single { it.id == "backing-off" }.nextAttemptMillis)
+        assertEquals("a URL that was never saved must not trigger a drain", 0, deliveryTrigger.triggerCount)
     }
 
     @Test

@@ -81,6 +81,30 @@ interface ReadingDao {
     )
     suspend fun unblockAuthRows(nowMillis: Long)
 
+    /**
+     * `ConfigViewModel.saveBaseUrl`: a same-host URL correction makes every
+     * `PENDING` row due now, so the backlog stops waiting out a backoff it
+     * earned against the URL that was wrong (404ing, redirecting).
+     * Deliberately narrower than [unblockAuthRows] — this clears only the
+     * *current wait*. `attemptCount` stays: if the corrected URL still fails,
+     * the ladder resumes where it was instead of restarting at 30 s, so a
+     * user re-saving a wrong URL cannot manufacture a request storm.
+     * `retryEpochMillis` stays: a URL edit does not make a 13-day-old row
+     * young again. `lastError` and `lastErrorClass` stay: they are not this
+     * statement's business — the next attempt overwrites them, and a URL
+     * edit is not a verdict on why the last attempt failed. `PENDING` only —
+     * `BLOCKED_AUTH`, `FAILED_PERMANENT`, `SENT` and `HELD_CONFIRM` are not
+     * this statement's business either.
+     */
+    @Query(
+        """
+        UPDATE readings
+        SET nextAttemptMillis = NULL
+        WHERE status = 'PENDING' AND nextAttemptMillis IS NOT NULL
+        """,
+    )
+    suspend fun makePendingDueNow()
+
     @Query(
         "UPDATE readings SET status = 'BLOCKED_AUTH', lastError = 'authentication required', " +
             "lastErrorClass = 'AUTH' WHERE status = 'PENDING'",

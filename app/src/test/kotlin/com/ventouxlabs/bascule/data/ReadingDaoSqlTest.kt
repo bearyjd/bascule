@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.ventouxlabs.bascule.delivery.DedupPolicy
 import com.ventouxlabs.bascule.delivery.DeliveryCoordinator
 import com.ventouxlabs.bascule.ui.fake.readingFixture
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -123,6 +124,66 @@ class ReadingDaoSqlTest {
         assertEquals(7_000L, row.retryEpochMillis)
         assertNull(row.nextAttemptMillis)
         assertNull(row.lastError)
+    }
+
+    /**
+     * `ConfigViewModel.saveBaseUrl` runs this the moment a same-host URL
+     * correction lands, so the backlog stops waiting out a backoff it earned
+     * against the URL that was wrong. Deliberately narrower than the reset
+     * [unblockingAuthRowsClearsTheBackoffGateAndTheAttemptCount] pins: only
+     * the current wait goes. `attemptCount` stays so a re-saved URL that is
+     * still wrong resumes the ladder instead of restarting it at 30 s (a user
+     * cannot manufacture a request storm by re-saving), `retryEpochMillis`
+     * stays so a URL edit does not make an old row young again, and
+     * `lastError` stays because it is not this statement's business — the
+     * next attempt overwrites it, and a URL edit is not a verdict on why the
+     * last attempt failed.
+     *
+     * Every other status gets a row, the way
+     * [theDrainQuerySelectsPendingAndNothingElse] seeds its corpus, so a
+     * status added later is covered without anyone listing it. Read back
+     * through `observeAll`, not `pending`: the drain query filters on
+     * status, so it could never show a non-PENDING row this statement
+     * wrongly touched — the status gate would be untestable through it.
+     */
+    @Test
+    fun makingPendingDueNowClearsOnlyTheCurrentWaitAndOnlyOnPendingRows() = runBlocking {
+        dao.insert(
+            readingFixture(
+                id = "backing-off",
+                status = ReadingStatus.PENDING,
+                attemptCount = 4,
+                retryEpochMillis = 1_000L,
+                lastError = "No such endpoint (404)",
+                lastErrorClass = ErrorClass.TRANSIENT,
+                nextAttemptMillis = Long.MAX_VALUE,
+            ),
+        )
+        val otherStatuses = ReadingStatus.entries - ReadingStatus.PENDING
+        otherStatuses.forEach { status ->
+            dao.insert(readingFixture(id = status.name, status = status, nextAttemptMillis = 8_000L))
+        }
+
+        dao.makePendingDueNow()
+
+        val rows = dao.observeAll().first().associateBy { it.id }
+        val corrected = rows.getValue("backing-off")
+        assertNull("the wait was earned against the URL that was wrong", corrected.nextAttemptMillis)
+        assertEquals("the ladder resumes where it was, it does not restart", 4, corrected.attemptCount)
+        assertEquals("a URL edit does not make the row young again", 1_000L, corrected.retryEpochMillis)
+        assertEquals(
+            "not this statement's business: the next attempt overwrites it, and a URL edit is no verdict on it",
+            "No such endpoint (404)",
+            corrected.lastError,
+        )
+        assertEquals(ErrorClass.TRANSIENT, corrected.lastErrorClass)
+        otherStatuses.forEach { status ->
+            assertEquals(
+                "a non-PENDING row must be left as it was: $status",
+                8_000L,
+                rows.getValue(status.name).nextAttemptMillis,
+            )
+        }
     }
 
     /**

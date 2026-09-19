@@ -299,7 +299,31 @@ class ConfigViewModel(
         if (error == null) {
             // A prior "Test connection" result no longer describes the active config.
             invalidateConnectionTest()
-            viewModelScope.launch { configStore.saveBaseUrl(url) }
+            viewModelScope.launch {
+                // Read before the write, or the comparison below is against itself.
+                val previousHost = hostOf(configStore.baseUrl.first())
+                configStore.saveBaseUrl(url)
+                // A row backing off against the URL that was wrong (404ing,
+                // redirecting) has no reason to keep waiting once the user has
+                // fixed the very thing that was failing — the same treatment
+                // saveToken gives a credential change. Same host gate as
+                // importSettings, for the reason given there; this path parks
+                // nothing, but must not be the faster way to send the stored
+                // credential to a new host either. No previous host is the
+                // first-restore exemption the import grants, and the new URL
+                // passed validateBaseUrl, so hostOf(url) is never null here.
+                // This clears the row-level wait and requests a drain; the
+                // worker-level retry backoff (DeliveryWorker's Result.retry,
+                // and DeliveryScheduler's KEEP policy dropping a trigger
+                // against an already-enqueued run) is a separate limiter that
+                // can still delay it, and is being addressed on its own. DAO
+                // first, then the trigger — see unblockAuthRowsAndDrain.
+                val keepsSameHost = previousHost == null || previousHost == hostOf(url)
+                if (keepsSameHost) {
+                    dao.makePendingDueNow()
+                    deliveryTrigger.triggerImmediateDrain()
+                }
+            }
         }
     }
 
