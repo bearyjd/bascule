@@ -72,7 +72,7 @@ app/src/main/kotlin/com/ventouxlabs/bascule/
 │   └── Converters.kt              # ▲ Set<ReadingField> ↔ TEXT
 ├── delivery/
 │   ├── DeliveryCoordinator.kt     # ▲ dedup + status transitions; no HTTP
-│   ├── DeliveryWorker.kt          # ▲ WorkManager drain (one-shot expedited + periodic)
+│   ├── DeliveryWorker.kt          # ▲ WorkManager drain (one-shot, not expedited; kicked by triggers, the 15-min periodic kick, and the retry kick)
 │   └── DedupPolicy.kt             # ▲ §3.3 rules, unit-tested standalone
 ├── network/
 │   ├── VitalForgeApi.kt           # ▲ single versioned interface (§4)
@@ -544,11 +544,24 @@ Number justification:
 Per-row next attempt: `lastAttemptMillis + min(30 s * 2^(attemptCount - 1), 15 min)`
 → 30 s, 1 m, 2 m, 4 m, 8 m, then 15 m forever.
 
-Drain triggers:
-- expedited one-shot `OneTimeWorkRequest` on every insert (network constraint),
-- `PeriodicWorkRequest` every 15 min (WorkManager's floor) with network constraint,
-- immediate drain when connectivity returns, when the app is foregrounded, and
-  when a new token is saved.
+Drain triggers (every one is `triggerImmediateDrain`, a one-shot
+`OneTimeWorkRequest` under `delivery-drain` with the network constraint):
+- every completed scale session, whether or not it produced a reading,
+- a manual entry saved,
+- a "Retry" tap on a History row,
+- a token saved or a login completed (which also unblocks `BLOCKED_AUTH`), and a
+  settings import that restores a credential for the same host,
+- a contract switch or import that requeues rows rejected under the old contract,
+- the 15-minute periodic kick (`PeriodicWorkRequest`, WorkManager's floor, network
+  constraint, under its own name so `KEEP` never dedupes a trigger against it),
+- after a failed drain, one delayed kick (`delivery-retry-kick`,
+  `ExistingWorkPolicy.REPLACE`) timed to the soonest waiting row's next attempt,
+  or — when no row is waiting but rows are due — the ladder's 30 s base (a `Retry-After`
+  of zero leaves rows due with nothing in the future). The drain worker never
+  returns `Result.retry()`: a retrying request under `delivery-drain` sits in
+  WorkManager's own backoff (30 s doubling to a 5 h cap), and `KEEP` drops every
+  trigger above against it until that elapses. The per-row ladder is the only
+  retry pacing.
 
 **Expiry is time-based, not attempt-based — this overrides PRP §5's "after N
 attempts (e.g. 10)".** Arithmetic: the ladder reaches the 15-minute cap after
@@ -957,7 +970,7 @@ have left a body-comp-less row that is indistinguishable from a genuine
 weight-only reading — silent partial loss wearing the shape of success. The cost
 is that the E17 window (4 s) is genuinely unprotected; the user re-steps, and the
 window is short by design for exactly this reason. Death *after* `EMITTED` loses
-nothing: the row is `PENDING`, complete, and the periodic `DeliveryWorker` drains
+nothing: the row is `PENDING`, complete, and the next `DeliveryWorker` drain (kicked every 15 min) drains
 it with no in-memory state required. The delivery path never depends on the session process
 still being alive — that is the entire reason delivery is `WorkManager` and not a
 coroutine in the session worker.

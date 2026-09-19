@@ -8,15 +8,26 @@ From a `PENDING` row to a row on the VitalForge server.
 
 ```
 ReadingIngestor inserts PENDING
-  → DeliveryScheduler.trigger()            # WorkManager, APPEND_OR_REPLACE
+  → DeliveryScheduler.triggerImmediateDrain()  # WorkManager, KEEP (dedupes against a running drain)
   → DeliveryWorker
       → RuntimeApiFactory.create()         # re-reads config every run
       → DeliveryDrainer.drain()
           self-heal: requeue rows stamped under another contract (422 only)
           for each due row: DedupPolicy → VitalForgeHttpClient.submitReading
           → ResponseClassifier → status + backoff
-  DeliveryPeriodicKickWorker                # periodic safety net
+      → FAILED: DeliveryScheduler.scheduleRetryKick   # delivery-retry-kick, REPLACE; soonest waiting row, or the ladder base if a row is due
+  DeliveryPeriodicKickWorker                # periodic safety net + retry kick; both only enqueue the one drain
 ```
+
+`DeliveryWorker` never returns `Result.retry()`. A retrying request sits under
+`delivery-drain` in WorkManager's own backoff (30 s doubling to a 5 h cap), and
+`triggerImmediateDrain`'s KEEP drops every trigger — a new capture, a saved
+token, the periodic kick — for as long as it sits there. Retry pacing is the
+per-row §3.4 ladder alone: after a failed drain the worker reads
+`ReadingDao.earliestFutureAttemptMillis` (and, when nothing is waiting, whether
+anything is still due, which kicks at the ladder's 30 s base — a `Retry-After: 0` leaves
+rows due with nothing in the future) and schedules one delayed kick under its
+own name, so the drain name never holds a delayed request.
 
 ## HTTP surface
 
