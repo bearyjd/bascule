@@ -203,7 +203,14 @@ class MainActivity : AppCompatActivity() {
     private fun writeProprietary(shortUuid: String, hex: String) {
         val g = gatt ?: run { appendLog("writeprop: not connected"); return }
         val ch = findProprietary(shortUuid) ?: run { appendLog("writeprop: no proprietary characteristic $shortUuid"); return }
-        val bytes = hex.replace(" ", "").chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val digits = hex.replace(" ", "")
+        // An odd digit count does not crash: the trailing lone nibble parses as
+        // its own byte and a different payload goes on the wire. Refuse it.
+        if (digits.isEmpty() || digits.length % 2 != 0 || !digits.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+            appendLog("writeprop: --es hex must be an even number of hex digits, got \"$hex\"")
+            return
+        }
+        val bytes = digits.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val type = if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) {
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         } else {
@@ -222,9 +229,12 @@ class MainActivity : AppCompatActivity() {
         val g = gatt ?: run { appendLog("readprop: not connected"); return }
         val ch = findProprietary(shortUuid) ?: run { appendLog("readprop: no proprietary characteristic $shortUuid"); return }
         appendLog("→ readprop ${ch.uuid}")
-        standaloneReadActive = true
         val result = g.readCharacteristic(ch)
         appendLog("readprop ${ch.uuid}: readCharacteristic call result=$result")
+        // Only once the stack accepted it: a rejected read (another op in
+        // flight) never calls back, and a flag left set would swallow the next
+        // legitimate completion and silently truncate a read chain.
+        standaloneReadActive = result
     }
 
     /**
@@ -286,6 +296,7 @@ class MainActivity : AppCompatActivity() {
         gatt = null
         connectionBusy = false
         gotRealMeasurement = false
+        standaloneReadActive = false
         activeButton?.setBackgroundColor(Color.LTGRAY)
         activeButton = null
         for (i in 0 until deviceList.childCount) {
