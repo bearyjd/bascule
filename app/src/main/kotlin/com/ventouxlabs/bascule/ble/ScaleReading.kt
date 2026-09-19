@@ -27,8 +27,14 @@ data class ScaleReading(
     val heightM: Double?,
     val boneMassKg: Double?,
     val amr: Double?,
-    /** Device clock when the session emitted this reading. */
-    val capturedAtMillis: Long,
+    /**
+     * The phone clock when the session emitted this reading — when the phone
+     * *obtained* it, which since #28 is not necessarily when it happened: a
+     * weigh-in the scale stored while no phone was present is handed over at
+     * the next consent, hours later. `CaptureTimestampPolicy` decides which of
+     * this and [scaleTimestampMillis] becomes the persisted capture time.
+     */
+    val receivedAtMillis: Long,
     /** The scale's own timestamp from the Weight Measurement frame, when present. */
     val scaleTimestampMillis: Long?,
     val decoderId: String,

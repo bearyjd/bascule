@@ -184,7 +184,7 @@ internal class MeasurementCorrelator(
         // decoder may supply them (docs/prp/02-interface-revision.md §3).
         boneMassKg = null,
         amr = null,
-        capturedAtMillis = clock(),
+        receivedAtMillis = clock(),
         scaleTimestampMillis = weight.timestampMillis,
         decoderId = decoderId,
     )

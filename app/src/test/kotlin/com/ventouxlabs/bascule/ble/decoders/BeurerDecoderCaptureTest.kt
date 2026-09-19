@@ -67,7 +67,7 @@ class BeurerDecoderCaptureTest {
         assertEquals(Bf720Capture.expectedTimestampMillis, reading.scaleTimestampMillis)
         assertEquals(Bf720Capture.EXPECTED_BMI, reading.bmi!!, TOLERANCE)
         assertEquals(Bf720Capture.EXPECTED_HEIGHT_M, reading.heightM!!, TOLERANCE)
-        assertEquals(fixedClock, reading.capturedAtMillis)
+        assertEquals(fixedClock, reading.receivedAtMillis)
         assertEquals(BeurerDecoder.DECODER_ID, reading.decoderId)
     }
 

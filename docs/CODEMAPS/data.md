@@ -21,6 +21,12 @@ deliberate.
 `ReadingStatus`: `PENDING` · `SENT` · `FAILED_PERMANENT` · `HELD_CONFIRM` ·
 `DECLINED` · `BLOCKED_AUTH`
 
+`capturedAtMillis` is *when the weigh-in happened*: `CaptureTimestampPolicy`
+takes the scale's own `scaleTimestampMillis` when it lies within
+`[received − 365 d, received + 30 s]`, else the phone clock at receipt. Dedup,
+History sort and the wire `captured_at` all read it. `retryEpochMillis` is
+set from the receipt time on insert, never from the scale's clock.
+
 Migrations: `MIGRATION_3_4` added `permanentRejectionHttpCode`, scoping
 contract recovery to 422 rather than every permanent code.
 

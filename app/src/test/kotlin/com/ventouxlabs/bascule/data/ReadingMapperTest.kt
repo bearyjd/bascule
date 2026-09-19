@@ -12,7 +12,7 @@ class ReadingMapperTest {
         val measurement = scaleReadingFixture(
             weightKg = 71.5,
             userIndex = 2,
-            capturedAtMillis = 5_000L,
+            receivedAtMillis = 5_000L,
         )
         val entity = ReadingMapper.map(
             measurement = measurement,
@@ -31,6 +31,39 @@ class ReadingMapperTest {
         assertEquals(ReadingSource.SCALE, entity.source)
         assertEquals(0, entity.attemptCount)
         assertEquals(5_000L, entity.retryEpochMillis)
+    }
+
+    /**
+     * The #28 stored-measurement path: the scale hands over a weigh-in it took
+     * while no phone was present. The capture time is when the person stood on
+     * the scale, but the retry window — `DeliveryCoordinator.EXPIRY_MILLIS`
+     * anchored on `retryEpochMillis` — must start when the phone actually got
+     * the reading, or a weigh-in delivered late would arrive already expiring.
+     */
+    @Test
+    fun aStoredWeighInIsCapturedAtTheScalesTimeButItsRetryWindowStartsOnReceipt() {
+        val scaleTime = RECEIVED_AT - 97_000L
+        val measurement = scaleReadingFixture(receivedAtMillis = RECEIVED_AT, scaleTimestampMillis = scaleTime)
+
+        val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
+
+        assertEquals(scaleTime, entity.capturedAtMillis)
+        assertEquals(scaleTime, entity.scaleTimestampMillis)
+        assertEquals(
+            "the expiry anchor is the phone's receipt, never the scale's clock",
+            RECEIVED_AT,
+            entity.retryEpochMillis,
+        )
+    }
+
+    @Test
+    fun aFrameWithNoScaleTimestampIsCapturedAtTheReceivedTime() {
+        val measurement = scaleReadingFixture(receivedAtMillis = RECEIVED_AT, scaleTimestampMillis = null)
+
+        val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
+
+        assertEquals(RECEIVED_AT, entity.capturedAtMillis)
+        assertNull(entity.scaleTimestampMillis)
     }
 
     @Test
@@ -85,5 +118,10 @@ class ReadingMapperTest {
             .copy(basalMetabolismKj = ReadingMapper.KJ_PER_KCAL * 1_826.0, amr = 9_999.0)
         val entity = ReadingMapper.map(measurement, WeightUnit.KILOGRAMS, ReadingStatus.PENDING, null, "id")
         assertEquals(9_999.0, requireNotNull(entity.amr), 0.0001)
+    }
+
+    private companion object {
+        /** A realistic epoch: the fixture's default of zero would put any real scale time outside the window. */
+        const val RECEIVED_AT = 1_787_000_000_000L
     }
 }

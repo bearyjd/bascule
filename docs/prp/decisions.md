@@ -430,6 +430,27 @@ column defaulting to `capturedAtMillis`; dropping it would likewise be a
 migration, but it is added before v1 ships so no migration is needed to introduce
 it.
 
+#### Amendment (2026-09-19) — the insert-time anchor is the received time, not `capturedAtMillis`
+
+The decision above says `retryEpochMillis` is "set to `capturedAtMillis` on
+insert". That was a distinction without a difference while `capturedAtMillis`
+was the phone clock at emission. It stopped being one with PR #28: the scale
+now hands over weigh-ins it stored while no phone was present, and
+`capturedAtMillis` has become **the weigh-in time** — the scale's own clock
+when plausible, resolved by `CaptureTimestampPolicy` at the persistence
+boundary (`00-design.md` §3.1). A weigh-in taken on Monday and delivered on
+Thursday would, anchored at capture, arrive with three of its fourteen days
+already spent — the same failure shape this ADR was amended to prevent, now on
+the insert path rather than on re-entry. `ReadingMapper` therefore sets
+`retryEpochMillis` from `ScaleReading.receivedAtMillis`, the phone clock at
+emission: the window starts when the phone got the reading, which is the only
+moment delivery could have begun. Every re-entry rule above is unchanged.
+`capturedAtMillis` remains never the expiry anchor; it is now the dedup key
+(§3.3), the history sort key, the relative-age label and the v2 wire
+`captured_at`. The "defaulting to `capturedAtMillis`" note under Reversal
+cost is likewise superseded — the column has no default; the mapper supplies
+the received time.
+
 ---
 
 ## ADR-006

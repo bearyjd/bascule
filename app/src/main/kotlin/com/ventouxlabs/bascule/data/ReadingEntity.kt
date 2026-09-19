@@ -50,14 +50,21 @@ enum class ErrorClass { TRANSIENT, AUTH, PERMANENT }
 )
 data class ReadingEntity(
     @PrimaryKey val id: String,
+    /**
+     * When the weigh-in happened: the scale's own clock when it is plausible,
+     * otherwise the moment the phone received the reading — resolved once, at
+     * insert, by `CaptureTimestampPolicy`. Since #28 the scale hands over
+     * weigh-ins it stored while no phone was present, so the two can be hours
+     * apart. Dedup (00-design.md §3.3), the History sort and its relative-age
+     * label, the remote-duplicate check and the v2 wire `captured_at` all read
+     * this column. Never the expiry anchor — that is [retryEpochMillis].
+     */
     val capturedAtMillis: Long,
     /**
-     * The scale's own clock from the Weight Measurement frame, null when the
-     * frame carried no timestamp. Kept alongside [capturedAtMillis] rather than
-     * replacing it: dedup (00-design.md §3.3) and history sort key on the phone
-     * clock, and the two are different facts — a reading the scale buffered and
-     * delivered later would otherwise record its delivery time as its capture
-     * time. Which of the two a v2 replay joins on is part of the A6 escalation.
+     * The scale's own clock from the Weight Measurement frame as received,
+     * null when the frame carried none, unbounded. The raw fact
+     * [capturedAtMillis] was resolved from, kept so a clock the policy refused
+     * to believe can be seen rather than silently corrected away.
      */
     val scaleTimestampMillis: Long?,
     val userIndex: Int?,

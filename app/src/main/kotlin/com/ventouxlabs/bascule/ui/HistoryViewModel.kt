@@ -104,7 +104,7 @@ class HistoryViewModel(
             rows = readings.sortedWith(rowOrdering),
             hasBlockedAuth = summary.hasBlockedAuth,
             hasFailedPermanent = summary.hasFailedPermanent,
-            oldestPendingAgeMillis = summary.oldestPendingCaptureMillis?.let { nowMillis() - it },
+            oldestPendingAgeMillis = summary.oldestPendingSinceMillis?.let { nowMillis() - it },
             counters = counters,
             displayUnit = displayUnit,
             captureState = captureStateOf(pairedAddress, captureEnabled),
@@ -153,7 +153,15 @@ class HistoryViewModel(
     private data class Summary(
         val hasBlockedAuth: Boolean,
         val hasFailedPermanent: Boolean,
-        val oldestPendingCaptureMillis: Long?,
+        /**
+         * How long the backlog has been *waiting to sync*, which is
+         * `retryEpochMillis` — reset on every entry into PENDING, so it is
+         * exactly "pending since". Not `capturedAtMillis`: that is the
+         * weigh-in's own time, and a stored weigh-in the scale hands over
+         * three hours after it happened (#28) would trip the ≥1 h banner the
+         * instant it arrived.
+         */
+        val oldestPendingSinceMillis: Long?,
     )
 
     private fun summarize(readings: List<ReadingEntity>): Summary {
@@ -165,7 +173,7 @@ class HistoryViewModel(
                 ReadingStatus.BLOCKED_AUTH -> hasBlockedAuth = true
                 ReadingStatus.FAILED_PERMANENT -> hasFailedPermanent = true
                 ReadingStatus.PENDING ->
-                    oldestPending = minOf(oldestPending ?: reading.capturedAtMillis, reading.capturedAtMillis)
+                    oldestPending = minOf(oldestPending ?: reading.retryEpochMillis, reading.retryEpochMillis)
 
                 ReadingStatus.HELD_CONFIRM, ReadingStatus.SENT, ReadingStatus.DECLINED -> Unit
             }
