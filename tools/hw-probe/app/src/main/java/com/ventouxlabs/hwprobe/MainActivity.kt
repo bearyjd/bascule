@@ -127,6 +127,9 @@ class MainActivity : AppCompatActivity() {
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd listusers
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd register --ei consent 1234
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd consent --ei idx 2 --ei consent 1234
+    // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd dumpprop
+    // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd writeprop --es uuid 0005 --es hex 01
+    // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd readprop --es uuid 0004
     // adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd reset
     @SuppressLint("MissingPermission")
     private val cmdReceiver = object : BroadcastReceiver() {
@@ -162,10 +165,76 @@ class MainActivity : AppCompatActivity() {
                     if (idx >= 0 && code >= 0) sendConsent(idx, code)
                 }
                 "dumpprop" -> dumpProprietary()
+                "writeprop" -> {
+                    val uuid = intent.getStringExtra("uuid")
+                    val hex = intent.getStringExtra("hex")
+                    if (uuid != null && hex != null) writeProprietary(uuid, hex) else appendLog("writeprop: need --es uuid and --es hex")
+                }
+                "readprop" -> {
+                    val uuid = intent.getStringExtra("uuid")
+                    if (uuid != null) readProprietary(uuid) else appendLog("readprop: need --es uuid")
+                }
                 "reset" -> resetAll()
                 else -> appendLog("unknown remote cmd: $cmd")
             }
         }
+    }
+
+    /**
+     * Finds one characteristic in the proprietary 0xFFFF / 0xFF00 services by its
+     * 16-bit short form (`0005`, `ff01`). Only those two services are searched so
+     * a typo cannot land on a SIG characteristic.
+     */
+    private fun findProprietary(shortUuid: String): BluetoothGattCharacteristic? {
+        val wanted = "0000" + shortUuid.lowercase().padStart(4, '0')
+        return gatt?.services
+            ?.filter { it.uuid.toString().startsWith("0000ffff") || it.uuid.toString().startsWith("0000ff00") }
+            ?.flatMap { it.characteristics }
+            ?.firstOrNull { it.uuid.toString().startsWith(wanted) }
+    }
+
+    /**
+     * Writes raw bytes to a proprietary characteristic. This is the one command
+     * that can change scale state, so the log line names exactly what went where.
+     * Whatever the scale pushes back arrives on the normal NOTIFY path — the
+     * proprietary notify channels (0x0001, 0x0006) are subscribed on connect.
+     */
+    @SuppressLint("MissingPermission")
+    private fun writeProprietary(shortUuid: String, hex: String) {
+        val g = gatt ?: run { appendLog("writeprop: not connected"); return }
+        val ch = findProprietary(shortUuid) ?: run { appendLog("writeprop: no proprietary characteristic $shortUuid"); return }
+        val digits = hex.replace(" ", "")
+        // An odd digit count does not crash: the trailing lone nibble parses as
+        // its own byte and a different payload goes on the wire. Refuse it.
+        if (digits.isEmpty() || digits.length % 2 != 0 || !digits.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+            appendLog("writeprop: --es hex must be an even number of hex digits, got \"$hex\"")
+            return
+        }
+        val bytes = digits.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val type = if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        }
+        appendLog("→ writeprop ${ch.uuid} bytes=${bytes.toHex()} type=$type")
+        val result = g.writeCharacteristic(ch, bytes, type)
+        appendLog("writeprop ${ch.uuid}: writeCharacteristic call result=$result")
+    }
+
+    /** Set for one read so its completion does not fall into the post-connect read queue, whose empty branch writes Current Time. */
+    private var standaloneReadActive = false
+
+    @SuppressLint("MissingPermission")
+    private fun readProprietary(shortUuid: String) {
+        val g = gatt ?: run { appendLog("readprop: not connected"); return }
+        val ch = findProprietary(shortUuid) ?: run { appendLog("readprop: no proprietary characteristic $shortUuid"); return }
+        appendLog("→ readprop ${ch.uuid}")
+        val result = g.readCharacteristic(ch)
+        appendLog("readprop ${ch.uuid}: readCharacteristic call result=$result")
+        // Only once the stack accepted it: a rejected read (another op in
+        // flight) never calls back, and a flag left set would swallow the next
+        // legitimate completion and silently truncate a read chain.
+        standaloneReadActive = result
     }
 
     /**
@@ -227,6 +296,7 @@ class MainActivity : AppCompatActivity() {
         gatt = null
         connectionBusy = false
         gotRealMeasurement = false
+        standaloneReadActive = false
         activeButton?.setBackgroundColor(Color.LTGRAY)
         activeButton = null
         for (i in 0 until deviceList.childCount) {
@@ -466,7 +536,11 @@ class MainActivity : AppCompatActivity() {
             appendLog(
                 "READ ${ch.uuid} status=$status len=${value.size} bytes=${value.toHex()} ascii=\"${value.printable()}\"",
             )
-            if (propDumpActive) drainProp(g) else enableNextRead(g)
+            when {
+                standaloneReadActive -> standaloneReadActive = false
+                propDumpActive -> drainProp(g)
+                else -> enableNextRead(g)
+            }
         }
 
         override fun onDescriptorRead(

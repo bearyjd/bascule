@@ -22,6 +22,9 @@ adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd synctime
 adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd listusers
 adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd register --ei consent 1234
 adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd consent --ei idx 2 --ei consent 1234
+adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd dumpprop
+adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd readprop --es uuid 0004
+adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd writeprop --es uuid 0005 --es hex 01
 adb shell am broadcast -a com.ventouxlabs.hwprobe.CMD --es cmd reset
 ```
 
