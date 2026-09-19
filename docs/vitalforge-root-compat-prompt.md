@@ -1,5 +1,25 @@
 # Prompt for the VitalForge repo — root-compat routes
 
+> **Superseded 2026-09-18 — never sent, and should not be.** VitalForge's
+> multitenancy design (`docs/superpowers/specs/2026-08-25-family-multitenancy-design.md`
+> in that repo, §f.2 and §f.8) deleted the root-path alias layer deliberately:
+> `/api/weight...` is "unmounted in phase 2, no aliases", `require_person` is
+> the only supplier of a `person_id` and there is "no exception anywhere in
+> this design", and "if a client is ever discovered mid-phase-2, the answer is
+> to reconfigure it, not to reintroduce an alias." Every shape this prompt asks
+> for — resolve to `is_primary`, or to `default_person_id` — is the implicit
+> fallback that spec exists to forbid, and a 307/308 would not help either,
+> since Bascule classifies redirects as transient and never follows them.
+>
+> That spec calls a root 404 "loud and harmless". For Bascule it was loud and
+> *lossy*, because Bascule classified 404 as permanent — which is the actual
+> defect, and it is on the client. Fixed the same day: `ResponseClassifier`
+> now treats a 404 as a transient configuration error (Bascule only ever POSTs
+> to a collection route, so a 404 there is never a verdict on a reading), so a
+> replay batch under a root base URL retries and expires instead of being
+> marked permanently failed. `HANDOFF.md` open items 2 and 3 both close on
+> that. The body below is kept so the reasoning is not redrafted.
+
 Paste the block below into a session in the `vitalforge` repo. It is written to
 be self-contained: that session has no Bascule context.
 

@@ -297,6 +297,7 @@ class ReadingDaoSqlTest {
             readingFixture(id = "not-a-schema-rejection").copy(
                 status = ReadingStatus.FAILED_PERMANENT,
                 contractVersionAtDelivery = 2,
+                // The classifier no longer produces a 404 verdict, but rows persisted under the old one may carry it.
                 permanentRejectionHttpCode = 404,
             ),
         )

@@ -529,6 +529,7 @@ class ConfigViewModelProfileRegistryTest {
                 id = "rejected-not-for-contract-reasons",
                 status = ReadingStatus.FAILED_PERMANENT,
                 contractVersionAtDelivery = ContractVersion.V2_BODY_COMP.wire,
+                // The classifier no longer produces a 404 verdict, but rows persisted under the old one may carry it.
                 permanentRejectionHttpCode = 404,
             ),
         )

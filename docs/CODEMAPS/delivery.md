@@ -46,15 +46,20 @@ the pre-prefix paths exactly.
 2xx        → Accepted(deliveredFields)
 401/403    → AuthRejected
 3xx        → TransientFailure   # a moved endpoint is config, not a verdict
+404        → TransientFailure   # same argument: only collection POSTs, so never a verdict
 408/429/5xx→ TransientFailure   # honours Retry-After, clamped to 1h
-400/404/409/413/422 → PermanentRejection
+400/409/413/422 → PermanentRejection
 other 4xx  → PermanentRejection
 ```
 
-**Known sharp edge:** 404 is permanent, so a wrong base URL or slug costs the
-reading on its first attempt rather than deferring it. `submitReading`'s KDoc
-argues against exactly this for an invalid URL. Not changed — 404 is
-legitimately permanent for other causes.
+**Formerly a sharp edge, closed 2026-09-18:** 404 used to be permanent, so a
+wrong base URL or slug cost the reading on its first attempt (it happened on
+hardware, 2026-09-07). The "legitimately permanent for other causes" reasoning
+did not survive contact with what this client actually sends — only
+collection POSTs, where a 404 can only mean the route is missing. Now
+transient, on the same ladder and 14-day expiry as a redirect. The one
+remaining edge is that correcting the base URL does not kick a drain, so
+rows wait out their current backoff (≤15 min) or the periodic drain.
 
 ## Recovery
 

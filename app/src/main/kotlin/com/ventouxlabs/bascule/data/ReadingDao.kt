@@ -134,8 +134,8 @@ interface ReadingDao {
      * Rows a server rejected for their *shape* rather than their content: a
      * 422 under one contract version says nothing about the reading under
      * another. Scoped to 422 specifically — `PermanentRejection` also covers
-     * 400/404/409/413 (`ResponseClassifier.PERMANENT_CODES`), and a contract
-     * switch cannot fix a malformed row or a not-found endpoint, only a
+     * 400/409/413 (`ResponseClassifier.PERMANENT_CODES`), and a contract
+     * switch cannot fix a malformed or conflicting row, only a
      * schema the old contract could not satisfy (Codex review,
      * v2-body-composition PR). `contractVersionAtDelivery` is stamped on
      * every attempt, so a `FAILED_PERMANENT` row carrying a different version

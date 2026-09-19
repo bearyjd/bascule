@@ -90,8 +90,8 @@ data class ReadingEntity(
      * The HTTP status of the attempt that produced a [ReadingStatus.FAILED_PERMANENT]
      * verdict, when it was one. Distinct from [ErrorClass] (which only says
      * "permanent", not which permanent): `ResponseClassifier.PERMANENT_CODES`
-     * covers 400/404/409/413/422, and only 422 (schema/validation rejection) is
-     * something a contract switch can actually fix — a 404 or a malformed row
+     * covers 400/409/413/422, and only 422 (schema/validation rejection) is
+     * something a contract switch can actually fix — a 409 or a malformed row
      * is wrong regardless of contract. `ReadingDao.failedPermanentlyUnderOtherContract`
      * reads this to scope its recovery to the one code a contract switch resolves.
      */

@@ -42,6 +42,21 @@ object ResponseClassifier {
         httpCode in REDIRECT_RANGE ->
             SubmitResult.TransientFailure(REDIRECT_REASON, transientRetryAfter(httpCode, retryAfterHeader))
 
+        // Bascule only ever POSTs to a collection route (`/api/weight`), so a
+        // 404 is never a verdict on this reading either — it can only mean the
+        // endpoint is not there, which is a local base-URL configuration
+        // error: VitalForge serves the weight routes under `/p/{slug}/`, and a
+        // base URL missing that prefix authenticates fine and then finds
+        // nothing. The redirect argument above applies unchanged, and it did
+        // happen on hardware (2026-09-07): a real weigh-in went
+        // FAILED_PERMANENT on its first attempt and only a contract toggle
+        // recovered it. Retries stay bounded by DeliveryCoordinator.EXPIRY_MILLIS
+        // exactly as for a redirect, and VitalForge's design spec (§f.8)
+        // refuses to add root-path aliases, so the client is the only place
+        // this can be fixed.
+        httpCode == NOT_FOUND ->
+            SubmitResult.TransientFailure(NO_SUCH_ENDPOINT_REASON, transientRetryAfter(httpCode, retryAfterHeader))
+
         httpCode in TRANSIENT_CODES || httpCode in SERVER_ERROR_RANGE ->
             SubmitResult.TransientFailure(
                 "server returned $httpCode",
@@ -88,6 +103,16 @@ object ResponseClassifier {
     private const val REDIRECT_REASON =
         "redirect not followed; a moved endpoint is a configuration error"
 
+    /**
+     * Surfaced verbatim by `ConfigViewModel.testConnection()` and persisted as
+     * a row's `lastError` on every 404 attempt, so it is written for the person
+     * reading the Settings screen, not for a log. A fixed phrase, never built
+     * from the response (00-design.md §8.8).
+     */
+    const val NO_SUCH_ENDPOINT_REASON =
+        "No such endpoint (404) — the Base URL may be missing your person path, e.g. /p/your-slug"
+
+    private const val NOT_FOUND = 404
     private const val RATE_LIMITED = 429
 
     private val SUCCESS_RANGE = 200..299
@@ -96,5 +121,5 @@ object ResponseClassifier {
     private val SERVER_ERROR_RANGE = 500..599
     private val AUTH_CODES = setOf(401, 403)
     private val TRANSIENT_CODES = setOf(408, 429)
-    private val PERMANENT_CODES = setOf(400, 404, 409, 413, 422)
+    private val PERMANENT_CODES = setOf(400, 409, 413, 422)
 }
