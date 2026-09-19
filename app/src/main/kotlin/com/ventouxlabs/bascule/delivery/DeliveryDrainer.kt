@@ -12,10 +12,12 @@ import kotlin.time.Duration.Companion.milliseconds
 /**
  * What a [DeliveryDrainer.drain] pass wants to happen next.
  *
- * Splitting [MORE_PAGES] out of "retry" is what keeps WorkManager's exponential
- * ladder off healthy pagination: a `BLOCKED_AUTH` recovery of several hundred
- * rows is many consecutive full batches, none of them a failure, and running
- * them on the failure ladder stretched a minute of work across hours.
+ * [MORE_PAGES] and [FAILED] are kept apart because they want opposite things
+ * from [DeliveryWorker]: a continuation queued right now, or a kick delayed
+ * until the rows' §3.4 backoff has run out. A `BLOCKED_AUTH` recovery of
+ * several hundred rows is many consecutive full batches, none of them a
+ * failure, and back when both mapped to WorkManager's `Result.retry()` its
+ * exponential ladder stretched that minute of work across hours.
  */
 enum class DrainOutcome {
     /** Nothing left to do until something new is captured or the periodic drain fires. */
@@ -52,12 +54,15 @@ class DeliveryDrainer(
          * of the batch would walk straight into the same rate limit, so the pass
          * ends here and asks to be resumed later.
          *
-         * Unlike [StopDrain] this still requests a retry, so WorkManager's own
-         * ladder keeps waking the worker while the row is parked. Those wakeups
-         * are no-ops that stop at the `pending()` query above, and they track the
-         * server's deadline far more closely than the 15-minute periodic drain
-         * would — and any earlier row in this pass that failed transiently keeps
-         * the retry it asked for rather than having it discarded here.
+         * Unlike [StopDrain] this still reports a failure, so [DeliveryWorker]
+         * schedules its retry kick: at this row's server deadline when that is
+         * still ahead, or one ladder base out when the deadline has already
+         * passed (a `Retry-After` of zero parks the row at `now`, with the rest
+         * of the batch still due behind it) — never left to the 15-minute
+         * periodic net, and never tighter than the base even against a server
+         * that answers zero forever. Any earlier row in this pass that failed
+         * transiently keeps the kick it asked for rather than having it
+         * discarded here.
          */
         data object BackOffDrain : RowOutcome
     }
@@ -119,7 +124,8 @@ class DeliveryDrainer(
      * by the same design that keeps a periodic and a triggered drain from
      * ever running concurrently and double-submitting (see that class's own
      * KDoc). A row rejected in that exact window recovers at the next
-     * periodic drain (15 min) or capture-triggered one, not immediately.
+     * periodic drain (15 min) or capture-triggered one — or at the retry
+     * kick, when the same pass also failed transiently — not immediately.
      * Never lost — durably PENDING or FAILED_PERMANENT throughout — and
      * closing the last of it would mean a dedicated follow-up worker for a
      * race narrower than a single drain's own runtime, which is not

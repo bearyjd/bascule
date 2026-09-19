@@ -48,6 +48,18 @@ interface ReadingDao {
     suspend fun pending(nowMillis: Long, limit: Int): List<ReadingEntity>
 
     /**
+     * When the soonest *waiting* PENDING row becomes due, or null when none is
+     * waiting. Times the retry kick `DeliveryWorker` schedules after a failed
+     * drain. Rows already due (null, or at or before [nowMillis]) are excluded
+     * on purpose: when nothing is waiting their kick falls back to the ladder's
+     * base, which the worker decides from [pending] rather than from here — a
+     * `Retry-After` of zero leaves rows due with nothing in the future, and a
+     * query that folded them in would answer "now" and invite a hot loop.
+     */
+    @Query("SELECT MIN(nextAttemptMillis) FROM readings WHERE status = 'PENDING' AND nextAttemptMillis > :nowMillis")
+    suspend fun earliestFutureAttemptMillis(nowMillis: Long): Long?
+
+    /**
      * Dedup corpus (00-design.md §3.3): every status within the window except
      * DECLINED, which is another person's weight and must not suppress ours.
      */

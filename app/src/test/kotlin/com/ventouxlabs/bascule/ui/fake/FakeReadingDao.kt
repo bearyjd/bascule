@@ -41,6 +41,14 @@ class FakeReadingDao(
             .sortedBy { it.capturedAtMillis }
             .take(limit)
 
+    /** Mirrors the live `@Query`: PENDING only, strictly after `nowMillis` (SQL `MIN` skips NULL on its own). */
+    override suspend fun earliestFutureAttemptMillis(nowMillis: Long): Long? =
+        _rows.value
+            .filter { it.status == ReadingStatus.PENDING }
+            .mapNotNull { it.nextAttemptMillis }
+            .filter { it > nowMillis }
+            .minOrNull()
+
     override suspend fun dedupCandidates(source: String, fromMillis: Long, toMillis: Long): List<ReadingEntity> =
         _rows.value.filter {
             it.status != ReadingStatus.DECLINED &&

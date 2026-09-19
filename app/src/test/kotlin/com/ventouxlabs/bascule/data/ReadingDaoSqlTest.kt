@@ -81,6 +81,52 @@ class ReadingDaoSqlTest {
         assertEquals(setOf("never-attempted", "due-exactly-now"), due)
     }
 
+    /**
+     * The retry kick's clock. `DeliveryWorker` schedules one delayed kick after
+     * a failed drain, timed to the soonest row that is still *waiting*; a row
+     * already due is the drain query's business and floors the kick at the
+     * ladder's base instead, so folding it in here would answer "now" and
+     * invite a hot loop. SQL `MIN()` skips NULL on its own, so the null row
+     * here proves nothing — `due-in-the-past` is the row that pins the `> now`
+     * clause.
+     */
+    @Test
+    fun theEarliestWaitingRowIsTheSoonestPendingRowStillInsideItsBackoffWindow() = runBlocking {
+        dao.insert(readingFixture(id = "never-attempted", nextAttemptMillis = null))
+        dao.insert(readingFixture(id = "due-in-the-past", nextAttemptMillis = 1_000L))
+        dao.insert(readingFixture(id = "due-exactly-now", nextAttemptMillis = 5_000L))
+        dao.insert(readingFixture(id = "waiting-sooner", nextAttemptMillis = 9_000L))
+        dao.insert(readingFixture(id = "waiting-later", nextAttemptMillis = 12_000L))
+
+        assertEquals(9_000L, dao.earliestFutureAttemptMillis(nowMillis = 5_000L))
+    }
+
+    /**
+     * Same structural gate as [theDrainQuerySelectsPendingAndNothingElse]: a
+     * `HELD_CONFIRM` or `BLOCKED_AUTH` row parked behind a stale
+     * `nextAttemptMillis` must not time a kick. The PENDING row carries the
+     * *largest* future value so that any status leaking through lowers the
+     * answer rather than hiding behind it.
+     */
+    @Test
+    fun theEarliestWaitingRowIgnoresEveryStatusButPending() = runBlocking {
+        ReadingStatus.entries.forEachIndexed { index, status ->
+            val nextAttemptMillis = if (status == ReadingStatus.PENDING) 100_000L else 10_000L + index
+            dao.insert(readingFixture(id = status.name, status = status, nextAttemptMillis = nextAttemptMillis))
+        }
+
+        assertEquals(100_000L, dao.earliestFutureAttemptMillis(nowMillis = 5_000L))
+    }
+
+    @Test
+    fun theEarliestWaitingRowIsNullWhenEveryPendingRowIsAlreadyDue() = runBlocking {
+        dao.insert(readingFixture(id = "never-attempted", nextAttemptMillis = null))
+        dao.insert(readingFixture(id = "due-in-the-past", nextAttemptMillis = 1_000L))
+        dao.insert(readingFixture(id = "due-exactly-now", nextAttemptMillis = 5_000L))
+
+        assertNull(dao.earliestFutureAttemptMillis(nowMillis = 5_000L))
+    }
+
     @Test
     fun theDrainQueryIsBoundedAndReturnsTheOldestCapturesFirst() = runBlocking {
         listOf(300L, 100L, 200L).forEach { at ->
