@@ -80,12 +80,37 @@ WorkManager's backoff (#25), and when the user corrected the URL to
   cross-check, the timestamp-gap column pair) is in #28's description and
   is the right procedure for any future handshake change.
 
+**Later the same day — #29, the capture time is the scale's time.** `main`
+at `0f6fc42`, 736 tests. `capturedAtMillis` now means when the weigh-in
+happened: the scale's timestamp when present and within
+`[received − 365 d, received + 30 s]` (`CaptureTimestampPolicy`), else the
+received time; `ScaleReading.capturedAtMillis` is renamed `receivedAtMillis`.
+Two things deliberately anchor on the *received* time instead: the 14-day
+delivery expiry (`retryEpochMillis`) and History's backlog banner ("waiting
+to sync since"). Review caught that a 5-minute future bound would have
+handed VitalForge a `captured_at` past its 60-second tolerance → 422 →
+`FAILED_PERMANENT` on the first attempt; it is 30 s, and a future scale
+time is never the better answer anyway since the received time is taken
+after the frame arrives. The Pixel 10 runs this build (15:33); the Pixel 9
+is one merge behind (#28 build) until it is next on USB.
+
+**Review also found a pre-existing dead check, not fixed:** the ADR-003
+remote-duplicate check (`DeliveryDrainer.isRemoteDuplicate` via
+`VitalForgeHttpClient.parseRecent`) has never matched anything against the
+real server. `parseRecent` requires `weight_kg` + `captured_at` as a Long;
+VitalForge's `/api/weight/recent` returns `{id, weight_lbs, weight_kg,
+timestamp (ISO), synced_to_garmin}` and ignores `within_seconds`. A 200
+parses to an empty list — never `Unavailable`, so §8.3's documented
+degradation never engages either. The client test fakes the field name it
+expects, which is why it passes. Nothing is duplicated in practice because
+A6's `client_id` + server-side `captured_at` window (60 s / 50 g) is the
+dedup that actually runs. Fix is either parse `timestamp` or delete the
+check and the `/recent` round-trip it costs every drain; decide before
+touching `DedupPolicy` again.
+
 **Follow-ups, decided as follow-ups, in order:**
-1. **A stored reading's `capturedAtMillis` is delivery time.** The scale's
-   timestamp is stored (`scaleTimestampMillis`, RTC verified accurate) but
-   unused, so a weigh-in delivered hours later reaches VitalForge/Garmin
-   stamped at delivery. Preferring the scale time moves `DedupPolicy`'s
-   window with it — a deliberate change, next.
+1. ~~A stored reading's `capturedAtMillis` is delivery time~~ — **done, #29**
+   (above).
 2. Frames delivered but unacked on E6 exhaustion are logged, not flushed;
    flushing would change E6's contract (ADR-007).
 3. A malformed *stored* frame is counted `NO_MEASUREMENT`, not
