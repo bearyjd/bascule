@@ -43,6 +43,12 @@ class DeliveryDrainer(
     private val dao: ReadingDao,
     private val runtime: RuntimeApi,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * A sink rather than `android.util.Log` directly, for the same reason as
+     * `GattSession`'s: this class runs in the plain JVM lane, where `Log` is
+     * unmocked and throws. [DeliveryWorker] wires it to logcat.
+     */
+    private val log: (String) -> Unit = {},
 ) {
     private sealed interface RowOutcome {
         data object Continue : RowOutcome
@@ -83,6 +89,15 @@ class DeliveryDrainer(
         // every row is still backing off costs one indexed query and no network.
         if (pending.isEmpty()) return DrainOutcome.DONE
         val remote = runtime.api.recentReadings(DedupPolicy.TIME_WINDOW_MILLIS.milliseconds)
+        // The one line that separates "the check ran and matched nothing" from
+        // "the check could not run" (00-design.md §8.3 step 3). Without it an
+        // endpoint that answers in a shape the client cannot read is
+        // indistinguishable, from outside the process, from a server with no
+        // rows — which is how the check sat inert for a month. The reason is
+        // one of the client's own fixed phrases, never response text (§8.8).
+        if (remote is RecentResult.Unavailable) {
+            log("remote duplicate check unavailable (${remote.reason}); posting anyway")
+        }
         var failed = false
         for (row in pending) {
             when (processRow(row, remote, clock())) {
@@ -154,6 +169,14 @@ class DeliveryDrainer(
         return applySubmitResult(row, runtime.api.submitReading(row, runtime.unit), now)
     }
 
+    /**
+     * The ADR-003 remote-duplicate check (00-design.md §8.3 step 2). [remote]
+     * is the server's last ten rows, not a windowed set — the server ignores
+     * the `within` the client sent — so the time half of
+     * [DedupPolicy.withinTolerance] is what applies the 5-minute window here.
+     * `Unavailable` is never a duplicate — the row posts — and [drain] has
+     * already logged it once, so that outcome is not silent.
+     */
     private fun isRemoteDuplicate(row: ReadingEntity, remote: RecentResult): Boolean =
         remote is RecentResult.Readings && remote.readings.any {
             DedupPolicy.withinTolerance(it.weightKg, row.weightKg, it.capturedAtMillis, row.capturedAtMillis)

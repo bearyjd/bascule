@@ -740,9 +740,9 @@ stored near its true capture time. `V2Shaper.kt` already sent both keys —
 present but wire-formatted as raw epoch millis, which VitalForge's Pydantic
 `datetime` field would have parsed as **seconds**, landing tens of thousands
 of years in the future; fixed to an ISO-8601 `Instant.toString()`. Neither
-shaper bug had shipped user-visible impact — `V2_BODY_COMP` isn't selectable
-in the UI yet (see the "Known open items" note on `ui/ConfigScreen.kt`'s
-`selectableContractVersions`).
+shaper bug had shipped user-visible impact — `V2_BODY_COMP` was not selectable
+in the UI at the time (`ui/ConfigScreen.kt`'s `selectableContractVersions` now
+exposes every version; see its KDoc for when and why it was withheld).
 
 **Residual gap this does not close, documented in both repos, not silently
 assumed away:** a legacy row whose *original* delivery was itself delayed
@@ -1034,10 +1034,33 @@ directly, so the policy uses only signals Bascule can actually see (ADR-003):
    `remoteDuplicate = true`. The reading is kept locally in full — Bascule's local
    store is authoritative for capture per PRP §2 — but is not double-logged to
    Garmin.
-3. If `recentReadings` is unavailable (endpoint absent, or the call itself fails),
+
+   The server (`vitalforge_weight/weight_routes.py`, `GET /p/{slug}/api/weight/recent`)
+   answers with a bare array of its last ten rows, newest first:
+   `[{"id", "weight_lbs", "weight_kg", "timestamp", "synced_to_garmin"}, ...]`.
+   `timestamp` is an ISO-8601 string with an explicit offset
+   (`datetime.astimezone(utc).isoformat()`, so always `+00:00`, microseconds when
+   non-zero); it is the client's `captured_at` when one was sent, else the
+   server's receipt time. There is no `captured_at` key, and `within_seconds` is
+   ignored — the 5-minute window is applied client-side by `DedupPolicy`. The
+   client accepts exactly this shape: any row missing `weight_kg` or `timestamp`,
+   or whose `timestamp` has no offset, makes the whole response *unavailable*
+   (step 3). The one per-row drop is a well-formed row whose instant is outside
+   2000–2100: that is a hostile-value guard, not a shape problem, and the rest
+   of the response still counts. **Until 2026-09-20 this check was inert:** the
+   parser required a `captured_at` Long the server never sends and dropped
+   unreadable rows one at a time, so every real response parsed to an empty
+   list — no match, and no `Unavailable` to trigger step 3 either. Nothing
+   duplicated in practice because the server's own dedup window did the work
+   (`client_id` + `captured_at` under v2, receipt time under v1); this check is
+   the belt to those braces.
+3. If `recentReadings` is unavailable (endpoint absent, the call itself fails, or
+   the body is not the shape above),
    fall back to PRP §8.3 option (b): first-to-connect wins, accept that VitalForge
    may see a duplicate. A failed dedup check never blocks a delivery — losing a
-   reading is worse than a duplicate the user can delete.
+   reading is worse than a duplicate the user can delete. `DeliveryDrainer` logs
+   the unavailable check once per drain, with the client's fixed reason phrase,
+   so this path is distinguishable in logcat from a server that has no rows.
 
 ### 8.4 Wrong-user reading
 Branch A drops it before persistence — a wrong index is unambiguous evidence.

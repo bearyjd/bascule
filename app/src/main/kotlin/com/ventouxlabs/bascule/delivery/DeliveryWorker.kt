@@ -1,6 +1,7 @@
 package com.ventouxlabs.bascule.delivery
 
 import android.content.Context
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
@@ -20,13 +21,15 @@ class DeliveryWorker(
         val app = applicationContext as BasculeApplication
         val dao = app.database.readingDao()
         val runtime = app.runtimeApiFactory.create()
-        val outcome = DeliveryDrainer(dao, runtime).drain()
+        val outcome = DeliveryDrainer(dao, runtime, log = { Log.i(TAG, it) }).drain()
         scheduleRetryIfNeeded(outcome, dao, app.deliveryScheduler, System.currentTimeMillis())
         return resultFor(outcome)
     }
 
     companion object {
         const val UNIQUE_WORK_NAME = "delivery-drain"
+
+        private const val TAG = "DeliveryDrainer"
 
         /**
          * Every outcome succeeds. [DrainOutcome.MORE_PAGES] re-enqueues instead

@@ -42,6 +42,19 @@ VitalForge serves weight routes under `/p/{slug}/` and auth at the root.
 the Base URL setting must be `https://host/p/<slug>`; a bare host reproduces
 the pre-prefix paths exactly.
 
+`/recent` returns a bare array of the server's last ten rows —
+`{id, weight_lbs, weight_kg, timestamp, synced_to_garmin}`, `timestamp` an
+ISO-8601 string with a `+00:00` offset — and ignores `within_seconds`; the
+5-minute window is `DedupPolicy`'s. `parseRecent` accepts exactly that shape
+and makes the whole response `Unavailable` (post anyway) on any row that
+does not fit; a well-formed row with an instant outside 2000–2100 is dropped
+alone. `DeliveryDrainer` logs an `Unavailable` once per drain (`DeliveryWorker`
+wires the sink to logcat), so it reads differently from "server has no rows".
+Until 2026-09-20 the parser read a `captured_at` Long that was never there and
+dropped rows silently, so the check matched nothing and degraded to nothing;
+the server's own dedup window (`client_id` + `captured_at` under v2, receipt
+time under v1) was doing all the work.
+
 ## Contracts
 
 `ContractVersion` → `ReadingPayloadShaper`:

@@ -7,12 +7,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -22,6 +21,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.format.DateTimeParseException
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
 
@@ -181,26 +183,70 @@ class VitalForgeHttpClient(
         }
     }
 
+    /**
+     * Reads `GET /p/{slug}/api/weight/recent` as VitalForge actually serves it
+     * (`vitalforge_weight/weight_routes.py`): a bare array of the last ten rows,
+     * each `{id, weight_lbs, weight_kg, timestamp, synced_to_garmin}`, where
+     * `timestamp` is `datetime.astimezone(utc).isoformat()` — ISO-8601 with an
+     * explicit offset. Exactly one shape is accepted, and it is that one.
+     *
+     * A shape mismatch is loud. Any item lacking `weight_kg` or `timestamp`, or
+     * carrying a `timestamp` that is not an offset datetime, makes the *whole*
+     * response [RecentResult.Unavailable]: a response we cannot read is one we
+     * cannot trust for dedup, and `Unavailable` is the contract that makes the
+     * caller post anyway (00-design.md §8.3 step 3). The previous parser dropped
+     * unreadable rows one at a time and required a `captured_at` Long no server
+     * sends, so every real response quietly became an empty list — a check that
+     * never matched and never degraded, unnoticed for a month. Now a mismatch
+     * returns `Unavailable`, which `DeliveryDrainer` logs once per drain, so it
+     * is distinguishable from a server that simply has no rows.
+     *
+     * An item with an implausible epoch is the one per-row drop that remains:
+     * that is a hostile-value guard on a well-formed row, not a shape problem,
+     * and the rest of the response still protects against a duplicate. The
+     * range is compared as instants, before any conversion to millis, so the
+     * far end of what ISO-8601 can spell (year ±999,999,999, where
+     * `toEpochMilli()` overflows a Long) takes this path like year 9999 does —
+     * out of range is a dropped row however far out it is; only malformed is
+     * a shape problem.
+     */
     private fun parseRecent(body: String): RecentResult {
-        val element = LENIENT_JSON.parseToJsonElement(body)
-        val array = (element as? JsonArray)
-            ?: (element as? JsonObject)?.get("readings") as? JsonArray
-            ?: return RecentResult.Unavailable("unrecognised response shape")
-
-        val readings = array.mapNotNull { item ->
-            val obj = item as? JsonObject ?: return@mapNotNull null
-            val weight = obj["weight_kg"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
-            val at = obj["captured_at"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-            // captured_at is server-controlled input compared via DedupPolicy's
-            // abs(timeA - timeB): at exactly Long.MIN_VALUE, abs() overflows back
-            // to a negative number and the tolerance check passes unconditionally
-            // regardless of how far apart the two timestamps actually are.
-            // Bounding to a plausible epoch range here, at the trust boundary,
-            // keeps every downstream subtraction well inside Long's range.
-            if (at !in PLAUSIBLE_EPOCH_MILLIS_RANGE) return@mapNotNull null
-            RemoteReading(weight, at)
+        val array = LENIENT_JSON.parseToJsonElement(body) as? JsonArray
+            ?: return RecentResult.Unavailable(UNEXPECTED_RECENT_SHAPE_REASON)
+        val rows = array.map { item ->
+            parseRow(item) ?: return RecentResult.Unavailable(UNEXPECTED_RECENT_SHAPE_REASON)
         }
-        return RecentResult.Readings(readings)
+        // The timestamp is server-controlled input compared via DedupPolicy's
+        // abs(timeA - timeB): at exactly Long.MIN_VALUE, abs() overflows back
+        // to a negative number and the tolerance check passes unconditionally
+        // regardless of how far apart the two timestamps actually are.
+        // Bounding to a plausible epoch range here, at the trust boundary,
+        // keeps every downstream subtraction well inside Long's range.
+        return RecentResult.Readings(
+            rows.filter { (_, capturedAt) -> capturedAt in PLAUSIBLE_EPOCH_RANGE }
+                .map { (weightKg, capturedAt) -> RemoteReading(weightKg, capturedAt.toEpochMilli()) },
+        )
+    }
+
+    /**
+     * `weight_kg` and `timestamp` of one row, or null when [item] is not one of
+     * the server's rows — see [parseRecent] for why that fails the whole response.
+     */
+    private fun parseRow(item: JsonElement): Pair<Double, Instant>? {
+        val obj = item as? JsonObject ?: return null
+        val weight = (obj["weight_kg"] as? JsonPrimitive)?.doubleOrNull ?: return null
+        val timestamp = (obj["timestamp"] as? JsonPrimitive)?.content ?: return null
+        // OffsetDateTime.parse requires the offset the server always writes
+        // (`+00:00`; `Z` is also accepted). A bare local datetime is refused
+        // rather than assumed to be in any zone — assuming would silently shift
+        // every comparison by the phone's UTC offset. Only the parse is caught,
+        // and only its own exception: anything else here is a bug, not a shape.
+        val parsed = try {
+            OffsetDateTime.parse(timestamp)
+        } catch (_: DateTimeParseException) {
+            return null
+        }
+        return weight to parsed.toInstant()
     }
 
     /**
@@ -268,11 +314,16 @@ class VitalForgeHttpClient(
 
         private const val HTTP_UNAUTHORIZED = 401
 
+        /** The whole recent-readings response is refused with this reason — see [parseRecent]. */
+        const val UNEXPECTED_RECENT_SHAPE_REASON = "unexpected recent-readings shape"
+
         /**
-         * A remote `captured_at` outside this range cannot be a real weigh-in and
-         * is rejected rather than compared — see [parseRecent].
+         * A remote `timestamp` outside this range cannot be a real weigh-in and
+         * is rejected rather than compared — see [parseRecent]. Held as instants
+         * so the check never needs a millis value that might not fit a Long.
          */
-        private val PLAUSIBLE_EPOCH_MILLIS_RANGE = 946_684_800_000L..4_102_444_800_000L // 2000-01-01 .. 2100-01-01
+        private val PLAUSIBLE_EPOCH_RANGE: ClosedRange<Instant> =
+            Instant.ofEpochMilli(946_684_800_000L)..Instant.ofEpochMilli(4_102_444_800_000L) // 2000-01-01 .. 2100-01-01
 
         /** Arbitrary and unused by callers — `testConnection()` only reads the status code, never the body. */
         private const val TEST_CONNECTION_WINDOW_SECONDS = "60"

@@ -13,11 +13,11 @@ import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.time.OffsetDateTime
 import kotlin.time.Duration.Companion.minutes
 
 /**
@@ -317,15 +317,144 @@ class VitalForgeHttpClientTest {
         assertFalse("nor may the response body", "detail" in reason)
     }
 
+    // The ADR-003 remote-duplicate check reads `GET /p/{slug}/api/weight/recent`.
+    // VitalForge (`vitalforge_weight/weight_routes.py`) answers with the last ten
+    // rows as `{id, weight_lbs, weight_kg, timestamp, synced_to_garmin}`, where
+    // `timestamp` is `datetime.astimezone(utc).isoformat()` — an ISO-8601 string
+    // with a `+00:00` offset and microseconds when non-zero. There is no
+    // `captured_at` key. The old fake here carried one as a Long, which is how a
+    // parser that never matched a real response stayed green for a month.
+
+    /** One row exactly as the server serialises it; the parser ignores every field but two. */
+    private fun recentRow(weightKg: Double, timestamp: String, id: Int = 1) =
+        """{"id":$id,"weight_lbs":${weightKg * LBS_PER_KG},"weight_kg":$weightKg,""" +
+            """"timestamp":"$timestamp","synced_to_garmin":true}"""
+
+    private fun recentBody(vararg rows: String) = rows.joinToString(",", "[", "]")
+
     @Test
-    fun recentReadingsParsesTheContentionCheckResponse() = runBlocking {
-        server.enqueue(ok("""[{"weight_kg":90.8,"captured_at":1787000000000}]"""))
+    fun recentReadingsParsesTheServersRealResponseShape() = runBlocking {
+        val withMicros = "2026-09-19T14:42:02.123456+00:00"
+        server.enqueue(
+            ok(recentBody(recentRow(88.76, UTC_TIMESTAMP, id = 123), recentRow(88.31, withMicros, id = 122))),
+        )
 
         val result = client().recentReadings(5.minutes)
 
         val readings = (result as RecentResult.Readings).readings
-        assertEquals(1, readings.size)
-        assertEquals(90.8, readings.single().weightKg, 1e-9)
+        assertEquals(2, readings.size)
+        assertEquals(88.76, readings[0].weightKg, 1e-9)
+        assertEquals(UTC_INSTANT_MILLIS, readings[0].capturedAtMillis)
+        assertEquals(88.31, readings[1].weightKg, 1e-9)
+        assertEquals(
+            "the server's microseconds truncate to millis; a fixed-pattern formatter would reject them",
+            OffsetDateTime.parse(withMicros).toInstant().toEpochMilli(),
+            readings[1].capturedAtMillis,
+        )
+    }
+
+    @Test
+    fun aRecentTimestampWithANonUtcOffsetParsesToTheSameInstantAsItsUtcForm() = runBlocking {
+        // Two spellings of one instant. Parsing either as a wall-clock time in
+        // the JVM's zone puts at least one of them on the wrong instant whatever
+        // that zone happens to be, so this cannot pass by luck of the test host.
+        server.enqueue(ok(recentBody(recentRow(88.76, UTC_TIMESTAMP), recentRow(88.76, "2026-09-19T10:42:02-04:00"))))
+
+        val result = client().recentReadings(5.minutes)
+
+        val readings = (result as RecentResult.Readings).readings
+        assertEquals(UTC_INSTANT_MILLIS, readings[0].capturedAtMillis)
+        assertEquals(UTC_INSTANT_MILLIS, readings[1].capturedAtMillis)
+    }
+
+    @Test
+    fun aRecentRowMissingItsTimestampMakesTheWholeResponseUnavailable() = runBlocking {
+        val noTimestamp = """{"id":2,"weight_lbs":194.7,"weight_kg":88.31,"synced_to_garmin":false}"""
+        server.enqueue(ok(recentBody(recentRow(88.76, UTC_TIMESTAMP), noTimestamp)))
+
+        val result = client().recentReadings(5.minutes)
+
+        assertEquals(
+            "a response we cannot read is one we cannot trust for dedup; Unavailable makes the caller post anyway",
+            UNEXPECTED_SHAPE,
+            result,
+        )
+    }
+
+    @Test
+    fun aRecentRowMissingItsWeightMakesTheWholeResponseUnavailable() = runBlocking {
+        val noWeight = """{"id":2,"weight_lbs":194.7,"timestamp":"$UTC_TIMESTAMP","synced_to_garmin":false}"""
+        server.enqueue(ok(recentBody(recentRow(88.76, UTC_TIMESTAMP), noWeight)))
+
+        val result = client().recentReadings(5.minutes)
+
+        assertEquals("a defaulted weight would compare against nothing real", UNEXPECTED_SHAPE, result)
+    }
+
+    @Test
+    fun aRecentRowWithABareLocalTimestampMakesTheWholeResponseUnavailable() = runBlocking {
+        server.enqueue(ok(recentBody(recentRow(88.76, "2026-09-19T14:42:02"))))
+
+        val result = client().recentReadings(5.minutes)
+
+        assertEquals("a datetime with no offset would be silently mis-zoned, not compared", UNEXPECTED_SHAPE, result)
+    }
+
+    /**
+     * Regression tripwire: this is the shape the old test faked and the old
+     * parser required. No server sends it. If it ever parses again, the check
+     * has gone back to reading a field that is not there.
+     */
+    @Test
+    fun theOldCapturedAtLongShapeIsUnavailableNotASilentlyEmptyList() = runBlocking {
+        server.enqueue(ok("""[{"weight_kg":90.8,"captured_at":1787000000000}]"""))
+
+        val result = client().recentReadings(5.minutes)
+
+        assertEquals(UNEXPECTED_SHAPE, result)
+    }
+
+    @Test
+    fun aRecentRowWithAnImplausibleEpochIsDroppedWithoutSpoilingTheRest() = runBlocking {
+        // A hostile value, not a shape problem: the row is well-formed, its
+        // instant just cannot be a weigh-in. It is dropped alone so the rest of
+        // the response still protects against a duplicate.
+        server.enqueue(ok(recentBody(recentRow(88.76, "1900-01-01T00:00:00+00:00"), recentRow(88.31, UTC_TIMESTAMP))))
+
+        val result = client().recentReadings(5.minutes)
+
+        val readings = (result as RecentResult.Readings).readings
+        assertEquals(listOf(RemoteReading(88.31, UTC_INSTANT_MILLIS)), readings)
+    }
+
+    /**
+     * Year 999999999 is the far end of what ISO-8601 can spell. It parses, but
+     * `Instant.toEpochMilli()` overflows a Long on it, and a parser that guards
+     * the conversion with the same catch as the parse would call that a shape
+     * problem and refuse the whole response — while year 9999, just as
+     * impossible, took the per-row path. One rule: malformed is a shape
+     * problem, out of range is a dropped row, however far out of range.
+     */
+    @Test
+    fun aRecentRowWithAnAbsurdYearIsDroppedLikeAnyOtherOutOfRangeEpoch() = runBlocking {
+        val body = recentBody(recentRow(88.76, "+999999999-12-31T23:59:59+00:00"), recentRow(88.31, UTC_TIMESTAMP))
+        server.enqueue(ok(body))
+
+        val result = client().recentReadings(5.minutes)
+
+        val readings = (result as RecentResult.Readings).readings
+        assertEquals(listOf(RemoteReading(88.31, UTC_INSTANT_MILLIS)), readings)
+    }
+
+    @Test
+    fun aRecentEnvelopeObjectIsUnavailableNotUnwrapped() = runBlocking {
+        // The parser used to also accept `{"readings": [...]}`. Nothing sends it;
+        // a second accepted shape is one more place for a mismatch to hide.
+        server.enqueue(ok("""{"readings":[${recentRow(88.76, UTC_TIMESTAMP)}]}"""))
+
+        val result = client().recentReadings(5.minutes)
+
+        assertEquals(UNEXPECTED_SHAPE, result)
     }
 
     @Test
@@ -344,7 +473,9 @@ class VitalForgeHttpClientTest {
     fun malformedRecentResponseNeverThrows() = runBlocking {
         server.enqueue(ok("not json at all"))
 
-        assertNotNull(client().recentReadings(5.minutes))
+        val result = client().recentReadings(5.minutes)
+
+        assertTrue("unreadable is Unavailable, so the caller posts anyway", result is RecentResult.Unavailable)
     }
 
     @Test
@@ -651,5 +782,17 @@ class VitalForgeHttpClientTest {
 
         /** Realistic itsdangerous `URLSafeTimedSerializer` shape (payload.timestamp.signature). */
         const val SESSION_COOKIE_VALUE = "eyJ1c2VyIjoiYWRtaW4ifQ.aBcD3f.xyz123-abc_DEF456"
+
+        /** As the server writes it: `datetime.astimezone(timezone.utc).isoformat()`. */
+        const val UTC_TIMESTAMP = "2026-09-19T14:42:02+00:00"
+
+        /** Derived from the string, not hand-typed, so a wrong-zone parse cannot coincide with it. */
+        val UTC_INSTANT_MILLIS: Long = OffsetDateTime.parse(UTC_TIMESTAMP).toInstant().toEpochMilli()
+
+        /** The server's own `weight_lbs` derivation; only there to keep the fixture shape honest. */
+        const val LBS_PER_KG = 2.20462
+
+        /** Spelled here, not read from production: the exact reason is part of what is pinned. */
+        val UNEXPECTED_SHAPE = RecentResult.Unavailable("unexpected recent-readings shape")
     }
 }
