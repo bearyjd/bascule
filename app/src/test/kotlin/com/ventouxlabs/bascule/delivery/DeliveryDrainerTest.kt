@@ -23,8 +23,12 @@ import java.time.format.DateTimeFormatter
 
 class DeliveryDrainerTest {
 
-    private fun drainer(dao: FakeReadingDao, api: FakeDeliveryApi, now: Long = 10_000L) =
-        DeliveryDrainer(dao, RuntimeApi(api, WeightUnit.KILOGRAMS), clock = { now })
+    private fun drainer(
+        dao: FakeReadingDao,
+        api: FakeDeliveryApi,
+        now: Long = 10_000L,
+        log: (String) -> Unit = {},
+    ) = DeliveryDrainer(dao, RuntimeApi(api, WeightUnit.KILOGRAMS), clock = { now }, log = log)
 
     /**
      * Builds the [SubmitResult] the real [ResponseClassifier] would build for a
@@ -64,6 +68,31 @@ class DeliveryDrainerTest {
         val row = dao.rows.value.single()
         assertEquals(ReadingStatus.SENT, row.status)
         assertTrue(row.remoteDuplicate)
+    }
+
+    /**
+     * 00-design.md §8.3 step 3, at the place it happens: a remote check that
+     * could not run is not a verdict on any row. Every row posts, none is a
+     * duplicate, and the drain says so once — the one line that makes an
+     * `Unavailable` distinguishable, from outside the process, from a server
+     * that simply had no rows. Before this test the mutant "unavailable means
+     * every row is a duplicate" — every row SENT with no POST — survived the
+     * suite.
+     */
+    @Test
+    fun anUnavailableRemoteCheckNeverBlocksDeliveryAndIsLoggedOncePerDrain() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "row-1", capturedAtMillis = 1_000L))
+        dao.insert(readingFixture(id = "row-2", capturedAtMillis = 2_000L))
+        val api = FakeDeliveryApi(recentResult = RecentResult.Unavailable("unexpected recent-readings shape"))
+        val logged = mutableListOf<String>()
+        drainer(dao, api, log = { logged += it }).drain()
+        assertEquals(listOf("row-1", "row-2"), api.submittedReadingIds)
+        assertTrue(dao.rows.value.all { it.status == ReadingStatus.SENT && !it.remoteDuplicate })
+        assertEquals(
+            listOf("remote duplicate check unavailable (unexpected recent-readings shape); posting anyway"),
+            logged,
+        )
     }
 
     @Test

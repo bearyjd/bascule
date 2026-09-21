@@ -36,7 +36,15 @@ interface VitalForgeApi {
 
     suspend fun submitReading(reading: ReadingEntity, unit: WeightUnit): SubmitResult
 
-    /** ADR-003 contention check. Absent on servers that do not expose it. */
+    /**
+     * ADR-003 contention check. Absent on servers that do not expose it.
+     *
+     * VitalForge answers `GET /p/{slug}/api/weight/recent` with its last ten
+     * rows for the person, newest first, regardless of [within]: the server
+     * ignores `within_seconds`, so [within] is advisory and the caller filters
+     * by `DedupPolicy.TIME_WINDOW_MILLIS` itself. Ten rows is days of weigh-ins
+     * for one person, so the window is always covered.
+     */
     suspend fun recentReadings(within: Duration): RecentResult
 
     /**
@@ -66,12 +74,27 @@ sealed interface SubmitResult {
 }
 
 sealed interface RecentResult {
+    /** Every row the server returned that parsed as one of its rows — possibly none. */
     data class Readings(val readings: List<RemoteReading>) : RecentResult
 
-    /** The endpoint is absent or the call failed. Callers post anyway (ADR-003 step 3). */
+    /**
+     * The endpoint is absent, the call failed, or the body was not the shape
+     * the server documents. Callers post anyway (ADR-003 step 3): a check we
+     * could not run must never block a delivery, and must never pretend it ran.
+     */
     data class Unavailable(val reason: String) : RecentResult
 }
 
+/**
+ * One row of the server's recent-readings response.
+ *
+ * [capturedAtMillis] is the server's `timestamp`, which the server anchors on
+ * the client's `captured_at` when the row was posted with one (contract v2)
+ * and on its own receipt time otherwise (v1 rows, pwa, tasker). Under v1 the
+ * two differ by the delivery delay, which for a weigh-in stored on the scale
+ * and handed over at the next consent can be hours — that is the §4.4
+ * residual, not a parsing concern.
+ */
 data class RemoteReading(val weightKg: Double, val capturedAtMillis: Long)
 
 sealed interface ConnectionTestResult {
