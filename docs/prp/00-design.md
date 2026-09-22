@@ -1180,7 +1180,11 @@ always fails until reboot".
 ### 8.11 Battery
 Wake path is a `PendingIntent` `ScanFilter` scan (no app process running while
 idle), per PRP scope and the Phase 4 gate. `SCAN_MODE_LOW_POWER`. Active radio
-use is bounded by the 90 s hard session ceiling. E4's `incompatibleStreak`
+use is bounded by the hard session ceiling (§2.5) — since 2026-09-06 nearly
+nine minutes, not 90 s, because the BF720 only indicates a live weigh-in to a
+client already listening. The link drops to `CONNECTION_PRIORITY_LOW_POWER`
+once subscribed, but what a day of long listens costs the *scale's* batteries
+is unmeasured (HANDOFF 2026-09-06). E4's `incompatibleStreak`
 suspension prevents an unbounded wake-connect-fail loop against a device that
 matches the filter but is not our scale. Delivery backoff caps at 15 min.
 
