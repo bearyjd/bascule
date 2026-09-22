@@ -116,6 +116,24 @@ a lost response. Residual, stated: a v1 *stored* weigh-in (scale time hours
 before receipt) never matches server-side, so v1 + stored + response lost on
 both first attempts can duplicate — narrow, and v2 has none of it.
 
+**A caveat on the stored path, from the one attempt that produced nothing
+(hypothesis, stated as such):** the first clean-looking attempt on 09-19
+(Bascule confirmed dead, weigh-in taken, consent at 09:39:52) delivered no
+stored measurement, and the Pixel 9 could not have consumed it (it would
+then have held the link for eight minutes, but the Pixel 10 connected within
+seconds). The remaining explanation: with P2 just deleted, P1's reference
+weight was 92.74 kg against a step-on of ~88.4, a 4.4 kg gap, and the scale
+did not file the weigh-in under P1 at all — the same recognition that had
+chosen P2 at a 2.6 kg gap that morning. The next weigh-in, once P1's
+reference had moved to 88.76 from a live capture, was filed and delivered.
+So: **the scale only stores an unattended weigh-in under P1 if the weight is
+within its recognition tolerance of P1's last reading** (somewhere between
+2.6 and 4.4 kg, unmeasured). After a long gap or a large change, the first
+unattended weigh-in may be filed as a guest and lost; the scale's own
+buttons let the user pick P1 when it shows no user. Nothing in the app can
+change this. Worth one deliberate test some day: step on with the phone
+dead at a weight ~3.5 kg off P1's last, and see what the display shows.
+
 **Follow-ups, decided as follow-ups, in order:**
 1. ~~A stored reading's `capturedAtMillis` is delivery time~~ — **done, #29**
    (above).
