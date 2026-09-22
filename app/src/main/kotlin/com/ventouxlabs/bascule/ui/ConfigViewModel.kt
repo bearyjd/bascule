@@ -1,23 +1,14 @@
 package com.ventouxlabs.bascule.ui
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
-import com.ventouxlabs.bascule.ble.RegistrationPhase
 import com.ventouxlabs.bascule.ble.ScaleRegistrar
-import com.ventouxlabs.bascule.ble.ScaleRegistrationResult
 import com.ventouxlabs.bascule.ble.session.ConsentStore
-import com.ventouxlabs.bascule.ble.session.ScaleCredential
-import com.ventouxlabs.bascule.data.BackupCredentialType
 import com.ventouxlabs.bascule.data.ConfigStore
-import com.ventouxlabs.bascule.data.PortableSettings
-import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.data.ReadingDao
-import com.ventouxlabs.bascule.data.SettingsBackupCodec
-import com.ventouxlabs.bascule.data.ScaleProfileCodec
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.data.ReadingStatus
@@ -30,6 +21,11 @@ import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.V1Shaper
 import com.ventouxlabs.bascule.network.VitalForgeApi
 import com.ventouxlabs.bascule.network.VitalForgeHttpClient
+import com.ventouxlabs.bascule.ui.config.BaseUrls
+import com.ventouxlabs.bascule.ui.config.BaseUrls.hostOf
+import com.ventouxlabs.bascule.ui.config.ScaleLinkingController
+import com.ventouxlabs.bascule.ui.config.SettingsBackupCoordinator
+import com.ventouxlabs.bascule.ui.config.requeueRowsRejectedUnderOtherContract
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -46,8 +42,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URI
-import java.net.URISyntaxException
 
 data class ConfigUiState(
     val baseUrl: String = "",
@@ -183,10 +177,41 @@ class ConfigViewModel(
     private val _loginError = MutableStateFlow<String?>(null)
     private val _isLoggingIn = MutableStateFlow(false)
     private val _loginSucceeded = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    private val _scaleRegistration = MutableStateFlow<ScaleRegistrationUiState>(ScaleRegistrationUiState.Idle)
 
     /** One-shot — a sticky boolean would re-fire on every tab-switch return via saveState/restoreState. */
     val loginSucceeded: SharedFlow<Unit> = _loginSucceeded.asSharedFlow()
+
+    /**
+     * Owns the registration state and both linking routes; it launches into
+     * [viewModelScope] itself because its guards and validation run
+     * synchronously before the launch, and the bump it is handed is what
+     * makes [credentialState] re-read [ConsentStore] after a registration.
+     */
+    private val scaleLinking = ScaleLinkingController(
+        scope = viewModelScope,
+        scaleRegistrar = scaleRegistrar,
+        scaleProfileStore = scaleProfileStore,
+        consentStore = consentStore,
+        configStore = configStore,
+        rearmScanner = rearmScanner,
+        ioDispatcher = ioDispatcher,
+        onConsentChanged = { _consentVersion.value++ },
+    )
+
+    /** Export/import proper; [unblockAuthRowsAndDrain] is shared with [saveToken] and [login], so it is handed in. */
+    private val settingsBackup = SettingsBackupCoordinator(
+        configStore = configStore,
+        authTokenStore = authTokenStore,
+        sessionCookieStore = sessionCookieStore,
+        consentStore = consentStore,
+        scaleProfileStore = scaleProfileStore,
+        dao = dao,
+        deliveryTrigger = deliveryTrigger,
+        nowMillis = nowMillis,
+        rearmScanner = rearmScanner,
+        ioDispatcher = ioDispatcher,
+        unblockAuthRowsAndDrain = ::unblockAuthRowsAndDrain,
+    )
 
     private val storedConfig = combine(
         configStore.baseUrl,
@@ -229,7 +254,7 @@ class ConfigViewModel(
         _connectionTest,
         _loginError,
         _isLoggingIn,
-        _scaleRegistration,
+        scaleLinking.state,
     ) { urlError, connectionTest, loginError, isLoggingIn, scaleRegistration ->
         TransientUiState(urlError, connectionTest, loginError, isLoggingIn, scaleRegistration)
     }
@@ -472,327 +497,45 @@ class ConfigViewModel(
         }
     }
 
-    /**
-     * O-08.5: re-registering may consume one of the scale's 8 profile slots
-     * (§8.8, HW-26) — the caller must have already shown that warning and
-     * gotten explicit confirmation before this runs. The registrar preserves
-     * the working credential until the scale is actually found, then clears
-     * it immediately before the new handshake so a failed scan loses nothing.
-     */
+    /** See [ScaleLinkingController.reRegister] for the O-08.5 slot-consumption caveat the caller must honour. */
     fun reRegister() {
-        startScaleRegistration(forceNew = true)
+        scaleLinking.reRegister()
     }
 
     fun startScaleRegistration(forceNew: Boolean = false) {
-        if (_scaleRegistration.value == ScaleRegistrationUiState.Scanning ||
-            _scaleRegistration.value == ScaleRegistrationUiState.Connecting
-        ) {
-            return
-        }
-        val registrar = scaleRegistrar
-        if (registrar == null) {
-            _scaleRegistration.value = ScaleRegistrationUiState.Failure("Scale registration is unavailable")
-            return
-        }
-        viewModelScope.launch {
-            val result = registrar.register(forceNew) { phase ->
-                _scaleRegistration.value = when (phase) {
-                    RegistrationPhase.SCANNING -> ScaleRegistrationUiState.Scanning
-                    RegistrationPhase.CONNECTING -> ScaleRegistrationUiState.Connecting
-                }
-            }
-            when (result) {
-                is ScaleRegistrationResult.Success -> onRegistrationSucceeded(result.address, result.scaleIndex)
-                is ScaleRegistrationResult.Failure ->
-                    _scaleRegistration.value = ScaleRegistrationUiState.Failure(result.message)
-            }
-        }
+        scaleLinking.startScaleRegistration(forceNew)
     }
 
     /** Restores a known BF720 mapping without consuming another one of its eight slots. */
     fun linkExistingScale(address: String, scaleIndex: String, consentCode: String) {
-        val normalizedAddress = address.trim().uppercase()
-        val index = scaleIndex.toIntOrNull()
-        val code = consentCode.toIntOrNull()
-        when {
-            !BLUETOOTH_ADDRESS.matches(normalizedAddress) ->
-                _scaleRegistration.value = ScaleRegistrationUiState.Failure("Enter a valid Bluetooth address")
-            index !in SCALE_INDEX_RANGE ->
-                _scaleRegistration.value = ScaleRegistrationUiState.Failure(
-                    "User slot must be between ${SCALE_INDEX_RANGE.first} and ${SCALE_INDEX_RANGE.last}",
-                )
-            code !in CONSENT_CODE_RANGE ->
-                _scaleRegistration.value = ScaleRegistrationUiState.Failure(
-                    "Consent code must be between ${CONSENT_CODE_RANGE.first} and ${CONSENT_CODE_RANGE.last}",
-                )
-            else -> viewModelScope.launch {
-                val scaleIndexValue = requireNotNull(index)
-                // Encrypted-prefs write — same seam as writeCredentials.
-                withContext(ioDispatcher) {
-                    consentStore.save(normalizedAddress, ScaleCredential(scaleIndexValue, requireNotNull(code)))
-                }
-                configStore.savePairedDeviceAddress(normalizedAddress)
-                onRegistrationSucceeded(normalizedAddress, scaleIndexValue)
-            }
-        }
+        scaleLinking.linkExistingScale(address, scaleIndex, consentCode)
     }
+
+    suspend fun exportSettings(passphrase: String): Result<ByteArray> = settingsBackup.exportSettings(passphrase)
 
     /**
-     * The tail both registration routes share — the BLE handshake and
-     * [linkExistingScale]. Extracted because enabling capture in only one would
-     * make registering via the scale work while linking by hand silently did
-     * not, with nothing to report the difference.
-     *
-     * Capture is enabled here rather than defaulted on in `ConfigStore`: a bare
-     * default would arm background scanning for someone who never asked, whereas
-     * completing a registration is an unambiguous statement of intent. The Scale
-     * screen's toggle still turns it back off.
+     * The same-host gate and the host-change handling are documented on
+     * [SettingsBackupCoordinator.importSettings]. What is left here is UI
+     * reactivity, applied once the coordinator has returned: the data-side
+     * ordering the security reviews pinned — park the backlog on a host
+     * change, apply the credential, then unblock/drain and requeue — happens
+     * entirely inside the coordinator, and none of those steps reads the
+     * flows bumped below, so bumping them afterwards changes nothing they
+     * gate. All the bumps do is make [uiState] re-read the stores the import
+     * just wrote and retire results that no longer describe the new config.
      */
-    private suspend fun onRegistrationSucceeded(address: String, scaleIndex: Int) {
-        activateLinkedProfile(address, scaleIndex)
-        configStore.saveAutomaticCaptureEnabled(true)
-        rearmScanner?.invoke()
-        _consentVersion.value++
-        _scaleRegistration.value = ScaleRegistrationUiState.Success(address, scaleIndex)
-    }
-
-    /**
-     * A profile the registry creates for an already-active device is stored
-     * inactive, and only the active profile is scanned and captured for — so
-     * without this, establishing a second scale reports success and then
-     * silently never captures. The user hand-entered — or just registered —
-     * this mapping; that is the one they mean to use.
-     */
-    private suspend fun activateLinkedProfile(address: String, scaleIndex: Int) {
-        val store = scaleProfileStore ?: return
-        withContext(ioDispatcher) {
-            store.profiles.value
-                .firstOrNull { it.deviceAddress.equals(address, true) && it.scaleIndex == scaleIndex }
-                ?.takeUnless { it.active }
-                ?.let { store.setActive(it.id) }
-        }
-    }
-
-    suspend fun exportSettings(passphrase: String): Result<ByteArray> = runCatching {
-        withContext(ioDispatcher) {
-            val pairedAddress = configStore.pairedDeviceAddress.first()
-            val token = authTokenStore.token()
-            val session = sessionCookieStore.cookie()
-            val credentialType = when {
-                token != null -> BackupCredentialType.TOKEN
-                session != null -> BackupCredentialType.SESSION
-                else -> BackupCredentialType.NONE
-            }
-            SettingsBackupCodec.encrypt(
-                PortableSettings(
-                    baseUrl = configStore.baseUrl.first().orEmpty(),
-                    displayUnit = configStore.displayUnit.first(),
-                    contractVersion = configStore.contractVersion.first(),
-                    alwaysOnBridging = configStore.alwaysOnBridging.first(),
-                    credentialType = credentialType,
-                    credentialValue = token ?: session,
-                    pairedDeviceAddress = pairedAddress,
-                    scaleCredential = pairedAddress?.let(consentStore::credentialFor),
-                    profiles = scaleProfileStore?.profiles?.value.orEmpty(),
-                    automaticCaptureEnabled = configStore.automaticCaptureEnabled.first(),
-                ),
-                passphrase,
-            )
-        }
-    }
-
-    /**
-     * A backup file sets both *which server* and *which credential*, and the two
-     * are consistent with each other, so a swapped pair produces no auth error
-     * the user would notice. Draining the backlog straight after the swap would
-     * POST every stored reading — weight and, under the V2 contract, the full
-     * body-composition set — to a host the user never chose. So the immediate
-     * drain fires only when the imported URL keeps the same host as the one
-     * already configured; against a new host the rows stay `BLOCKED_AUTH` until
-     * the user does something deliberate ([saveToken] or [login], both of which
-     * unblock and drain on their own).
-     */
-    suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<ImportOutcome> = runCatching {
-        withContext(ioDispatcher) {
-            val imported = SettingsBackupCodec.decrypt(bytes, passphrase)
-            require(imported.baseUrl.isBlank() || validateBaseUrl(imported.baseUrl) == null) {
-                "Backup contains an invalid server URL"
-            }
-            // Checked before the first write: a registry with no active profile
-            // arms nothing, so importing one would leave capture inert with
-            // nothing said about it. Aborting here keeps the import atomic.
-            require(imported.profiles.isEmpty() || imported.profiles.any { it.active }) {
-                "Backup has profiles but none of them is active"
-            }
-            // Front-loaded for the same reason: replaceAll refuses duplicate
-            // ids, and letting it throw would leave the URL, unit, and
-            // contract version already written.
-            require(imported.profiles.distinctBy { it.id }.size == imported.profiles.size) {
-                "Backup contains duplicate profile ids"
-            }
-            val previousAddress = configStore.pairedDeviceAddress.first()
-            val currentHost = hostOf(configStore.baseUrl.first())
-            // No host configured yet means there is nothing to silently redirect
-            // *away from* — this is a fresh setup or a first restore, the most
-            // common legitimate use of this feature, and must not be penalized
-            // with the same friction a real host change gets. Once a real host
-            // IS on record, a blank or unparseable imported one must never
-            // compare equal to it (an unparseable host is not "no change").
-            // See pr-1-review-security.md HIGH-1 / MEDIUM-2.
-            val keepsSameHost = currentHost == null || currentHost == hostOf(imported.baseUrl)
-            // A backup pointing at an unfamiliar host is the one case this
-            // import flow cannot tell apart from a hostile one that silently
-            // repoints the app: the same-host check only ever gated the one
-            // unblockAuthRowsAndDrain() call below, but the PENDING backlog and
-            // every future capture were never gated by anything — a periodic
-            // drain re-reads the base URL and credential fresh on every run, so
-            // both would have reached the new host with zero user interaction.
-            // On a host change: park the existing backlog behind BLOCKED_AUTH
-            // (the same status a real auth rejection uses) and do NOT install
-            // the backup's own credential automatically — the user has to
-            // notice they're signed out and take an explicit Login/Save-token
-            // action before anything drains to the new host again.
-            if (!keepsSameHost) dao.blockAllPendingForAuth()
-            // Never overwrite a real URL with a blank one — a legacy or
-            // malformed backup carrying an empty base_url would otherwise wipe
-            // a working configuration for no benefit to the user.
-            if (imported.baseUrl.isNotBlank()) configStore.saveBaseUrl(imported.baseUrl)
-            configStore.saveDisplayUnit(imported.displayUnit)
-            // Same list the Settings selector offers, so a version withheld
-            // there is withheld here too. The existing value is kept rather than
-            // forced to a default — this skips one field, it does not half-apply
-            // the import.
-            //
-            // Codex review, v2-body-composition PR: a same-host restore that
-            // changes the contract must recover rows rejected under the
-            // contract being switched away from, exactly like a manual toggle
-            // does — requeueRowsRejectedUnderOtherContract is shared with
-            // saveContractVersion for exactly this. The requeue+drain itself
-            // is deferred past applyImportedProfilesAndCredential below (a
-            // second review pass caught it running before that point, which
-            // let a WorkManager drain reach the network under the *previous*
-            // credential — a stale or another user's session — instead of
-            // the one the backup installs, or none at all after a host
-            // change). Also gated on keepsSameHost for the same reason
-            // unblockAuthRowsAndDrain is: on a host change, resurrecting rows
-            // straight into a drain is the exact bypass blockAllPendingForAuth
-            // above exists to prevent.
-            val shouldRecoverContractRejections = imported.contractVersion in selectableContractVersions &&
-                keepsSameHost
-            if (imported.contractVersion in selectableContractVersions) {
-                configStore.saveContractVersion(imported.contractVersion)
-            }
-            configStore.saveAlwaysOnBridging(imported.alwaysOnBridging)
-            configStore.saveAutomaticCaptureEnabled(imported.automaticCaptureEnabled)
-            configStore.savePairedDeviceAddress(imported.pairedDeviceAddress)
-            applyImportedProfilesAndCredential(imported, previousAddress, keepsSameHost)
+    suspend fun importSettings(bytes: ByteArray, passphrase: String): Result<ImportOutcome> =
+        settingsBackup.importSettings(bytes, passphrase).onSuccess {
             _credentialVersion.value++
             _consentVersion.value++
             invalidateConnectionTest()
-            _scaleRegistration.value = ScaleRegistrationUiState.Idle
-            rearmScanner?.invoke()
-            if (imported.credentialType != BackupCredentialType.NONE && keepsSameHost) {
-                unblockAuthRowsAndDrain()
-            }
-            if (shouldRecoverContractRejections) {
-                requeueRowsRejectedUnderOtherContract(dao, deliveryTrigger, imported.contractVersion, nowMillis)
-            }
-            if (keepsSameHost) {
-                ImportOutcome.APPLIED
-            } else {
-                ImportOutcome.APPLIED_WITHOUT_CREDENTIAL_AFTER_HOST_CHANGE
-            }
+            scaleLinking.reset()
         }
-    }
-
-    /**
-     * The two writes `importSettings` gated on separate conditions (profiles on
-     * their own contents, the credential on [keepsSameHost]) — combined here
-     * only to keep `importSettings` itself under this file's complexity
-     * threshold; the two halves remain independent of each other.
-     */
-    private suspend fun applyImportedProfilesAndCredential(
-        imported: PortableSettings,
-        previousAddress: String?,
-        keepsSameHost: Boolean,
-    ) {
-        if (imported.profiles.isNotEmpty() && scaleProfileStore != null) {
-            scaleProfileStore.replaceAll(imported.profiles)
-        } else {
-            // Only a pre-registry backup is evidence the device had no
-            // profiles. A registry-era backup that carried none says nothing
-            // about this device's, and clearing on that basis deletes consent
-            // codes that can only be recovered by re-registering with the scale.
-            if (previousAddress != null && !imported.supportsProfiles) consentStore.clear(previousAddress)
-            imported.pairedDeviceAddress?.let { address ->
-                imported.scaleCredential?.let { consentStore.save(address, it) }
-            }
-        }
-        // Cleared before a same-host import is trusted with a new value: any
-        // throw between here and the end of this function must never leave a
-        // real, working credential pointed at whatever host this import is
-        // still in the middle of configuring. On a host change, deliberately
-        // left cleared — see importSettings's host-change handling.
-        authTokenStore.clear()
-        sessionCookieStore.clear()
-        if (keepsSameHost) {
-            when (imported.credentialType) {
-                BackupCredentialType.NONE -> Unit
-                BackupCredentialType.TOKEN -> authTokenStore.save(requireNotNull(imported.credentialValue))
-                BackupCredentialType.SESSION -> sessionCookieStore.save(requireNotNull(imported.credentialValue))
-            }
-        }
-    }
 
     companion object {
         private const val SUBSCRIBE_TIMEOUT_MILLIS = 5_000L
-        private val BLUETOOTH_ADDRESS = ScaleProfileCodec.BLUETOOTH_ADDRESS
-        private val SCALE_INDEX_RANGE = SigWeightProfile.SCALE_INDEX_RANGE
-        private val CONSENT_CODE_RANGE = SigWeightProfile.CONSENT_CODE_RANGE
 
-        /**
-         * The host *and port* — hostname alone would treat two different
-         * deployments on the same domain (a staging and a production instance
-         * distinguished only by port) as "the same server" and drain the
-         * backlog to whichever one the import happened to point at. No
-         * explicit port means the URL's default for its scheme, so a bare
-         * `https://weight.example.com` and `https://weight.example.com:443`
-         * still compare equal. Null for a blank or unparseable URL — two of
-         * those must never compare equal.
-         */
-        private fun hostOf(url: String?): String? = url
-            ?.takeIf { it.isNotBlank() }
-            ?.let { runCatching { URI(it) }.getOrNull() }
-            ?.takeIf { it.host != null }
-            ?.let { uri -> "${uri.host.lowercase()}:${if (uri.port != -1) uri.port else defaultPortFor(uri.scheme)}" }
-
-        private fun defaultPortFor(scheme: String?): Int =
-            if (scheme.equals("http", ignoreCase = true)) DEFAULT_HTTP_PORT else DEFAULT_HTTPS_PORT
-
-        private const val DEFAULT_HTTP_PORT = 80
-        private const val DEFAULT_HTTPS_PORT = 443
-
-        fun validateBaseUrl(url: String): String? {
-            val uri = try {
-                URI(url)
-            } catch (e: URISyntaxException) {
-                return "Not a valid URL"
-            }
-            // https only: the manifest declares no cleartext-traffic policy,
-            // so on API 28+ a saved http:// URL would validate fine here and
-            // then fail at request time with no way for the user to tell why.
-            if (uri.scheme != "https") return "URL must start with https://"
-            if (uri.host.isNullOrBlank()) return "URL must include a host"
-            // VitalForgeHttpClient.resolve() builds request URLs by string
-            // concatenation (baseUrl + path), not URI resolution — a query or
-            // fragment here silently becomes part of the request path instead
-            // of being replaced by it, so every request would go to the host
-            // root rather than the intended API path.
-            if (!uri.query.isNullOrEmpty() || !uri.fragment.isNullOrEmpty()) {
-                return "URL must not include a query string or fragment"
-            }
-            return null
-        }
+        fun validateBaseUrl(url: String): String? = BaseUrls.validateBaseUrl(url)
 
         fun factory(app: BasculeApplication) = viewModelFactory {
             initializer {
@@ -816,33 +559,4 @@ class ConfigViewModel(
             }
         }
     }
-}
-
-
-private const val CONFIG_VIEW_MODEL_TAG = "ConfigViewModel"
-
-/**
- * Rows the *previous* contract's server rejected are a different matter from
- * rows this one rejects: a 422 is a statement about the contract, not the
- * reading, so a switch — however it happens — is the moment such a row earns
- * a fresh attempt. Shared by [ConfigViewModel.saveContractVersion] and
- * [ConfigViewModel.importSettings], which both change the stored contract and
- * both owe this recovery. Top-level rather than a member: it needs nothing
- * from `ConfigViewModel` but its two collaborators, and the class was already
- * at this file's function-count ceiling. Best-effort — the config write is
- * the setting, and the requeue must never be the reason it did not stick.
- */
-private suspend fun requeueRowsRejectedUnderOtherContract(
-    dao: ReadingDao,
-    deliveryTrigger: DeliveryTrigger,
-    version: ContractVersion,
-    nowMillis: () -> Long,
-) {
-    runCatching {
-        val stranded = dao.failedPermanentlyUnderOtherContract(version.wire)
-        if (stranded.isNotEmpty()) {
-            dao.requeueForReplay(stranded, nowMillis())
-            deliveryTrigger.triggerImmediateDrain()
-        }
-    }.onFailure { Log.w(CONFIG_VIEW_MODEL_TAG, "could not requeue rows rejected under the previous contract", it) }
 }
