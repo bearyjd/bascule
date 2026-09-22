@@ -163,7 +163,7 @@ stateDiagram-v2
     HANDSHAKING --> SUBSCRIBED: consent granted (CCCDs already on)
     HANDSHAKING --> TEARDOWN: E6 no ack after retries
     SUBSCRIBED --> MEASURING: first measurement frame
-    SUBSCRIBED --> TEARDOWN: E7 no notification within 45 s
+    SUBSCRIBED --> TEARDOWN: E7 no notification within 8 min
     MEASURING --> MEASURING: unstable frame / ignored frame
     MEASURING --> EMITTED: E-stable — decoder reports Stable
     MEASURING --> RECONNECT_ONCE: E8 disconnect before stability
@@ -243,8 +243,8 @@ Every edge has a concrete number and a concrete action.
 | **E4** | Service discovery timeout or required service absent | no `onServicesDiscovered` within **5 s**, or service UUID not in result | `TEARDOWN`, outcome `Incompatible`. Counter `incompatibleStreak`; at **3** consecutive, ConfigScreen shows "Scale not recognised — this device does not expose the Beurer service" and scan arming is suspended until the user re-selects a device. Prevents an infinite wake-connect-fail battery loop against a neighbour's device that matched the filter. |
 | **E5** | `GATT_INSUFFICIENT_AUTHENTICATION` / `_ENCRYPTION` on read/write | GATT status 5 / 15 | Call `createBond()`, wait max **30 s** for `BOND_BONDED`, then one full reconnect. |
 | **E5b** | Bond fails or times out | `BOND_NONE` after request, or 30 s elapsed | `TEARDOWN`. Persistent notification: "Pair the BF720 in Android Bluetooth settings, then step on the scale again." Not retried automatically — bonding needs user interaction. |
-| **E6** | Handshake step never acknowledged | no User Control Point indication within **3 s** of a Register or Consent write | Re-issue that write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to listen: **`SUBSCRIBED` is gated on `DecodeEvent.ConsentResult(success = true)`**, because ADR-007 established that an unconsented subscriber receives nothing at all. (The CCCDs themselves are enabled *before* the first UCP write — see the order correction under §2.1 — because a weigh-in the scale stored is delivered on the Consent write itself and is lost if they are still off; enabling them is not what this gate protects.) Without that gate a lost consent would present as 45 s of silence (E7) rather than as the handshake failure it is. |
-| **E7** | Indications never arrive **after a successful consent** | no measurement frame within **45 s** of `SUBSCRIBED` | `TEARDOWN`, outcome `NoMeasurement`, counter `noMeasurement`. 45 s covers weight stabilization (~5–15 s) plus the BIA impedance pass, with margin for a user who steps on, off, and back on. Because E6 gates listening on consent, E7 no longer absorbs consent failures — but it still absorbs a **starving connect** under Atlas contention (§8.3), so **3** consecutive `NoMeasurement` sessions raise an E4-style notification suggesting re-pairing, rather than repeating silently forever. |
+| **E6** | Handshake step never acknowledged | no User Control Point indication within **3 s** of a Register or Consent write | Re-issue that write, max **2 retries**. Then `TEARDOWN`, outcome `HandshakeFailed`, and record the raw bytes actually received (opcode + length only, never full payload — §8.8) to `docs/prp/03-hardware-validation.md` during the hardware session. Do **not** proceed to listen: **`SUBSCRIBED` is gated on `DecodeEvent.ConsentResult(success = true)`**, because ADR-007 established that an unconsented subscriber receives nothing at all. (The CCCDs themselves are enabled *before* the first UCP write — see the order correction under §2.1 — because a weigh-in the scale stored is delivered on the Consent write itself and is lost if they are still off; enabling them is not what this gate protects.) Without that gate a lost consent would present as 8 minutes of silence (E7) rather than as the handshake failure it is. |
+| **E7** | Indications never arrive **after a successful consent** | no measurement frame within **8 min** of `SUBSCRIBED` (`SessionBudget.FIRST_INDICATION_TIMEOUT`) | `TEARDOWN`, outcome `NoMeasurement`, counter `noMeasurement`. Was 45 s, sized on the assumption a session begins when the user steps on; hardware (2026-09-06) showed the BF720 only indicates a *live* weigh-in to a client already connected and consented, so sessions listen for minutes and a step-on lands inside one. A weigh-in nobody was listening for is stored and delivered on the next Consent (2026-09-19), so this window covers the live case only. Because E6 gates listening on consent, E7 no longer absorbs consent failures — but it still absorbs a **starving connect** under Atlas contention (§8.3), so **3** consecutive `NoMeasurement` sessions raise an E4-style notification suggesting re-pairing, rather than repeating silently forever. |
 | **E8** | Disconnect mid-measurement, before stability | `onConnectionStateChange(DISCONNECTED)` while in `MEASURING` | Partial data is **discarded, never persisted** (an unstable weight is not a measurement). Exactly **one** reconnect attempt within a **5 s** window — the scale is often still powered. If it fails, `TEARDOWN` with `Missed(DROPPED)`. |
 | **E9** | Duplicate stable frames in one session | a frame whose identity `(userIndex, scale timestamp, raw weight)` was already emitted | In-session latch, now owned by `MeasurementCorrelator` rather than `GattSession` (`02-interface-revision.md` §3): **one emission per session, full stop**. Counter `duplicateFramesSuppressed`; nothing is written to Room. The original "at most 2 distinct userIndexes" is retired for this decoder — see the note under §2.1's diagram. Cross-session duplicates are caught separately by the persistence dedup (§3.3). |
 | **E10** | Session worker not runnable in time | `now - enqueuedAt > 20 s` at worker start | Abort before connecting; `Missed(QUOTA)`; see §2.2. |
@@ -254,7 +254,7 @@ Every edge has a concrete number and a concrete action.
 | **E14** | Location services off (API ≤ 30) | `LocationManager.isLocationEnabled == false` at arm time | Scan will silently return zero results on API 26–30. Arm is refused with an actionable message; this is a **check, not a permission** (§6.4). |
 | **E15** | Session worker killed by the OS mid-session | worker `onStopped()` | `gatt.close()` in `onStopped()` unconditionally. If `EMITTED` was already reached the reading is already in Room and delivery proceeds independently (§8.1). If not, the session is lost — accepted, the user re-steps. |
 | **E16** | Two sessions overlap (double advertisement) | second enqueue while one is running | `WorkManager` unique work name `scale-session` with `ExistingWorkPolicy.KEEP`. A second broadcast within a live session is a no-op — never two `BluetoothGatt` objects for one device. |
-| **E17** | Body-composition pair never arrives | a Weight Measurement is buffered for correlation and no Body Composition Measurement follows within **4 s** | `GattSession` calls `ScaleDecoder.flush()`, which **persists the weight-only reading** and proceeds to `EMITTED`. It is not discarded: PRP §5 is unambiguous that every decoded weight is precious, and a weight without body composition is complete, attributable, and deliverable — VitalForge v1 accepts weight alone anyway. 4 s because the captured pair arrived within milliseconds of each other; tens of seconds would put a normal weigh-in behind a visible delay. This edge exists because the previously-named backstops cannot fire here: E7 is satisfied by the *first* frame, post-emission idle counts from an `EMITTED` that has not happened, and the 90 s ceiling would deliver the reading a minute and a half late. **Predicted common trigger:** a weigh-in with socks or shoes on produces a weight and no bioimpedance result — checklist row HW-25. |
+| **E17** | Body-composition pair never arrives | a Weight Measurement is buffered for correlation and no Body Composition Measurement follows within **4 s** | `GattSession` calls `ScaleDecoder.flush()`, which **persists the weight-only reading** and proceeds to `EMITTED`. It is not discarded: PRP §5 is unambiguous that every decoded weight is precious, and a weight without body composition is complete, attributable, and deliverable — VitalForge v1 accepts weight alone anyway. 4 s because the captured pair arrived within milliseconds of each other; tens of seconds would put a normal weigh-in behind a visible delay. This edge exists because the previously-named backstops cannot fire here: E7 is satisfied by the *first* frame, post-emission idle counts from an `EMITTED` that has not happened, and the hard ceiling (§2.5, now nearly nine minutes) would deliver the reading minutes late. **Predicted common trigger:** a weigh-in with socks or shoes on produces a weight and no bioimpedance result — checklist row HW-25. |
 | **E18** | A frame arrives after correlation closed | any Weight or Body Composition frame after the session's one emission | Counted (`unpairableFramesDropped`) and dropped. **Never speculatively attached to whatever is currently buffered** — that is the O-03 misattribution, and it writes one household member's body fat, muscle and impedance into another's row, under an index the wrong-user gate reads as correct. |
 | **E19** | Register New User refused | User Control Point indicates failure for opcode `0x01`, or the scale's user-profile pool is exhausted | `TEARDOWN`, outcome `HandshakeFailed("scale refused Register New User")`, counter `registrationRejected`. Notification: **"The scale's user profiles are full — delete one in the Beurer app, then step on the scale again."** The scale holds 8 profiles and Bascule cannot see how many remain (the live capture was already assigned index 2, so slot 1 was taken by something else). Without this edge the case presents as E6/E7 — a handshake that never completes, silently, forever. |
 
@@ -300,16 +300,19 @@ Phase 3.
 | Service discovery | 5 s | `discoverServices()` |
 | Bond wait | 30 s | `createBond()` |
 | Handshake ack (Register or Consent) | 3 s | each User Control Point write |
-| First indication | 45 s | consent granted (entry to `SUBSCRIBED`; the CCCDs were enabled before the handshake — see §2.1) |
+| First indication | 8 min (`FIRST_INDICATION_TIMEOUT`) | consent granted (entry to `SUBSCRIBED`; the CCCDs were enabled before the handshake — see §2.1). Was 45 s until 2026-09-06 — see E7 |
 | **Body-composition correlation (E17)** | **4 s** | **the buffered Weight Measurement** — expiry flushes a weight-only reading, it does not discard |
 | Post-emission idle | 10 s | `EMITTED` |
-| **Hard session ceiling** | **90 s** | worker start — unconditional teardown, guards against every timer above being defeated by a device that keeps the connection alive but sends nothing useful. **The bond wait is excluded** — see below |
+| **Hard session ceiling** | **8 min 50 s** (`FIRST_INDICATION_TIMEOUT` + 50 s headroom, derived — `SessionBudgetTest` asserts both bounds) | worker start — unconditional teardown, guards against every timer above being defeated by a device that keeps the connection alive but sends nothing useful; stays under WorkManager's 10-minute worker limit. **The bond wait is excluded** — see below |
 
-The 90 s ceiling counts *radio time*. The E5 bond wait (30 s) is **excluded from
-it**, and the ceiling's clock is suspended while a bond is pending. Without that
-carve-out the bonding path is arithmetically unreachable: 20 s connect budget +
-5 s discovery + 30 s bond + a second full connect phase + 3 s init + 45 s first
-notification is over 100 s, so a session that needed to bond would always be
+The ceiling counts *radio time*. The E5 bond wait (30 s) is **excluded from
+it**, and the ceiling's clock is suspended while a bond is pending; sessions
+that enter `BONDING` run under `BONDING_SESSION_BUDGET` (ceiling + bond wait +
+30 s) instead. The carve-out predates the long listen and is kept for the same
+reason it was introduced: under the original 90 s ceiling the bonding path was
+arithmetically unreachable — 20 s connect budget + 5 s discovery + 30 s bond +
+a second full connect phase + 3 s init + the first-notification wait exceeded
+it, so a session that needed to bond would always be
 killed by the ceiling before it could ever produce a reading — and bonding is a
 **one-time** event, so the ceiling would have permanently broken first-use on any
 unit that requires it. The exclusion is sound because a bond wait is
@@ -1177,7 +1180,11 @@ always fails until reboot".
 ### 8.11 Battery
 Wake path is a `PendingIntent` `ScanFilter` scan (no app process running while
 idle), per PRP scope and the Phase 4 gate. `SCAN_MODE_LOW_POWER`. Active radio
-use is bounded by the 90 s hard session ceiling. E4's `incompatibleStreak`
+use is bounded by the hard session ceiling (§2.5) — since 2026-09-06 nearly
+nine minutes, not 90 s, because the BF720 only indicates a live weigh-in to a
+client already listening. The link drops to `CONNECTION_PRIORITY_LOW_POWER`
+once subscribed, but what a day of long listens costs the *scale's* batteries
+is unmeasured (HANDOFF 2026-09-06). E4's `incompatibleStreak`
 suspension prevents an unbounded wake-connect-fail loop against a device that
 matches the filter but is not our scale. Delivery backoff caps at 15 min.
 

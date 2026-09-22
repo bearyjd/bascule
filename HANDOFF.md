@@ -94,7 +94,12 @@ time is never the better answer anyway since the received time is taken
 after the frame arrives. The Pixel 10 runs this build (15:33); the Pixel 9
 is one merge behind (#28 build) until it is next on USB.
 
-**Review also found a pre-existing dead check, not fixed:** the ADR-003
+**Review also found a pre-existing dead check — fixed 2026-09-21, #31** (`main`
+`cf6e0e7`, 745 tests): `parseRecent` now reads the server's real shape
+(`timestamp` ISO-8601 with offset, `weight_kg`); a shape mismatch returns
+`Unavailable`, which the drainer logs once per drain and posts anyway (§8.3
+step 3, now pinned by a drainer test — the silent-non-delivery mutant had
+survived before). The original finding, for the record: the ADR-003
 remote-duplicate check (`DeliveryDrainer.isRemoteDuplicate` via
 `VitalForgeHttpClient.parseRecent`) has never matched anything against the
 real server. `parseRecent` requires `weight_kg` + `captured_at` as a Long;
@@ -104,9 +109,12 @@ parses to an empty list — never `Unavailable`, so §8.3's documented
 degradation never engages either. The client test fakes the field name it
 expects, which is why it passes. Nothing is duplicated in practice because
 A6's `client_id` + server-side `captured_at` window (60 s / 50 g) is the
-dedup that actually runs. Fix is either parse `timestamp` or delete the
-check and the `/recent` round-trip it costs every drain; decide before
-touching `DedupPolicy` again.
+dedup that actually runs. Kept and fixed rather than deleted: under v1 the
+server's window is receipt-time ±60 s and the ladder's second retry lands
+outside it, so the client-side check is the only net for a v1 retry after
+a lost response. Residual, stated: a v1 *stored* weigh-in (scale time hours
+before receipt) never matches server-side, so v1 + stored + response lost on
+both first attempts can duplicate — narrow, and v2 has none of it.
 
 **Follow-ups, decided as follow-ups, in order:**
 1. ~~A stored reading's `capturedAtMillis` is delivery time~~ — **done, #29**
