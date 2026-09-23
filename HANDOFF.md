@@ -91,8 +91,8 @@ to sync since"). Review caught that a 5-minute future bound would have
 handed VitalForge a `captured_at` past its 60-second tolerance → 422 →
 `FAILED_PERMANENT` on the first attempt; it is 30 s, and a future scale
 time is never the better answer anyway since the received time is taken
-after the frame arrives. The Pixel 10 runs this build (15:33); the Pixel 9
-is one merge behind (#28 build) until it is next on USB.
+after the frame arrives. (Both phones were brought to `main` on 2026-09-22;
+see the release note below for the current state.)
 
 **Review also found a pre-existing dead check — fixed 2026-09-21, #31** (`main`
 `cf6e0e7`, 745 tests): `parseRecent` now reads the server's real shape
