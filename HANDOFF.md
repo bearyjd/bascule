@@ -18,6 +18,43 @@ bmi/bmr/amr gap found and fixed on the `vitalforge` side (`vitalforge` PR
 Bascule-side changes needed for that last one; `V2Shaper.kt` already had the
 right field names.
 
+## 2026-09-23: v0.2.0 released, and down to one phone
+
+**`v0.2.0` is released**: https://github.com/bearyjd/bascule/releases/tag/v0.2.0
+— signed `app-release.apk`, 2.36 MB, signer SHA-256 `f6df2b0d…1bdc1018` (the
+2026-09-06 keystore, not the fail-open unsigned path). `main` at `f9f12aa`,
+745 tests. The tag is what publishes; `v0.1.0` predated the `tags: ['v*']`
+trigger and produced nothing.
+
+Everything that made capture actually work shipped between the two tags: a
+weigh-in taken while the phone is asleep is received rather than lost (#28),
+readings carry the time the person stood on the scale (#29), and three
+loss/stall paths are closed — 404 as permanent (#20), WorkManager's five-hour
+retry backoff swallowing every trigger (#25), and a remote duplicate check
+that had never matched a real response (#31). `ConfigViewModel` was also split
+(848 → 562 lines, #34) with no behaviour change, verified by a real export →
+import round-trip on device ending in "✓ Connected — credential accepted".
+
+**Housekeeping:** the seven merged remote branches that survived their PR
+merges were deleted after confirming each was an ancestor of `main`; `origin`
+carries only `main` again.
+
+**The Pixel 9 was recycled (2026-09-23).** The Pixel 10 Pro Fold
+(`57211FDCG0023C`) is the only device now — nothing is lost (all its readings
+were `SENT`, and the Pixel 10 holds the same imported credential and slot-1
+registration), and the two-phone contention noted below is gone with it.
+**Two things follow:** the phone that carried the app's VitalForge credential
+and scale consent code left the user's possession, so rotating the VitalForge
+password is the cheap precaution if it was not factory-reset; and the
+`.omc/RELEASE_RULE.md` note about `tools/hw-probe` being installed on the
+Pixel 9 is now only true of the Pixel 10.
+
+**Known operational quirk, unfixed:** Tailscale on the Pixel 10 drops on its
+own, and `weight.grepon.cc` resolves to a tailnet address — so delivery stops
+until it is reopened. Readings queue rather than fail, and the retry ladder
+drains them once the tunnel is back. Android's Always-on VPN is the durable
+fix and can only be set from the phone's own Settings, not over adb.
+
 ## 2026-09-19: the probe found the missed-weigh-in path, and it was the standard one
 
 The probe ran, no slot was burned, and the day ended with the one thing the
@@ -70,12 +107,13 @@ WorkManager's backoff (#25), and when the user corrected the URL to
   only P01. It had started winning the scale's closest-last-weight recognition
   and would have captured the user's weigh-ins where Bascule (slot 1 only)
   could not reach them. O-08's "how to free a slot" is answered.
-- Both phones now run the fix (APK built from `695d416`, app-identical to the
-  merged `853042e`): Pixel 10 at 09:36, Pixel 9 at 13:53. **Both are
-  registered as slot 1 and contend for the scale**; whichever consents first
-  after an unattended weigh-in receives it and syncs it, so nothing is lost
-  either way, but only one phone gets the row. The Pixel 10 is on contract v1
-  (`WEIGHT` only); the Pixel 9 on v2.
+- Both phones ran the fix at the time (Pixel 10 09:36, Pixel 9 13:53), both
+  registered as slot 1, contending for the scale. **Superseded 2026-09-23: the
+  Pixel 9 was recycled.** The Pixel 10 (`57211FDCG0023C`) is now the only
+  device — no contention, one phone owns the scale. It is on contract **v1**
+  (`WEIGHT` only), so body composition is captured and stored but not sent;
+  switch it in Settings if that is wanted. Anything below that names the
+  Pixel 9 as reachable hardware is history, not instruction.
 - The reviewer's device-check recipe (logcat strings, the three-confirms
   cross-check, the timestamp-gap column pair) is in #28's description and
   is the right procedure for any future handshake change.
