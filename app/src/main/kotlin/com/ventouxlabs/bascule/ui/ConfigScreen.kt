@@ -722,11 +722,13 @@ private fun PassphraseDialog(
     var confirmation by remember { mutableStateOf("") }
     val problem = passphraseProblem(passphrase, confirmation, confirmRequired = confirmPassphrase)
     // Each reason shows under the field it is about, and only once that field
-    // has text — a freshly opened dialog is not an error.
+    // has text — a freshly opened dialog is not an error. The mismatch waits
+    // until the confirmation stops being a correct prefix, so it is not red
+    // for the whole time it is being typed, yet a typo shows at once.
     val passphraseError = problem
         ?.takeIf { it != PassphraseProblem.CONFIRMATION_MISMATCH && passphrase.isNotEmpty() }
     val confirmationError = problem
-        ?.takeIf { it == PassphraseProblem.CONFIRMATION_MISMATCH && confirmation.isNotEmpty() }
+        ?.takeIf { it == PassphraseProblem.CONFIRMATION_MISMATCH && !passphrase.startsWith(confirmation) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },
@@ -767,7 +769,10 @@ private fun PassphraseDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(passphrase) }, enabled = problem == null) {
+            TextButton(
+                onClick = { onConfirm(passphrase) },
+                enabled = isPassphraseValid(passphrase, confirmation, confirmRequired = confirmPassphrase),
+            ) {
                 Text(if (confirmPassphrase) "Export" else "Import")
             }
         },

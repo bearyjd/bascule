@@ -43,7 +43,10 @@ internal enum class PassphraseProblem { TOO_SHORT, TOO_FEW_DISTINCT_CHARACTERS, 
  * passphrase, and choosing is what
  * [SettingsBackupCodec.isPassphraseStrongEnough] governs. Validity is decided
  * by that function alone; the length check here only picks which reason to
- * name. Unlocking keeps the old floor: the strength rule must never be the
+ * name, by elimination — at full length, only the distinct floor is left. If
+ * that rule gains a check (a common-password list, say), it needs its own
+ * [PassphraseProblem], or its failures will be reported as too few distinct
+ * characters. Unlocking keeps the old floor: the strength rule must never be the
  * reason a user cannot open a backup this app itself wrote.
  */
 internal fun passphraseProblem(
