@@ -52,6 +52,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ContractVersion
 import kotlinx.coroutines.flow.SharedFlow
@@ -719,18 +720,37 @@ private fun PassphraseDialog(
 ) {
     var passphrase by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    val valid = isPassphraseValid(passphrase, confirmation, confirmRequired = confirmPassphrase)
+    val problem = passphraseProblem(passphrase, confirmation, confirmRequired = confirmPassphrase)
+    // Each reason shows under the field it is about, and only once that field
+    // has text — a freshly opened dialog is not an error. The mismatch waits
+    // until the confirmation stops being a correct prefix, so it is not red
+    // for the whole time it is being typed, yet a typo shows at once.
+    val passphraseError = problem
+        ?.takeIf { it != PassphraseProblem.CONFIRMATION_MISMATCH && passphrase.isNotEmpty() }
+    val confirmationError = problem
+        ?.takeIf { it == PassphraseProblem.CONFIRMATION_MISMATCH && !passphrase.startsWith(confirmation) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },
         text = {
             Column {
-                Text("Use at least 8 characters. This passphrase cannot be recovered.")
+                Text(
+                    if (confirmPassphrase) {
+                        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH} varied characters — four " +
+                            "or more unrelated words work well. The file holds your sign-in credential and " +
+                            "every scale's consent code, so keep it out of cloud-synced folders. This " +
+                            "passphrase cannot be recovered."
+                    } else {
+                        "Enter the passphrase this backup was created with."
+                    },
+                )
                 OutlinedTextField(
                     value = passphrase,
                     onValueChange = { passphrase = it },
                     label = { Text("Passphrase") },
                     visualTransformation = PasswordVisualTransformation(),
+                    isError = passphraseError != null,
+                    supportingText = passphraseError?.let { { Text(it.message(confirmPassphrase)) } },
                     singleLine = true,
                     modifier = Modifier.padding(top = 8.dp),
                 )
@@ -740,6 +760,8 @@ private fun PassphraseDialog(
                         onValueChange = { confirmation = it },
                         label = { Text("Confirm passphrase") },
                         visualTransformation = PasswordVisualTransformation(),
+                        isError = confirmationError != null,
+                        supportingText = confirmationError?.let { { Text(it.message(confirmPassphrase)) } },
                         singleLine = true,
                         modifier = Modifier.padding(top = 8.dp),
                     )
@@ -747,7 +769,10 @@ private fun PassphraseDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(passphrase) }, enabled = valid) {
+            TextButton(
+                onClick = { onConfirm(passphrase) },
+                enabled = isPassphraseValid(passphrase, confirmation, confirmRequired = confirmPassphrase),
+            ) {
                 Text(if (confirmPassphrase) "Export" else "Import")
             }
         },

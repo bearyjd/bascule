@@ -30,13 +30,61 @@ internal fun InputStream.readSettingsBackup(): ByteArray {
     return output.toByteArray()
 }
 
+/** Why the passphrase dialog's confirm button is disabled — see [passphraseProblem]. */
+internal enum class PassphraseProblem { TOO_SHORT, TOO_FEW_DISTINCT_CHARACTERS, CONFIRMATION_MISMATCH }
+
 /**
- * The app's only passphrase validation. [confirmation] is only consulted when
+ * The passphrase dialog's gate: the first reason the typed passphrase cannot
+ * be used yet, or null when it can. [SettingsBackupCodec.encrypt] enforces the
+ * same strength rule as a backstop. [confirmation] is only consulted when
  * [confirmRequired] — the import dialog has one field, the export dialog two.
+ *
+ * [confirmRequired] therefore also marks the one dialog that *chooses* a
+ * passphrase, and choosing is what
+ * [SettingsBackupCodec.isPassphraseStrongEnough] governs. Validity is decided
+ * by that function alone; the length check here only picks which reason to
+ * name, by elimination — at full length, only the distinct floor is left. If
+ * that rule gains a check (a common-password list, say), it needs its own
+ * [PassphraseProblem], or its failures will be reported as too few distinct
+ * characters. Unlocking keeps the old floor: the strength rule must never be the
+ * reason a user cannot open a backup this app itself wrote.
  */
+internal fun passphraseProblem(
+    passphrase: String,
+    confirmation: String,
+    confirmRequired: Boolean,
+): PassphraseProblem? = when {
+    !confirmRequired ->
+        PassphraseProblem.TOO_SHORT.takeIf { passphrase.length < SettingsBackupCodec.MIN_PASSPHRASE_LENGTH }
+    !SettingsBackupCodec.isPassphraseStrongEnough(passphrase) ->
+        if (passphrase.length < SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH) {
+            PassphraseProblem.TOO_SHORT
+        } else {
+            PassphraseProblem.TOO_FEW_DISTINCT_CHARACTERS
+        }
+    passphrase != confirmation -> PassphraseProblem.CONFIRMATION_MISMATCH
+    else -> null
+}
+
+/** Defined as the absence of a [passphraseProblem], so the gate and its message cannot disagree. */
 internal fun isPassphraseValid(
     passphrase: String,
     confirmation: String,
     confirmRequired: Boolean,
-): Boolean = passphrase.length >= SettingsBackupCodec.MIN_PASSPHRASE_LENGTH &&
-    (!confirmRequired || passphrase == confirmation)
+): Boolean = passphraseProblem(passphrase, confirmation, confirmRequired) == null
+
+/**
+ * The line shown under the field a [PassphraseProblem] is about. Without it a
+ * greyed-out Export button was the only feedback, and the distinct-character
+ * floor was stated nowhere the user could see it.
+ */
+internal fun PassphraseProblem.message(confirmRequired: Boolean): String = when (this) {
+    PassphraseProblem.TOO_SHORT -> if (confirmRequired) {
+        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH} characters."
+    } else {
+        "Backup passphrases are at least ${SettingsBackupCodec.MIN_PASSPHRASE_LENGTH} characters."
+    }
+    PassphraseProblem.TOO_FEW_DISTINCT_CHARACTERS ->
+        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_DISTINCT_CHARACTERS} different characters."
+    PassphraseProblem.CONFIRMATION_MISMATCH -> "Passphrases don't match."
+}

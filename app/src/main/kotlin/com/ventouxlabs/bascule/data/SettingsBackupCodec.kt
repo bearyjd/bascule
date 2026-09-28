@@ -49,7 +49,10 @@ data class PortableSettings(
 object SettingsBackupCodec {
 
     fun encrypt(settings: PortableSettings, passphrase: String): ByteArray {
-        require(passphrase.length >= MIN_PASSPHRASE_LENGTH) { "Passphrase must be at least 8 characters" }
+        require(isPassphraseStrongEnough(passphrase)) {
+            "Passphrase must be at least $MIN_NEW_PASSPHRASE_LENGTH characters long and use at least " +
+                "$MIN_NEW_PASSPHRASE_DISTINCT_CHARACTERS different characters"
+        }
         val salt = ByteArray(SALT_BYTES).also(secureRandom::nextBytes)
         val iv = ByteArray(IV_BYTES).also(secureRandom::nextBytes)
         val plaintext = encode(settings).toByteArray(StandardCharsets.UTF_8)
@@ -74,6 +77,32 @@ object SettingsBackupCodec {
         val plaintext = cipher(Cipher.DECRYPT_MODE, passphrase, salt, iv).doFinal(ciphertext)
         return decode(String(plaintext, StandardCharsets.UTF_8))
     }
+
+    /**
+     * The rule for a passphrase being *chosen*. The file it protects carries a
+     * live VitalForge credential and every scale's consent code, and sits at
+     * rest wherever the user saved it — a synced folder included — so an
+     * attacker who takes it attacks offline, at their own pace. The KDF cost
+     * multiplies the search space it is handed; it does not create one, and
+     * eight lowercase characters is only ~2^38 candidates.
+     *
+     * The distinct-character floor is not an entropy estimate, and it only
+     * catches the crudest patterns: `abababababababab` clears any length rule
+     * and is worth two characters of search. It stops repeats of four or fewer
+     * symbols and nothing more — `abcdeabcdeab` passes, and so does a common
+     * password of the right length. A periodic-pattern check and a
+     * common-password list are what would close those. No composition rule
+     * (upper/digit/symbol) is imposed — NIST SP 800-63B advises against them,
+     * and they would reject the word-based passphrases that are actually strong.
+     *
+     * Deliberately not applied when *unlocking*: every backup written before
+     * this rule is protected by a passphrase it would reject, so [decrypt]
+     * applies no passphrase rule and the import dialog stays on
+     * [MIN_PASSPHRASE_LENGTH].
+     */
+    fun isPassphraseStrongEnough(passphrase: String): Boolean =
+        passphrase.length >= MIN_NEW_PASSPHRASE_LENGTH &&
+            passphrase.toSet().size >= MIN_NEW_PASSPHRASE_DISTINCT_CHARACTERS
 
     private fun cipher(mode: Int, passphrase: String, salt: ByteArray, iv: ByteArray): Cipher {
         val spec = PBEKeySpec(passphrase.toCharArray(), salt, PBKDF2_ITERATIONS, KEY_BITS)
@@ -187,7 +216,18 @@ object SettingsBackupCodec {
 
     /** The first format version whose files carry a `profiles` array. */
     private const val PROFILE_REGISTRY_VERSION = 2
+    /**
+     * The floor for *unlocking* an existing backup, and nothing else: it is what
+     * [encrypt] once required, so it is the weakest passphrase a file in the wild
+     * can carry. Raising it would leave the user's own older backup unopenable.
+     */
     const val MIN_PASSPHRASE_LENGTH = 8
+
+    /** Length floor for a newly chosen passphrase — see [isPassphraseStrongEnough]. */
+    const val MIN_NEW_PASSPHRASE_LENGTH = 12
+
+    /** Distinct-character floor for a newly chosen passphrase. */
+    const val MIN_NEW_PASSPHRASE_DISTINCT_CHARACTERS = 5
     const val MAX_BACKUP_BYTES = 1024 * 1024
     private const val SALT_BYTES = 16
     private const val IV_BYTES = 12
