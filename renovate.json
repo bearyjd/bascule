@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "timezone": "America/New_York",
+  "schedule": ["* 0-6 * * 1"],
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "minimumReleaseAge": "7 days",
+  "ignorePaths": ["tools/hw-probe/**"],
+  "packageRules": [
+    {
+      "description": "The Android/Kotlin toolchain moves as one piece: AGP, Kotlin, KSP and detekt's compiler plugin are version-locked to each other, and a lone bump is a broken build rather than an upgrade. One PR, reviewed by hand.",
+      "matchPackageNames": [
+        "com.android.application",
+        "com.android.library",
+        "org.jetbrains.kotlin**",
+        "com.google.devtools.ksp**",
+        "io.gitlab.arturbosch.detekt**"
+      ],
+      "groupName": "android/kotlin toolchain",
+      "minimumReleaseAge": "30 days"
+    },
+    {
+      "description": "AndroidX and Compose move together often enough that separate PRs just multiply the same review.",
+      "matchPackageNames": ["androidx.**", "androidx.compose**"],
+      "groupName": "androidx"
+    },
+    {
+      "description": "Security-relevant dependencies are worth seeing immediately, not on the weekly window. androidx.security:security-crypto in particular is already deprecated by the platform and needs a successor chosen by hand (HANDOFF open item) — a version bump will not fix that, but it should not sit unseen either.",
+      "matchPackageNames": ["androidx.security**", "com.squareup.okhttp3**"],
+      "schedule": ["at any time"],
+      "minimumReleaseAge": "3 days",
+      "labels": ["dependencies", "security-relevant"]
+    },
+    {
+      "description": "The Gradle wrapper carries its own checksum and upgrade semantics; keep it apart from library noise.",
+      "matchManagers": ["gradle-wrapper"],
+      "groupName": "gradle wrapper",
+      "minimumReleaseAge": "30 days"
+    },
+    {
+      "description": "compileSdk/targetSdk are a deliberate floor set in libs.versions.toml with a comment explaining why (androidx 1.19/2.11 and okhttp-android 5.5 refuse older). Renovate must not raise them silently.",
+      "matchDepTypes": ["compileSdk", "targetSdk", "minSdk"],
+      "enabled": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null
+  }
+}
