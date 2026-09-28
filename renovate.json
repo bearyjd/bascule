@@ -14,8 +14,8 @@
     {
       "description": "The Android/Kotlin toolchain moves as one piece: AGP, Kotlin, KSP and detekt's compiler plugin are version-locked to each other, and a lone bump is a broken build rather than an upgrade. One PR, reviewed by hand.",
       "matchPackageNames": [
-        "com.android.application",
-        "com.android.library",
+        "com.android.application**",
+        "com.android.library**",
         "org.jetbrains.kotlin**",
         "com.google.devtools.ksp**",
         "io.gitlab.arturbosch.detekt**"
