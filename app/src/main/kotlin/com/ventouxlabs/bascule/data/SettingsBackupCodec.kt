@@ -86,15 +86,19 @@ object SettingsBackupCodec {
      * multiplies the search space it is handed; it does not create one, and
      * eight lowercase characters is only ~2^38 candidates.
      *
-     * The distinct-character floor is not an entropy estimate. It exists because
-     * length alone hides a repeated pattern: `abababababababab` clears any
-     * length rule and is worth two characters of search. No composition rule
+     * The distinct-character floor is not an entropy estimate, and it only
+     * catches the crudest patterns: `abababababababab` clears any length rule
+     * and is worth two characters of search. It stops repeats of four or fewer
+     * symbols and nothing more — `abcdeabcdeab` passes, and so does a common
+     * password of the right length. A periodic-pattern check and a
+     * common-password list are what would close those. No composition rule
      * (upper/digit/symbol) is imposed — NIST SP 800-63B advises against them,
      * and they would reject the word-based passphrases that are actually strong.
      *
      * Deliberately not applied when *unlocking*: every backup written before
      * this rule is protected by a passphrase it would reject, so [decrypt]
-     * validates nothing and the import dialog stays on [MIN_PASSPHRASE_LENGTH].
+     * applies no passphrase rule and the import dialog stays on
+     * [MIN_PASSPHRASE_LENGTH].
      */
     fun isPassphraseStrongEnough(passphrase: String): Boolean =
         passphrase.length >= MIN_NEW_PASSPHRASE_LENGTH &&

@@ -720,7 +720,13 @@ private fun PassphraseDialog(
 ) {
     var passphrase by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    val valid = isPassphraseValid(passphrase, confirmation, confirmRequired = confirmPassphrase)
+    val problem = passphraseProblem(passphrase, confirmation, confirmRequired = confirmPassphrase)
+    // Each reason shows under the field it is about, and only once that field
+    // has text — a freshly opened dialog is not an error.
+    val passphraseError = problem
+        ?.takeIf { it != PassphraseProblem.CONFIRMATION_MISMATCH && passphrase.isNotEmpty() }
+    val confirmationError = problem
+        ?.takeIf { it == PassphraseProblem.CONFIRMATION_MISMATCH && confirmation.isNotEmpty() }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (confirmPassphrase) "Encrypt settings backup" else "Unlock settings backup") },
@@ -728,10 +734,10 @@ private fun PassphraseDialog(
             Column {
                 Text(
                     if (confirmPassphrase) {
-                        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH} varied characters — a few " +
-                            "unrelated words work well. The file holds your sign-in credential and every scale's " +
-                            "consent code, so keep it out of cloud-synced folders. This passphrase cannot be " +
-                            "recovered."
+                        "Use at least ${SettingsBackupCodec.MIN_NEW_PASSPHRASE_LENGTH} varied characters — four " +
+                            "or more unrelated words work well. The file holds your sign-in credential and " +
+                            "every scale's consent code, so keep it out of cloud-synced folders. This " +
+                            "passphrase cannot be recovered."
                     } else {
                         "Enter the passphrase this backup was created with."
                     },
@@ -741,6 +747,8 @@ private fun PassphraseDialog(
                     onValueChange = { passphrase = it },
                     label = { Text("Passphrase") },
                     visualTransformation = PasswordVisualTransformation(),
+                    isError = passphraseError != null,
+                    supportingText = passphraseError?.let { { Text(it.message(confirmPassphrase)) } },
                     singleLine = true,
                     modifier = Modifier.padding(top = 8.dp),
                 )
@@ -750,6 +758,8 @@ private fun PassphraseDialog(
                         onValueChange = { confirmation = it },
                         label = { Text("Confirm passphrase") },
                         visualTransformation = PasswordVisualTransformation(),
+                        isError = confirmationError != null,
+                        supportingText = confirmationError?.let { { Text(it.message(confirmPassphrase)) } },
                         singleLine = true,
                         modifier = Modifier.padding(top = 8.dp),
                     )
@@ -757,7 +767,7 @@ private fun PassphraseDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(passphrase) }, enabled = valid) {
+            TextButton(onClick = { onConfirm(passphrase) }, enabled = problem == null) {
                 Text(if (confirmPassphrase) "Export" else "Import")
             }
         },

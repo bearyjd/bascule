@@ -118,6 +118,48 @@ class SettingsBackupCodecTest {
         }
     }
 
+    @Test
+    fun aPassphraseOneCharacterShortOfTheLengthFloorIsRejectedForANewBackup() {
+        assertThrows(
+            "11 characters, every one distinct: only the length floor can reject this",
+            IllegalArgumentException::class.java,
+        ) {
+            SettingsBackupCodec.encrypt(settings, "abcdefghijk")
+        }
+    }
+
+    @Test
+    fun aPassphraseOneDistinctCharacterShortOfTheFloorIsRejectedForANewBackup() {
+        assertThrows(
+            "12 characters over only 4 distinct ones: only the distinct floor can reject this",
+            IllegalArgumentException::class.java,
+        ) {
+            SettingsBackupCodec.encrypt(settings, "aabbccddabcd")
+        }
+    }
+
+    @Test
+    fun aPassphraseSittingOnBothFloorsEncryptsAndRoundTrips() {
+        val boundary = "abcdeedcbaab"
+
+        assertEquals(settings, SettingsBackupCodec.decrypt(SettingsBackupCodec.encrypt(settings, boundary), boundary))
+    }
+
+    /**
+     * The strength rule is for choosing, never for unlocking. The file is built
+     * here rather than by [SettingsBackupCodec.encrypt], which now refuses an
+     * 8-character passphrase — exactly the file an older build wrote.
+     */
+    @Test
+    fun aBackupWrittenUnderTheOlderEightCharacterFloorStillDecrypts() {
+        val legacy = encryptWith(payload().toByteArray(StandardCharsets.UTF_8), "hunter22", OWASP_SHA256_ITERATIONS)
+
+        val decrypted = SettingsBackupCodec.decrypt(legacy, "hunter22")
+
+        assertEquals(SettingsBackupCodec.decode(payload()), decrypted)
+        assertEquals("secret-session-cookie", decrypted.credentialValue)
+    }
+
     // --- The backup carries the bearer token in cleartext once decrypted, and
     // a file written before the 12-character rule can still carry an
     // 8-character passphrase, so the KDF cost is what stands between a stolen
@@ -139,6 +181,20 @@ class SettingsBackupCodecTest {
         val encrypted = SettingsBackupCodec.encrypt(settings, PASSPHRASE)
 
         assertThrows(AEADBadTagException::class.java) { decryptWith(encrypted, OWASP_SHA512_ITERATIONS) }
+    }
+
+    /** Writes a backup in the codec's file layout, with a key derived independently of it. */
+    private fun encryptWith(plaintext: ByteArray, passphrase: String, iterations: Int): ByteArray {
+        val magic = "BASCULE1".toByteArray(StandardCharsets.US_ASCII)
+        val salt = ByteArray(SALT_BYTES) { it.toByte() }
+        val iv = ByteArray(IV_BYTES) { (it + SALT_BYTES).toByte() }
+        val spec = PBEKeySpec(passphrase.toCharArray(), salt, iterations, KEY_BITS)
+        val key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        val ciphertext = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+            updateAAD(magic)
+        }.doFinal(plaintext)
+        return magic + salt + iv + ciphertext
     }
 
     /** Decrypts a backup with a key derived independently of the codec, at [iterations]. */

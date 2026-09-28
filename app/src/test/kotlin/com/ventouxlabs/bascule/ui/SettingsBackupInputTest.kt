@@ -5,6 +5,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -102,7 +103,7 @@ class SettingsBackupInputTest {
         assertEquals(0, ByteArrayInputStream(ByteArray(0)).readSettingsBackup().size)
     }
 
-    // --- isPassphraseValid: the length floor, and the export dialog's confirmation field.
+    // --- isPassphraseValid: the unlock floor, and the export dialog's confirmation field.
 
     @Test
     fun rejectsAPassphraseOneCharacterShortOfTheFloor() {
@@ -153,10 +154,26 @@ class SettingsBackupInputTest {
     }
 
     @Test
+    fun rejectsANewPassphraseOneCharacterShortOfTheExportLengthFloor() {
+        assertFalse(
+            "11 characters, every one distinct: only the length floor can reject this",
+            isPassphraseValid("abcdefghijk", "abcdefghijk", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun rejectsANewPassphraseOneDistinctCharacterShortOfTheExportFloor() {
+        assertFalse(
+            "12 characters over only 4 distinct ones: only the distinct floor can reject this",
+            isPassphraseValid("aabbccddabcd", "aabbccddabcd", confirmRequired = true),
+        )
+    }
+
+    @Test
     fun acceptsANewPassphraseSittingOnBothExportFloors() {
         assertTrue(
             "12 characters over 5 distinct ones is the boundary, and must not be over-rejected",
-            isPassphraseValid("abcdeabcdeab", "abcdeabcdeab", confirmRequired = true),
+            isPassphraseValid(BOUNDARY, BOUNDARY, confirmRequired = true),
         )
     }
 
@@ -185,6 +202,70 @@ class SettingsBackupInputTest {
         assertFalse(
             "a typo in the confirm field would otherwise encrypt the backup with an unrecoverable passphrase",
             isPassphraseValid("correct horse battery", "correct horse batttery", confirmRequired = true),
+        )
+    }
+
+    // --- passphraseProblem: the disabled button used to be the only feedback,
+    // so the reason must name the check that actually failed.
+
+    @Test
+    fun namesLengthAsTheProblemWhenANewPassphraseIsTooShort() {
+        assertEquals(
+            PassphraseProblem.TOO_SHORT,
+            passphraseProblem("abcdefghijk", "abcdefghijk", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun namesDistinctCharactersAsTheProblemWhenANewPassphraseIsLongEnough() {
+        assertEquals(
+            PassphraseProblem.TOO_FEW_DISTINCT_CHARACTERS,
+            passphraseProblem("aabbccddabcd", "aabbccddabcd", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun namesTheMismatchOnlyOnceTheNewPassphraseItselfIsAcceptable() {
+        assertEquals(
+            PassphraseProblem.CONFIRMATION_MISMATCH,
+            passphraseProblem(BOUNDARY, "abcdeedcbaa", confirmRequired = true),
+        )
+        assertEquals(
+            "a weak passphrase is the problem to fix first, under its own field",
+            PassphraseProblem.TOO_SHORT,
+            passphraseProblem("hunter22", "something else", confirmRequired = true),
+        )
+    }
+
+    @Test
+    fun namesNoProblemForAnAcceptableExportOrUnlock() {
+        assertNull(passphraseProblem(BOUNDARY, BOUNDARY, confirmRequired = true))
+        assertNull(passphraseProblem("hunter22", "", confirmRequired = false))
+    }
+
+    @Test
+    fun namesLengthAsTheOnlyProblemAnUnlockCanHave() {
+        assertEquals(PassphraseProblem.TOO_SHORT, passphraseProblem("hunter2", "", confirmRequired = false))
+        assertNull(
+            "a repeated pattern is the old rule's business, not the unlock dialog's",
+            passphraseProblem("abababab", "", confirmRequired = false),
+        )
+    }
+
+    @Test
+    fun eachMessageNamesTheFloorOfTheDialogItIsShownIn() {
+        assertEquals("Use at least 12 characters.", PassphraseProblem.TOO_SHORT.message(confirmRequired = true))
+        assertEquals(
+            "Backup passphrases are at least 8 characters.",
+            PassphraseProblem.TOO_SHORT.message(confirmRequired = false),
+        )
+        assertEquals(
+            "Use at least 5 different characters.",
+            PassphraseProblem.TOO_FEW_DISTINCT_CHARACTERS.message(confirmRequired = true),
+        )
+        assertEquals(
+            "Passphrases don't match.",
+            PassphraseProblem.CONFIRMATION_MISMATCH.message(confirmRequired = true),
         )
     }
 
@@ -229,5 +310,10 @@ class SettingsBackupInputTest {
     @Test
     fun coversEveryImportOutcome() {
         ImportOutcome.entries.forEach { assertTrue(importSuccessMessage(it).isNotBlank()) }
+    }
+
+    private companion object {
+        /** 12 characters over exactly 5 distinct ones, and not a repeat of any shorter run. */
+        const val BOUNDARY = "abcdeedcbaab"
     }
 }
