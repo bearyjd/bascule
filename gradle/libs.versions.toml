@@ -1,9 +1,9 @@
 [versions]
 # Toolchain — pinned to latest stable as of 2026-08-22 (Phase 2 exit gate:
 # "pin the toolchain", bascule-agent-prompt.md §Phase 2 item 3).
-agp = "9.3.1"
-kotlin = "2.4.10"
-ksp = "2.3.11"
+agp = "9.4.1"
+kotlin = "2.4.20"
+ksp = "2.3.12"
 detekt = "1.23.8"
 
 # minSdk 26 per bascule-prp.md §"Min SDK". compileSdk 37 is a floor, not a
