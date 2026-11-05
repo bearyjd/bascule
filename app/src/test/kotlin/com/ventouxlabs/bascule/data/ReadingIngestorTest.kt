@@ -3,6 +3,7 @@ package com.ventouxlabs.bascule.data
 import com.ventouxlabs.bascule.ble.fake.scaleReadingFixture
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
 import com.ventouxlabs.bascule.ui.fake.FakeReadingDao
+import com.ventouxlabs.bascule.ui.fake.readingFixture
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -232,6 +233,130 @@ class ReadingIngestorTest {
         assertEquals(2, dao.rows.value.size)
     }
 
+    private fun baseline(
+        weightKg: Double,
+        status: ReadingStatus,
+        id: String = "baseline-$status",
+        capturedAtMillis: Long = RECEIVED_AT - ONE_HOUR_MILLIS,
+    ) = readingFixture(id = id, weightKg = weightKg, status = status, capturedAtMillis = capturedAtMillis)
+
+    private suspend fun ingestAfter(
+        vararg seeded: ReadingEntity,
+        weightKg: Double,
+    ): Pair<IngestResult, FakeReadingDao> {
+        val dao = FakeReadingDao()
+        seeded.forEach { dao.insert(it) }
+        val profiles = FakeScaleProfileStore(listOf(profile("p1", 1, active = true)))
+        val reading = scaleReadingFixture(weightKg = weightKg, userIndex = 1, receivedAtMillis = RECEIVED_AT)
+        return ingestor(dao, profiles).ingest(deviceAddress, reading) to dao
+    }
+
+    @Test
+    fun aJumpOfMoreThanTenKgFromTheLastAcceptedReadingIsHeld() = runTest {
+        val (result, dao) = ingestAfter(baseline(90.0, ReadingStatus.SENT), weightKg = 66.0)
+        assertTrue(result is IngestResult.Held)
+        assertEquals(ReadingStatus.HELD_CONFIRM, (result as IngestResult.Held).reading.status)
+        assertEquals("p1", result.reading.scaleProfileId)
+        assertEquals(2, dao.rows.value.size)
+    }
+
+    @Test
+    fun aJumpUpwardIsHeldToo() = runTest {
+        val (result, _) = ingestAfter(baseline(66.0, ReadingStatus.SENT), weightKg = 90.0)
+        assertTrue(result is IngestResult.Held)
+    }
+
+    @Test
+    fun aChangeOfExactlyTenKgIsNotHeld() = runTest {
+        val (result, _) = ingestAfter(baseline(90.0, ReadingStatus.SENT), weightKg = 80.0)
+        assertTrue(result is IngestResult.Inserted)
+    }
+
+    @Test
+    fun aChangeOfLessThanTenKgIsNotHeld() = runTest {
+        val (result, _) = ingestAfter(baseline(90.0, ReadingStatus.SENT), weightKg = 80.5)
+        assertTrue(result is IngestResult.Inserted)
+    }
+
+    @Test
+    fun withNoBaselineTheFirstReadingIsNotHeld() = runTest {
+        val (result, _) = ingestAfter(weightKg = 66.0)
+        assertTrue(result is IngestResult.Inserted)
+    }
+
+    @Test
+    fun everyAcceptedStatusIsABaseline() = runTest {
+        listOf(
+            ReadingStatus.SENT,
+            ReadingStatus.PENDING,
+            ReadingStatus.FAILED_PERMANENT,
+            ReadingStatus.BLOCKED_AUTH,
+        ).forEach { status ->
+            val (result, _) = ingestAfter(baseline(90.0, status), weightKg = 66.0)
+            assertTrue("$status must anchor the baseline", result is IngestResult.Held)
+        }
+    }
+
+    @Test
+    fun aDeclinedReadingIsNotABaseline() = runTest {
+        // Only the declined row is near the candidate; the accepted one is far from it.
+        val (result, _) = ingestAfter(
+            baseline(66.0, ReadingStatus.DECLINED, capturedAtMillis = RECEIVED_AT - 1_000_000L),
+            baseline(90.0, ReadingStatus.SENT, capturedAtMillis = RECEIVED_AT - ONE_HOUR_MILLIS),
+            weightKg = 66.5,
+        )
+        assertTrue("the older accepted 90 kg row is the baseline", result is IngestResult.Held)
+    }
+
+    @Test
+    fun aHeldReadingIsNotABaseline() = runTest {
+        val (result, _) = ingestAfter(
+            baseline(66.0, ReadingStatus.HELD_CONFIRM, capturedAtMillis = RECEIVED_AT - 1_000_000L),
+            baseline(90.0, ReadingStatus.SENT, capturedAtMillis = RECEIVED_AT - ONE_HOUR_MILLIS),
+            weightKg = 66.5,
+        )
+        assertTrue("the older accepted 90 kg row is the baseline", result is IngestResult.Held)
+    }
+
+    @Test
+    fun onlyDeclinedAndHeldRowsMeansNoBaseline() = runTest {
+        val (result, _) = ingestAfter(
+            baseline(90.0, ReadingStatus.DECLINED),
+            baseline(90.0, ReadingStatus.HELD_CONFIRM, id = "held"),
+            weightKg = 66.0,
+        )
+        assertTrue(result is IngestResult.Inserted)
+    }
+
+    @Test
+    fun theBaselineIsTheMostRecentCaptureNotTheMostRecentInsert() = runTest {
+        // Inserted last but captured earlier: 66 kg. The 90 kg row is the latest capture.
+        val (result, _) = ingestAfter(
+            baseline(90.0, ReadingStatus.SENT, id = "latest-capture", capturedAtMillis = RECEIVED_AT - 1_000_000L),
+            baseline(66.0, ReadingStatus.SENT, id = "inserted-last", capturedAtMillis = RECEIVED_AT - ONE_HOUR_MILLIS),
+            weightKg = 66.5,
+        )
+        assertTrue(result is IngestResult.Held)
+    }
+
+    @Test
+    fun aManualReadingIsNotABaselineForAScaleReading() = runTest {
+        val manual = baseline(90.0, ReadingStatus.SENT).copy(source = ReadingSource.MANUAL)
+        val (result, _) = ingestAfter(manual, weightKg = 66.0)
+        assertTrue(result is IngestResult.Inserted)
+    }
+
+    @Test
+    fun aSlotMismatchIsStillHeldWhenWithinTheJumpThreshold() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(baseline(71.0, ReadingStatus.SENT))
+        val profiles = FakeScaleProfileStore(
+            listOf(profile("p1", 1, active = true), profile("p2", 2, active = false)),
+        )
+        val reading = scaleReadingFixture(weightKg = 71.0, userIndex = 2, receivedAtMillis = RECEIVED_AT)
+        assertTrue(ingestor(dao, profiles).ingest(deviceAddress, reading) is IngestResult.Held)
+    }
+
     /** Same weight and user every time, so the resolved capture time is the only thing the dedup gate can act on. */
     private fun storedWeighIn(scaleTime: Long, receivedAt: Long) = scaleReadingFixture(
         weightKg = 71.0,
@@ -243,6 +368,8 @@ class ReadingIngestorTest {
     private companion object {
         /** A realistic epoch: the fixture's default of zero puts any real scale time outside the believable window. */
         const val RECEIVED_AT = 1_787_000_000_000L
+
+        const val ONE_HOUR_MILLIS = 60 * 60 * 1000L
 
         const val THREE_HOURS_MILLIS = 3 * 60 * 60 * 1000L
 

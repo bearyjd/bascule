@@ -73,6 +73,24 @@ interface ReadingDao {
     )
     suspend fun dedupCandidates(source: String, fromMillis: Long, toMillis: Long): List<ReadingEntity>
 
+    /**
+     * The weight-jump baseline ([WeightJumpPolicy]): the most recent *accepted*
+     * reading from [source]. HELD_CONFIRM is unconfirmed and DECLINED is
+     * another person's weight, so neither may move the baseline; every other
+     * status was accepted as the user's. Ordered by the scale's own capture
+     * time, not insertion order.
+     */
+    @Query(
+        """
+        SELECT * FROM readings
+        WHERE status IN ('SENT', 'PENDING', 'FAILED_PERMANENT', 'BLOCKED_AUTH')
+          AND source = :source
+        ORDER BY capturedAtMillis DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun latestAccepted(source: String): ReadingEntity?
+
     @Query("SELECT COUNT(*) FROM readings WHERE status = 'BLOCKED_AUTH'")
     suspend fun blockedAuthCount(): Int
 

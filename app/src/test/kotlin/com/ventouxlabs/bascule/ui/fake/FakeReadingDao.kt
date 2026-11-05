@@ -56,6 +56,12 @@ class FakeReadingDao(
                 it.capturedAtMillis in fromMillis..toMillis
         }
 
+    /** Mirrors the live `@Query`: the accepted statuses only, this source, newest capture first, LIMIT 1. */
+    override suspend fun latestAccepted(source: String): ReadingEntity? =
+        _rows.value
+            .filter { it.status in ACCEPTED_STATUSES && it.source.name == source }
+            .maxByOrNull { it.capturedAtMillis }
+
     override suspend fun blockedAuthCount(): Int =
         _rows.value.count { it.status == ReadingStatus.BLOCKED_AUTH }
 
@@ -122,5 +128,14 @@ class FakeReadingDao(
                 )
             }
         }
+    }
+
+    private companion object {
+        val ACCEPTED_STATUSES = setOf(
+            ReadingStatus.SENT,
+            ReadingStatus.PENDING,
+            ReadingStatus.FAILED_PERMANENT,
+            ReadingStatus.BLOCKED_AUTH,
+        )
     }
 }
