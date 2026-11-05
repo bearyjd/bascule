@@ -37,7 +37,11 @@ class ReadingIngestor(
             baselineKg = dao.latestAccepted(ReadingSource.SCALE.name)?.weightKg,
             candidateKg = measurement.weightKg,
         )
-        val status = if (slotMatches && !weightJump)ReadingStatus.PENDING else ReadingStatus.HELD_CONFIRM
+        val status = if (slotMatches && !weightJump) {
+            ReadingStatus.PENDING
+        } else {
+            ReadingStatus.HELD_CONFIRM
+        }
         val candidate = ReadingMapper.map(
             measurement = measurement,
             unit = unitProvider(),
