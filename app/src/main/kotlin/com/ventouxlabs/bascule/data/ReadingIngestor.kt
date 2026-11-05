@@ -30,7 +30,14 @@ class ReadingIngestor(
                 it.deviceAddress.equals(deviceAddress, true) && it.scaleIndex == index
             }
         }
-        val status = if (matched != null && matched.id == active?.id) {
+        val slotMatches = matched != null && matched.id == active?.id
+        // A shared scale: a reading far from the last accepted one is probably
+        // someone else. Only worth the query when it would otherwise go out.
+        val weightJump = slotMatches && WeightJumpPolicy.isJump(
+            baselineKg = dao.latestAccepted(ReadingSource.SCALE.name)?.weightKg,
+            candidateKg = measurement.weightKg,
+        )
+        val status = if (slotMatches && !weightJump) {
             ReadingStatus.PENDING
         } else {
             ReadingStatus.HELD_CONFIRM

@@ -364,6 +364,32 @@ class ReadingDaoSqlTest {
     }
 
     @Test
+    fun theLatestAcceptedRowIsTheNewestCaptureAmongAcceptedStatusesOfOneSource() = runBlocking {
+        listOf(
+            ReadingStatus.SENT,
+            ReadingStatus.PENDING,
+            ReadingStatus.FAILED_PERMANENT,
+            ReadingStatus.BLOCKED_AUTH,
+        ).forEachIndexed { index, status ->
+            dao.insert(readingFixture(id = status.name, status = status, capturedAtMillis = 1_000L + index))
+        }
+        // Newer than every accepted row, yet none of these may be the baseline.
+        dao.insert(readingFixture(id = "held", status = ReadingStatus.HELD_CONFIRM, capturedAtMillis = 9_000L))
+        dao.insert(readingFixture(id = "declined", status = ReadingStatus.DECLINED, capturedAtMillis = 9_001L))
+        dao.insert(readingFixture(id = "manual", capturedAtMillis = 9_002L).copy(source = ReadingSource.MANUAL))
+
+        assertEquals("BLOCKED_AUTH", dao.latestAccepted(ReadingSource.SCALE.name)?.id)
+    }
+
+    @Test
+    fun theLatestAcceptedRowIsNullWhenNothingWasAccepted() = runBlocking {
+        dao.insert(readingFixture(id = "held", status = ReadingStatus.HELD_CONFIRM))
+        dao.insert(readingFixture(id = "declined", status = ReadingStatus.DECLINED))
+
+        assertNull(dao.latestAccepted(ReadingSource.SCALE.name))
+    }
+
+    @Test
     fun theBatchLimitConstantIsWhatTheDrainQueryActuallyHonours() = runBlocking {
         repeat(DeliveryCoordinator.DRAIN_BATCH_LIMIT + 3) { index ->
             dao.insert(readingFixture(id = "row-$index", capturedAtMillis = index.toLong()))
