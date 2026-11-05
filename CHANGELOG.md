@@ -7,6 +7,31 @@ GitHub Releases carry auto-generated notes linking the merged PRs; this file
 is the human-readable view and leads with what changed for the person using
 the app, not with internals.
 
+## v0.3.0
+
+A reading that is clearly not yours no longer reaches your data, and settings
+backups are protected by a stronger passphrase.
+
+### A weigh-in by someone else is held, not synced
+
+If someone much lighter or heavier steps on the scale, the reading used to go
+straight to VitalForge as yours. A reading that differs by more than 10 kg from
+your most recent accepted one is now held instead. It appears in History with
+**Yes, that's me** and **Not me**; nothing is sent until you confirm, and
+**Not me** discards it for good. Readings you decline never count towards what
+"your weight" is. With no earlier reading there is nothing to compare against,
+so nothing is held.
+
+Known limits: a genuine change of more than 10 kg after a long gap is held too,
+and costs one tap. A held reading raises no notification; it waits in History.
+
+### Also
+
+- A newly chosen settings-backup passphrase must be at least 12 characters with
+  at least 5 distinct, and the export button says why it is disabled.
+- Dependency updates are now managed by Renovate, with the Android Gradle
+  Plugin kept inside the toolchain group.
+
 ## v0.2.0
 
 The release that made capture reliable. v0.1.0 could take a weigh-in only if
