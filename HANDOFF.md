@@ -1653,20 +1653,19 @@ follow-up, then push and merge.
 
 ## Known open items (carried forward, still genuinely open — don't silently resolve)
 
-- **v2 is now selectable in Settings, but the live server's deployment is
-  unverified.** `vitalforge` PR #40 (adds `bmi`/`bmr`/`amr` to `WeightIn`)
-  merged 2026-09-07T03:34Z, well before this PR; `docker.yml`'s
-  `on: push: branches: [main]` would have built and pushed a new
-  `bearyj/vitalforge-weight:latest` image since. Whether `atlas` — the
-  host actually serving `weight.grepon.cc` — has pulled and restarted on
-  that image is genuinely unknown from this machine: this session has no
-  SSH access to atlas (`user@atlas: Permission denied (publickey)`), and
-  `/health` returning `{"status":"ok"}` only proves *a* server is up, not
-  which image. Low stakes either way — v1 stays the default
-  (`DataStoreConfigStore.contractVersion` falls back to
-  `V1_WEIGHT_ONLY`), so nobody is switched to v2 without opening Settings
-  and choosing it — but confirm the deployment (or just try it and watch
-  for a 422) before relying on v2 for real data.
+- **v2 is selectable in Settings; the live server stores it (confirmed
+  2026-11-05 on the server itself).** `vitalforge` PR #40 (adds
+  `bmi`/`bmr`/`amr` to `WeightIn`) merged 2026-09-07T03:34Z. The host serving
+  `weight.grepon.cc` is reached with `ssh -o HostKeyAlias=192.168.1.21
+  100.74.76.39` (hostname `knowledge`, not `atlas`; `atlas` refuses our
+  keys). It runs `bearyj/vitalforge-weight:1c20092`, built after PR #40, and
+  `/app/data/fitness.db` `weight_log` holds `body_fat_pct`, `body_water_pct`,
+  `muscle_pct`, `bmi`, `bmr` and `amr` for the 2026-11-04 readings, matching
+  the Pixel's rows by `client_id`. `bone_mass_kg` is NULL on every row: the
+  BF720 does not report it. v1 stays the default
+  (`DataStoreConfigStore.contractVersion` falls back to `V1_WEIGHT_ONLY`),
+  so a fresh install, or a restore of a backup without the setting, sends
+  weight only until v2 is chosen again in Settings.
 - **v2's contract-switch recovery has one narrow, self-healing residual**
   (Codex review, v2-body-composition PR, 5 rounds — 4 fixed real bugs, this
   5th is an accepted trade-off, not an oversight). If a contract switch
