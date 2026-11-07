@@ -1666,6 +1666,28 @@ follow-up, then push and merge.
   (`DataStoreConfigStore.contractVersion` falls back to `V1_WEIGHT_ONLY`),
   so a fresh install, or a restore of a backup without the setting, sends
   weight only until v2 is chosen again in Settings.
+- **After a reinstall, relink the old slot — do not re-register.** Uninstalling
+  wipes the encrypted consent store, and "Re-register with the scale" always
+  takes the next free slot (the owner's reinstall landed on slot 2). The
+  owner's profile is **slot 1, consent code 3907** on the BF720
+  `E7:DB:51:F1:36:91` (accepted by the scale on 2026-09-19,
+  `docs/prp/03-hardware-validation.md`; slot 2 / 1234 was the Aug-22 probe,
+  since deleted from the scale). On the Scale screen use **Use existing**:
+  address, slot 1, code 3907. It spends no slot. Relinked and confirmed
+  2026-11-06: readings arrive under slot 1 and sync with body composition.
+  The release APK is signed with a different key than the old debug install,
+  so the first release install needed an uninstall; later releases update in
+  place.
+- **A fresh install has no battery exemption, and background sessions are
+  refused.** 2026-11-06: every scale wake-up logged `skipped: the platform
+  refused a foreground start` (`Background started FGS: Disallowed`, uidState
+  TRNB) until the app was whitelisted (`adb shell dumpsys deviceidle
+  whitelist +com.ventouxlabs.bascule`, then an app-process restart) or set to
+  Unrestricted in Android settings. The scale stores a weigh-in taken meanwhile
+  and hands it over at the next connection, so nothing was lost. The app does
+  not detect or ask for the exemption; that is the open gap. Whether the adb
+  whitelist survives a reboot is untested. The release build is not
+  debuggable, so `run-as` can no longer read the app's database.
 - **v2's contract-switch recovery has one narrow, self-healing residual**
   (Codex review, v2-body-composition PR, 5 rounds — 4 fixed real bugs, this
   5th is an accepted trade-off, not an oversight). If a contract switch
