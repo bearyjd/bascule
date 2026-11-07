@@ -56,9 +56,18 @@ data class ScaleUiState(
      */
     val bridgeStartFailed: Boolean = false,
     val startupFailure: String? = null,
+    /**
+     * The app is not exempt from battery optimisation, so Android refuses the
+     * background foreground-service start and every scale wake-up is skipped.
+     */
+    val batteryExemptionNeeded: Boolean = false,
 )
 
-private data class StartupProblems(val bridgeStartFailed: Boolean, val startupFailure: String?)
+private data class PlatformProblems(
+    val bridgeStartFailed: Boolean,
+    val startupFailure: String?,
+    val batteryExemptionNeeded: Boolean,
+)
 
 private data class ScaleCaptureSnapshot(
     val automaticCaptureEnabled: Boolean,
@@ -126,6 +135,7 @@ class ScaleViewModel(
     private val clearCaptureThrottle: () -> Unit = {},
     bridgeStartFailed: StateFlow<Boolean> = MutableStateFlow(false),
     startupFailure: StateFlow<Throwable?> = MutableStateFlow(null),
+    private val isBatteryExempt: () -> Boolean = { true },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     /**
@@ -153,8 +163,19 @@ class ScaleViewModel(
     private val mutableWeighNowActive = MutableStateFlow(false)
     private var weighNowJob: Job? = null
 
-    private val startupProblems = combine(bridgeStartFailed, startupFailure) { bridge, failure ->
-        StartupProblems(bridge, failure?.let { it.message ?: it::class.simpleName })
+    private val batteryExemptionNeeded = MutableStateFlow(!isBatteryExempt())
+
+    private val startupProblems = combine(
+        bridgeStartFailed,
+        startupFailure,
+        batteryExemptionNeeded,
+    ) { bridge, failure, battery ->
+        PlatformProblems(bridge, failure?.let { it.message ?: it::class.simpleName }, battery)
+    }
+
+    /** Re-read on resume: the exemption is granted or revoked in a system screen this app cannot observe. */
+    fun refreshBatteryExemption() {
+        batteryExemptionNeeded.value = !isBatteryExempt()
     }
 
     val uiState: StateFlow<ScaleUiState> = combine(
@@ -176,6 +197,7 @@ class ScaleViewModel(
             lastAttempt = lastAttempt,
             bridgeStartFailed = startup.bridgeStartFailed,
             startupFailure = startup.startupFailure,
+            batteryExemptionNeeded = startup.batteryExemptionNeeded,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIBE_TIMEOUT_MILLIS), ScaleUiState())
 
@@ -324,6 +346,7 @@ class ScaleViewModel(
                     },
                     bridgeStartFailed = app.alwaysOnBridgingStartFailed,
                     startupFailure = app.startupFailure,
+                    isBatteryExempt = BatteryExemption(app)::isExempt,
                 )
             }
         }
