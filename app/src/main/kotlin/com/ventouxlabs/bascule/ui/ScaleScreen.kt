@@ -17,6 +17,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,11 +26,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.text.DateFormat
 import java.util.Date
 
@@ -44,11 +48,13 @@ fun ScaleScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val configState by configViewModel.uiState.collectAsState()
+    OnResume(viewModel::refreshBatteryExemption)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Scale")
+        if (state.batteryExemptionNeeded) BatteryExemptionCard()
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Capture")
@@ -98,6 +104,33 @@ fun ScaleScreen(
                 Text("Scale status")
                 Text("Battery level and live status are only available while the app is connected to your scale.")
                 Text("Removing a profile only forgets it on this phone — the BF720 keeps its own copy of the slot.")
+            }
+        }
+    }
+}
+
+/** Re-reads state the user can change in a system screen (e.g. battery exemption). */
+@Composable
+private fun OnResume(action: () -> Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) action()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+}
+
+@Composable
+private fun BatteryExemptionCard() {
+    val context = LocalContext.current
+    val batteryExemption = remember(context) { BatteryExemption(context.applicationContext) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Weigh-ins can be missed while the app is in the background. Allow Bascule to run unrestricted.")
+            TextButton(onClick = { batteryExemption.launchRequest(context) }) {
+                Text("Allow")
             }
         }
     }
