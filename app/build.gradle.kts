@@ -16,8 +16,8 @@ android {
         applicationId = "com.ventouxlabs.bascule"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.3.1"
     }
 
     // Release signing is configured from a properties file that lives OUTSIDE

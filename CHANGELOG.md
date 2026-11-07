@@ -7,6 +7,18 @@ GitHub Releases carry auto-generated notes linking the merged PRs; this file
 is the human-readable view and leads with what changed for the person using
 the app, not with internals.
 
+## v0.3.1
+
+### The app now tells you when Android is blocking background weigh-ins
+
+A fresh install is not exempt from battery optimisation, and without the
+exemption Android refuses to start the app's background session, so every
+scale wake-up is silently skipped. The Scale screen now shows a card in that
+case, with one **Allow** button that opens the system prompt. The card goes
+away when you come back with the exemption granted, and returns if it is
+revoked or you decline. A weigh-in taken meanwhile is not lost: the scale holds
+it and hands it over at the next connection.
+
 ## v0.3.0
 
 A reading that is clearly not yours no longer reaches your data, and settings
