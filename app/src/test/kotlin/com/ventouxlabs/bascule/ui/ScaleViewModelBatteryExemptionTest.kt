@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -61,10 +62,18 @@ class ScaleViewModelBatteryExemptionTest {
 
     @Test
     fun anExemptAppIsNotNagged() = runTest {
-        val vm = collecting(viewModel { true })
+        var calls = 0
+        val vm = collecting(viewModel { calls++; true })
         advanceUntilIdle()
 
         assertFalse(vm.uiState.value.batteryExemptionNeeded)
+        assertEquals("asked once when state is first computed", 1, calls)
+
+        vm.refreshBatteryExemption()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.batteryExemptionNeeded)
+        assertEquals("asked again on refresh", 2, calls)
     }
 
     @Test

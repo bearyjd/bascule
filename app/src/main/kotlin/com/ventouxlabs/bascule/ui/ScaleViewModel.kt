@@ -165,7 +165,7 @@ class ScaleViewModel(
 
     private val batteryExemptionNeeded = MutableStateFlow(!isBatteryExempt())
 
-    private val startupProblems = combine(
+    private val platformProblems = combine(
         bridgeStartFailed,
         startupFailure,
         batteryExemptionNeeded,
@@ -183,7 +183,7 @@ class ScaleViewModel(
         captureState,
         mutableWeighNowActive,
         captureAttempts.last,
-        startupProblems,
+        platformProblems,
     ) { all, capture, weighNowActive, lastAttempt, startup ->
         ScaleUiState(
             profiles = all,

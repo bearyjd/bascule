@@ -125,10 +125,11 @@ private fun OnResume(action: () -> Unit) {
 @Composable
 private fun BatteryExemptionCard() {
     val context = LocalContext.current
+    val batteryExemption = remember(context) { BatteryExemption(context.applicationContext) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Weigh-ins can be missed while the app is in the background. Allow Bascule to run unrestricted.")
-            TextButton(onClick = { BatteryExemption(context.applicationContext).launchRequest(context) }) {
+            TextButton(onClick = { batteryExemption.launchRequest(context) }) {
                 Text("Allow")
             }
         }
