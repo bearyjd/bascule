@@ -30,7 +30,7 @@ serialization = "1.11.0"
 
 # OkHttp is the one non-AndroidX/kotlinx runtime dependency — justified in
 # docs/prp/02-interface-revision.md §6.
-okhttp = "5.5.0"
+okhttp = "5.5.1"
 
 junit = "4.13.2"
 robolectric = "4.16.1"
