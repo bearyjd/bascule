@@ -7,6 +7,7 @@
 set -euo pipefail
 
 dir="${1:-.github/workflows}"
+[ -d "$dir" ] || { echo "no such dir: $dir" >&2; exit 2; }
 bad=$(grep -rnE '^\s*(-\s+)?uses:' "$dir" \
   | grep -vE 'uses:\s+(\./|docker://)' \
   | grep -vE 'uses:\s+[^@[:space:]]+@[0-9a-f]{40}(\s|$)' || true)
