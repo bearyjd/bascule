@@ -39,6 +39,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Check Gradle wrapper checksum is pinned
+        run: ./tools/check-wrapper-checksum.sh
+
       - name: Assemble
         run: ./gradlew assembleDebug
 
