@@ -22,6 +22,9 @@ interface ReadingDao {
     @Update
     suspend fun update(reading: ReadingEntity)
 
+    @Query("SELECT * FROM readings WHERE id = :id")
+    suspend fun byId(id: String): ReadingEntity?
+
     @Query("SELECT * FROM readings ORDER BY capturedAtMillis DESC")
     fun observeAll(): Flow<List<ReadingEntity>>
 

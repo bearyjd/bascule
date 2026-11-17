@@ -12,4 +12,9 @@
     <string name="scale_capture_text">Step on any time — the reading will be captured</string>
 
     <string name="capture_attention_channel">Needs your attention</string>
+    <string name="held_reading_channel">Confirm a reading</string>
+    <string name="held_reading_title">Was that weigh-in you?</string>
+    <string name="held_reading_body">A reading was captured that may belong to someone else. It will not be sent until you confirm.</string>
+    <string name="held_reading_confirm">Yes, that\'s me</string>
+    <string name="held_reading_decline">Not me</string>
 </resources>
