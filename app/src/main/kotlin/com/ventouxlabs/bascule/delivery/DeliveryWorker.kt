@@ -6,6 +6,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingDao
+import com.ventouxlabs.bascule.service.CaptureAttentionNotifier
 
 /**
  * Drains PENDING rows. Runs independently of the session process so a killed
@@ -21,7 +22,14 @@ class DeliveryWorker(
         val app = applicationContext as BasculeApplication
         val dao = app.database.readingDao()
         val runtime = app.runtimeApiFactory.create()
-        val outcome = DeliveryDrainer(dao, runtime, log = { Log.i(TAG, it) }).drain()
+        val notifier = CaptureAttentionNotifier(applicationContext)
+        val outcome = DeliveryDrainer(
+            dao,
+            runtime,
+            log = { Log.i(TAG, it) },
+            onAuthBlocked = notifier::postAuthBlocked,
+            onAuthRecovered = notifier::clearAuthBlocked,
+        ).drain()
         scheduleRetryIfNeeded(outcome, dao, app.deliveryScheduler, System.currentTimeMillis())
         return resultFor(outcome)
     }

@@ -28,7 +28,16 @@ class DeliveryDrainerTest {
         api: FakeDeliveryApi,
         now: Long = 10_000L,
         log: (String) -> Unit = {},
-    ) = DeliveryDrainer(dao, RuntimeApi(api, WeightUnit.KILOGRAMS), clock = { now }, log = log)
+        onAuthBlocked: () -> Unit = {},
+        onAuthRecovered: () -> Unit = {},
+    ) = DeliveryDrainer(
+        dao,
+        RuntimeApi(api, WeightUnit.KILOGRAMS),
+        clock = { now },
+        log = log,
+        onAuthBlocked = onAuthBlocked,
+        onAuthRecovered = onAuthRecovered,
+    )
 
     /**
      * Builds the [SubmitResult] the real [ResponseClassifier] would build for a
@@ -47,6 +56,27 @@ class DeliveryDrainerTest {
         drainer(dao, api).drain()
         assertEquals(1, api.recentReadingsCallCount)
         assertEquals(5, api.submittedReadingIds.size)
+    }
+
+    @Test
+    fun anAuthRejectionNotifiesTheUserExactlyOnce() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "a", capturedAtMillis = 1))
+        dao.insert(readingFixture(id = "b", capturedAtMillis = 2))
+        val api = FakeDeliveryApi()
+        api.enqueueSubmitResult(SubmitResult.AuthRejected(401))
+        var blocked = 0
+        drainer(dao, api, onAuthBlocked = { blocked++ }).drain()
+        assertEquals(1, blocked)
+    }
+
+    @Test
+    fun aAcceptedReadingClearsTheAuthNotification() = runTest {
+        val dao = FakeReadingDao()
+        dao.insert(readingFixture(id = "a", capturedAtMillis = 1))
+        var recovered = 0
+        drainer(dao, FakeDeliveryApi(), onAuthRecovered = { recovered++ }).drain()
+        assertEquals(1, recovered)
     }
 
     @Test
