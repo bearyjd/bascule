@@ -39,7 +39,14 @@ class FakeGattTransport(
      * block or fail the session it's part of.
      */
     private val suppressWriteCompleteFor: Set<UUID> = emptySet(),
+    /**
+     * Subscriptions refused with this GATT status (5 = insufficient
+     * authentication, 15 = insufficient encryption) until [createBond] is called.
+     */
+    private val subscriptionStatusUntilBonded: Map<UUID, Int> = emptyMap(),
 ) : GattTransport {
+
+    private var bondCreated = false
 
     private var connectAttempt = 0
 
@@ -137,7 +144,12 @@ class FakeGattTransport(
     private fun subscribe(char: UUID, kind: SubscriptionKind) {
         _callOrder += "subscribe:$char"
         subscribedCharacteristics[char] = kind
-        if (char !in suppressSubscriptionFor) emit(TransportEvent.SubscriptionEnabled(char, kind, status = 0))
+        val refusal = subscriptionStatusUntilBonded[char]?.takeUnless { bondCreated }
+        if (refusal != null) {
+            emit(TransportEvent.SubscriptionEnabled(char, kind, status = refusal))
+        } else if (char !in suppressSubscriptionFor) {
+            emit(TransportEvent.SubscriptionEnabled(char, kind, status = 0))
+        }
     }
 
     /** The held CCCD write finally completing — what the stack does once the link is encrypted. */
@@ -155,6 +167,8 @@ class FakeGattTransport(
     }
 
     override fun createBond() {
+        _callOrder += "createBond"
+        bondCreated = true
         emit(TransportEvent.BondStateChanged(BOND_BONDED))
     }
 

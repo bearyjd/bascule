@@ -424,7 +424,8 @@ class GattSession(
             SubscriptionOutcome.AdapterOff -> SessionOutcome.Missed(MissReason.ADAPTER_OFF)
             SubscriptionOutcome.PairingRequired -> SessionOutcome.PairingRequired
             SubscriptionOutcome.Dropped -> reconnectOnce(events)
-            SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
+            SubscriptionOutcome.Bonding, SubscriptionOutcome.AuthRequired ->
+                error("Bonding is resolved inside awaitSubscription")
             SubscriptionOutcome.Failed -> SessionOutcome.HandshakeFailed(
                 "could not enable User Control Point indications",
             )
@@ -446,7 +447,8 @@ class GattSession(
                 SubscriptionOutcome.AdapterOff -> return SessionOutcome.Missed(MissReason.ADAPTER_OFF)
                 SubscriptionOutcome.PairingRequired -> return SessionOutcome.PairingRequired
                 SubscriptionOutcome.Dropped -> return reconnectOnce(events)
-                SubscriptionOutcome.Bonding -> error("Bonding is resolved inside awaitSubscription")
+                SubscriptionOutcome.Bonding, SubscriptionOutcome.AuthRequired ->
+                    error("Bonding is resolved inside awaitSubscription")
                 SubscriptionOutcome.Failed -> return SessionOutcome.HandshakeFailed(
                     "could not enable a measurement indication",
                 )
@@ -475,8 +477,43 @@ class GattSession(
                 BondWait.AdapterOff -> SubscriptionOutcome.AdapterOff
             }
         }
+        if (first == SubscriptionOutcome.AuthRequired) return bondThenRetrySubscription(events, char, deferredFrames)
         return first ?: SubscriptionOutcome.Failed.also {
             log("subscription to $char unanswered after ${SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT}")
+        }
+    }
+
+    /**
+     * The stack refused the CCCD write with insufficient authentication or
+     * encryption (GATT status 5/15) instead of holding it behind pairing, so
+     * nothing will retry it: start the bond ourselves, then subscribe once more.
+     */
+    private suspend fun bondThenRetrySubscription(
+        events: Channel<TransportEvent>,
+        char: UUID,
+        deferredFrames: MutableList<TransportEvent.CharacteristicChanged>?,
+    ): SubscriptionOutcome {
+        log("subscription to $char refused for lack of authentication; starting bonding")
+        transport.createBond()
+        return when (awaitBond(events, deferredFrames)) {
+            BondWait.Bonded -> {
+                transport.enableIndications(char)
+                when (
+                    val retried = withTimeoutOrNull(SessionBudget.OPENING_WRITE_COMPLETE_TIMEOUT) {
+                        receiveSubscriptionOutcome(events, char, deferredFrames)
+                    }
+                ) {
+                    SubscriptionOutcome.Enabled -> SubscriptionOutcome.Enabled
+                    SubscriptionOutcome.AdapterOff -> SubscriptionOutcome.AdapterOff
+                    SubscriptionOutcome.AuthRequired -> SubscriptionOutcome.PairingRequired
+                    else -> SubscriptionOutcome.Failed.also {
+                        log("subscription to $char failed after bonding: $retried")
+                    }
+                }
+            }
+            BondWait.Refused, BondWait.TimedOut -> SubscriptionOutcome.PairingRequired
+            BondWait.Dropped -> SubscriptionOutcome.Dropped
+            BondWait.AdapterOff -> SubscriptionOutcome.AdapterOff
         }
     }
 
@@ -516,14 +553,20 @@ class GattSession(
 
     private fun subscriptionOutcome(status: Int): SubscriptionOutcome {
         if (status != 0) log("subscription refused, status $status")
-        return if (status == 0) SubscriptionOutcome.Enabled else SubscriptionOutcome.Failed
+        return when (status) {
+            0 -> SubscriptionOutcome.Enabled
+            GATT_INSUFFICIENT_AUTHENTICATION, GATT_INSUFFICIENT_ENCRYPTION -> SubscriptionOutcome.AuthRequired
+            else -> SubscriptionOutcome.Failed
+        }
     }
 
     /**
      * [Bonding] is internal to [awaitSubscription], which resolves it into one
      * of the others before any caller sees it.
      */
-    private enum class SubscriptionOutcome { Enabled, Failed, AdapterOff, Bonding, PairingRequired, Dropped }
+    private enum class SubscriptionOutcome {
+        Enabled, Failed, AdapterOff, Bonding, AuthRequired, PairingRequired, Dropped
+    }
 
     /**
      * [deferredFrames] first: the scale's stored weigh-in, if it had one, was
@@ -779,6 +822,8 @@ class GattSession(
         const val BOND_NONE = 10
         const val BOND_BONDING = 11
         const val BOND_BONDED = 12
+        const val GATT_INSUFFICIENT_AUTHENTICATION = 5
+        const val GATT_INSUFFICIENT_ENCRYPTION = 15
 
     }
 }
