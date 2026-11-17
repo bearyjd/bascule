@@ -1,5 +1,7 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 import com.ventouxlabs.bascule.ble.fake.scaleReadingFixture
 import com.ventouxlabs.bascule.data.ReadingMapper
 import com.ventouxlabs.bascule.data.ReadingStatus

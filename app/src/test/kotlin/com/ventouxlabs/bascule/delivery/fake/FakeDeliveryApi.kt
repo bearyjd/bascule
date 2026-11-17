@@ -3,7 +3,7 @@ package com.ventouxlabs.bascule.delivery.fake
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.network.ConnectionTestResult
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import com.ventouxlabs.bascule.network.LoginResult
 import com.ventouxlabs.bascule.network.RecentResult
 import com.ventouxlabs.bascule.network.SubmitResult

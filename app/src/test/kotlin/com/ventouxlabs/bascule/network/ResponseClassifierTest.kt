@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ReadingField
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue

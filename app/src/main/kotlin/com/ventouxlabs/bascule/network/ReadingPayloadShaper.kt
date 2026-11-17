@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ReadingField
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.WeightUnit
 import java.time.Instant

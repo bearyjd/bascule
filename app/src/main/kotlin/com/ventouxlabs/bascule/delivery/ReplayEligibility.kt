@@ -2,8 +2,8 @@ package com.ventouxlabs.bascule.delivery
 
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingStatus
-import com.ventouxlabs.bascule.network.ContractVersion
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 
 /**
  * WP-22 (`01-plan.md`), the two-clause predicate from `00-design.md` §4.4: a

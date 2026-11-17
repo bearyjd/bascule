@@ -9,7 +9,7 @@ import com.ventouxlabs.bascule.data.ScaleProfileStore
 import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.data.fake.FakeScaleProfileStore
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.ui.fake.readingFixture

@@ -4,7 +4,7 @@ import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingEntity
 import com.ventouxlabs.bascule.data.ReadingSource
 import com.ventouxlabs.bascule.data.ReadingStatus
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ReadingField
 import java.util.UUID
 
 /** A minimal, valid [ReadingEntity] with only the fields a given test cares about overridden. */

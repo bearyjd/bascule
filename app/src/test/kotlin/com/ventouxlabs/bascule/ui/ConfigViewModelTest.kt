@@ -615,7 +615,7 @@ class ConfigViewModelTest {
             PortableSettings(
                 baseUrl = "https://weight.grepon.cc",
                 displayUnit = WeightUnit.POUNDS,
-                contractVersion = com.ventouxlabs.bascule.network.ContractVersion.V1_WEIGHT_ONLY,
+                contractVersion = com.ventouxlabs.bascule.model.ContractVersion.V1_WEIGHT_ONLY,
                 alwaysOnBridging = true,
                 credentialType = BackupCredentialType.TOKEN,
                 credentialValue = "restored-token",
@@ -640,7 +640,7 @@ class ConfigViewModelTest {
         PortableSettings(
             baseUrl = baseUrl,
             displayUnit = WeightUnit.KILOGRAMS,
-            contractVersion = com.ventouxlabs.bascule.network.ContractVersion.V1_WEIGHT_ONLY,
+            contractVersion = com.ventouxlabs.bascule.model.ContractVersion.V1_WEIGHT_ONLY,
             alwaysOnBridging = false,
             credentialType = BackupCredentialType.TOKEN,
             credentialValue = "imported-token",

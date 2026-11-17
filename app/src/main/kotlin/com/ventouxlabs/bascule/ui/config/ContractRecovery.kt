@@ -3,7 +3,7 @@ package com.ventouxlabs.bascule.ui.config
 import android.util.Log
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 
 private const val CONFIG_VIEW_MODEL_TAG = "ConfigViewModel"
 

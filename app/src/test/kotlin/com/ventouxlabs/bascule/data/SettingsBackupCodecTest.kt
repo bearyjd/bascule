@@ -1,7 +1,7 @@
 package com.ventouxlabs.bascule.data
 
 import com.ventouxlabs.bascule.ble.session.ScaleCredential
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import javax.crypto.AEADBadTagException

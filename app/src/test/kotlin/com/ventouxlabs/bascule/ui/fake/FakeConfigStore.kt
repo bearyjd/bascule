@@ -2,7 +2,7 @@ package com.ventouxlabs.bascule.ui.fake
 
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.WeightUnit
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

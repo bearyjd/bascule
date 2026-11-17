@@ -4,8 +4,8 @@ import com.ventouxlabs.bascule.data.ErrorClass
 import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.data.WeightUnit
 import com.ventouxlabs.bascule.delivery.fake.FakeDeliveryApi
-import com.ventouxlabs.bascule.network.ContractVersion
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 import com.ventouxlabs.bascule.network.RecentResult
 import com.ventouxlabs.bascule.network.RemoteReading
 import com.ventouxlabs.bascule.network.ResponseClassifier

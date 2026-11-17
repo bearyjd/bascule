@@ -1,7 +1,7 @@
 package com.ventouxlabs.bascule.data
 
-import com.ventouxlabs.bascule.network.ContractVersion
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
