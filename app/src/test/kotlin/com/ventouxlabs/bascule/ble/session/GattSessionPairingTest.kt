@@ -44,10 +44,12 @@ class GattSessionPairingTest {
     private fun scale(
         suppressSubscriptionFor: Set<UUID> = emptySet(),
         suppressWriteCompleteFor: Set<UUID> = emptySet(),
+        subscriptionStatusUntilBonded: Map<UUID, Int> = emptyMap(),
     ) = FakeGattTransport(
         discovered = discovered,
         suppressSubscriptionFor = suppressSubscriptionFor,
         suppressWriteCompleteFor = suppressWriteCompleteFor,
+        subscriptionStatusUntilBonded = subscriptionStatusUntilBonded,
         onWrite = { char, bytes ->
             if (char != SigWeightProfile.USER_CONTROL_POINT) {
                 emptyList()
@@ -119,6 +121,26 @@ class GattSessionPairingTest {
         advanceUntilIdle()
 
         assertEquals(SessionOutcome.Completed(null), deferred.await())
+    }
+
+    /**
+     * Some stacks do not hold the CCCD write behind pairing; they refuse it
+     * outright with GATT_INSUFFICIENT_AUTHENTICATION (5) or
+     * GATT_INSUFFICIENT_ENCRYPTION (15). That is a bonding problem, not a
+     * transport failure: start the bond, then retry the subscription.
+     */
+    @Test
+    fun anAuthOrEncryptionRefusalOfTheSubscriptionStartsBondingAndRetries() = runTest {
+        for (status in listOf(5, 15)) {
+            val transport = scale(
+                subscriptionStatusUntilBonded = mapOf(SigWeightProfile.USER_CONTROL_POINT to status),
+            )
+            val deferred = async { session(transport).run() }
+            advanceUntilIdle()
+
+            assertTrue("status $status must trigger createBond", "createBond" in transport.callOrder)
+            assertEquals("status $status", SessionOutcome.Completed(null), deferred.await())
+        }
     }
 
     /** E5b: the user tapped "Cancel". Needs words, not a retry. */
