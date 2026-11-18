@@ -15,7 +15,7 @@ import com.ventouxlabs.bascule.data.ReadingStatus
 import com.ventouxlabs.bascule.delivery.DeliveryTrigger
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.ConnectionTestResult
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import com.ventouxlabs.bascule.network.LoginResult
 import com.ventouxlabs.bascule.network.SessionCookieStore
 import com.ventouxlabs.bascule.network.V1Shaper

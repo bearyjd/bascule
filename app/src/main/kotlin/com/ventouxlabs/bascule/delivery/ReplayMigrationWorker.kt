@@ -5,7 +5,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.ReadingEntity
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import kotlinx.coroutines.flow.first
 
 /**

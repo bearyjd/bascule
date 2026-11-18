@@ -1,5 +1,7 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 import com.ventouxlabs.bascule.data.WeightUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking

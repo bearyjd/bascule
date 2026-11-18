@@ -54,7 +54,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.data.SettingsBackupCodec
 import com.ventouxlabs.bascule.data.WeightUnit
-import com.ventouxlabs.bascule.network.ContractVersion
+import com.ventouxlabs.bascule.model.ContractVersion
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

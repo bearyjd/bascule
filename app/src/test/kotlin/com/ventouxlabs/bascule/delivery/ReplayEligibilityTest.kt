@@ -1,8 +1,8 @@
 package com.ventouxlabs.bascule.delivery
 
 import com.ventouxlabs.bascule.data.ReadingStatus
-import com.ventouxlabs.bascule.network.ContractVersion
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ContractVersion
+import com.ventouxlabs.bascule.model.ReadingField
 import com.ventouxlabs.bascule.ui.fake.readingFixture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

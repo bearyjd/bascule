@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ReadingField
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import kotlin.time.Duration

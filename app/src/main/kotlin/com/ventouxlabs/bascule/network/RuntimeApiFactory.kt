@@ -1,5 +1,6 @@
 package com.ventouxlabs.bascule.network
 
+import com.ventouxlabs.bascule.model.ContractVersion
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.WeightUnit
 import kotlinx.coroutines.flow.first

@@ -4,7 +4,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ReadingField
 
 /**
  * Six statuses, not PRP §5's three (ADR-005, ADR-006).

@@ -1,7 +1,7 @@
 package com.ventouxlabs.bascule.data
 
 import androidx.room.TypeConverter
-import com.ventouxlabs.bascule.network.ReadingField
+import com.ventouxlabs.bascule.model.ReadingField
 
 class Converters {
 
