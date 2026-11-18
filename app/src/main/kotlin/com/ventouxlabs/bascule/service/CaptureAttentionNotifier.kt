@@ -35,12 +35,28 @@ class CaptureAttentionNotifier(context: Context) {
     }
 
     /**
+     * Readings are parked as `BLOCKED_AUTH` until the token is fixed. Kept in
+     * its own slot and not auto-cancelled, so it stays until delivery resumes.
+     */
+    fun postAuthBlocked() = post(
+        title = "Readings are not being delivered",
+        body = "VitalForge rejected the saved credentials. Open Bascule and update " +
+            "the token; your readings are kept and will send once it works.",
+        id = AUTH_NOTIFICATION_ID,
+        autoCancel = false,
+    )
+
+    fun clearAuthBlocked() {
+        manager?.cancel(AUTH_NOTIFICATION_ID)
+    }
+
+    /**
      * Silently a no-op without POST_NOTIFICATIONS: the worker already runs a
      * foreground service the same permission gates, so a user who declined it
      * has declined this too, and a throw here would be inside a `finally`.
      */
     @SuppressLint("MissingPermission")
-    private fun post(title: String, body: String) {
+    private fun post(title: String, body: String, id: Int = NOTIFICATION_ID, autoCancel: Boolean = true) {
         val nm = manager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -62,14 +78,14 @@ class CaptureAttentionNotifier(context: Context) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         nm.notify(
-            NOTIFICATION_ID,
+            id,
             NotificationCompat.Builder(appContext, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setContentTitle(title)
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                 .setContentIntent(open)
-                .setAutoCancel(true)
+                .setAutoCancel(autoCancel)
                 .setOnlyAlertOnce(true)
                 .build(),
         )
@@ -78,5 +94,6 @@ class CaptureAttentionNotifier(context: Context) {
     companion object {
         const val CHANNEL = "capture_attention"
         const val NOTIFICATION_ID = 721
+        const val AUTH_NOTIFICATION_ID = 722
     }
 }

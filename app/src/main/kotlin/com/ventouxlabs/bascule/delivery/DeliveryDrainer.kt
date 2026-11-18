@@ -49,6 +49,10 @@ class DeliveryDrainer(
      * unmocked and throws. [DeliveryWorker] wires it to logcat.
      */
     private val log: (String) -> Unit = {},
+    /** Called when the server rejects our credentials and the queue is parked as `BLOCKED_AUTH`. */
+    private val onAuthBlocked: () -> Unit = {},
+    /** Called when a reading is accepted, so any auth-blocked notice can be withdrawn. */
+    private val onAuthRecovered: () -> Unit = {},
 ) {
     private sealed interface RowOutcome {
         data object Continue : RowOutcome
@@ -184,19 +188,23 @@ class DeliveryDrainer(
 
     private suspend fun applySubmitResult(row: ReadingEntity, result: SubmitResult, now: Long): RowOutcome {
         when (result) {
-            is SubmitResult.Accepted -> dao.update(
-                row.copy(
-                    status = ReadingStatus.SENT,
-                    attemptCount = row.attemptCount + 1,
-                    lastAttemptMillis = now,
-                    lastError = null,
-                    lastErrorClass = null,
-                    deliveredFields = result.deliveredFields,
-                    contractVersionAtDelivery = runtime.api.contract.wire,
-                ),
-            )
+            is SubmitResult.Accepted -> {
+                dao.update(
+                    row.copy(
+                        status = ReadingStatus.SENT,
+                        attemptCount = row.attemptCount + 1,
+                        lastAttemptMillis = now,
+                        lastError = null,
+                        lastErrorClass = null,
+                        deliveredFields = result.deliveredFields,
+                        contractVersionAtDelivery = runtime.api.contract.wire,
+                    ),
+                )
+                onAuthRecovered()
+            }
             is SubmitResult.AuthRejected -> {
                 dao.blockAllPendingForAuth()
+                onAuthBlocked()
                 return RowOutcome.StopDrain
             }
             is SubmitResult.PermanentRejection -> dao.update(
