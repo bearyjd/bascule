@@ -17,6 +17,7 @@ import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
+import com.ventouxlabs.bascule.data.IngestResult
 import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
 import com.ventouxlabs.bascule.diagnostics.CaptureOutcome
 import com.ventouxlabs.bascule.diagnostics.attentionTransition
@@ -24,6 +25,7 @@ import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.runNonCancelling
 import com.ventouxlabs.bascule.service.CaptureAttentionNotifier
 import com.ventouxlabs.bascule.service.CooldownDisposition
+import com.ventouxlabs.bascule.service.HeldReadingNotifier
 import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -241,7 +243,10 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
         // The drain stays outside the null check: it flushes rows this session
         // did not produce, so it is owed on every completed session.
         is SessionOutcome.Completed -> {
-            outcome.reading?.let { app.readingIngestor.ingest(address, it) }
+            outcome.reading?.let {
+                val result = app.readingIngestor.ingest(address, it)
+                if (result is IngestResult.Held) HeldReadingNotifier(applicationContext).post(result.reading.id)
+            }
             app.deliveryScheduler.triggerImmediateDrain()
             SessionExit(
                 Result.success(),

@@ -31,6 +31,8 @@ class FakeReadingDao(
         _rows.value = _rows.value.map { if (it.id == reading.id) reading else it }
     }
 
+    override suspend fun byId(id: String): ReadingEntity? = _rows.value.firstOrNull { it.id == id }
+
     override fun observeAll() = rows
 
     /** Mirrors the live `@Query` clause for clause: status, the §3.4 due-gate, ordering, then the LIMIT. */
