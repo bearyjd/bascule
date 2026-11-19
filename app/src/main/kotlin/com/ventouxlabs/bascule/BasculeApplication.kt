@@ -24,7 +24,8 @@ import com.ventouxlabs.bascule.delivery.DeliveryScheduler
 import com.ventouxlabs.bascule.delivery.WorkManagerDeliveryScheduler
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounters
 import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
-import com.ventouxlabs.bascule.diagnostics.InMemoryDiagnosticsCounters
+import com.ventouxlabs.bascule.diagnostics.DataStoreDiagnosticsCounters
+import com.ventouxlabs.bascule.diagnostics.diagnosticsDataStore
 import com.ventouxlabs.bascule.diagnostics.SharedPreferencesCaptureAttemptLog
 import com.ventouxlabs.bascule.network.AuthTokenStore
 import com.ventouxlabs.bascule.network.EncryptedAuthTokenStore
@@ -91,12 +92,13 @@ class BasculeApplication : Application() {
     }
 
     /**
-     * Process-lifetime only until WP-26 provides a persistent implementation
-     * behind the same interface (see [InMemoryDiagnosticsCounters]'s own
-     * KDoc) — a single shared instance here so a future WP-08 session worker
-     * and the UI observe the same counts, not independent copies.
+     * Persisted in a DataStore so counts survive a process restart (minimal
+     * version; the full WP-26 registry is not built). A single shared instance
+     * so session workers and the UI observe the same counts.
      */
-    val diagnosticsCounters: DiagnosticsCounters by lazy { InMemoryDiagnosticsCounters() }
+    val diagnosticsCounters: DiagnosticsCounters by lazy {
+        DataStoreDiagnosticsCounters(diagnosticsDataStore, applicationScope)
+    }
 
     /**
      * Durable, unlike [diagnosticsCounters], and for exactly that reason: the
