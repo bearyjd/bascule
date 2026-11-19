@@ -7,14 +7,13 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import java.io.IOException
 
 /**
@@ -22,32 +21,44 @@ import java.io.IOException
  * survive a process restart. Deliberately not the full WP-26 registry (no
  * ownership checks, no migration layer).
  *
- * The interface is synchronous, so live values are held in a [StateFlow] seeded
- * once from disk; every change is then written through asynchronously. Each
- * write persists the *latest* in-memory value for its key rather than the value
- * that triggered it, so out-of-order writes cannot leave stale data. A failed
- * read starts from zero and a failed write is logged; neither stops the
- * in-memory counters from working.
+ * The interface is synchronous, so live values are held in a [StateFlow] that
+ * starts empty and is merged with the on-disk values by an asynchronous load on
+ * [scope] (no blocking read on the constructing thread). Changes made before the
+ * load finishes are kept: an increment adds to the stored count, a reset wins.
+ * Writes wait for the load and persist the *latest* in-memory value for their
+ * key. If the load fails, persistence is disabled for this instance so a later
+ * write cannot overwrite the stored counts with a partial in-memory value; the
+ * in-memory counters keep working. A failed write is logged.
  */
 class DataStoreDiagnosticsCounters(
     private val store: DataStore<Preferences>,
     private val scope: CoroutineScope,
 ) : DiagnosticsCounters {
 
-    private val state = MutableStateFlow(loadInitial())
+    private val lock = Any()
+    private val state = MutableStateFlow<Map<DiagnosticsCounterKey, Int>>(emptyMap())
+    private val resetBeforeLoad = mutableSetOf<DiagnosticsCounterKey>()
+    private val loaded = CompletableDeferred<Boolean>()
+
+    init {
+        scope.launch { load() }
+    }
 
     override fun increment(key: DiagnosticsCounterKey): Int {
-        var next = 0
-        state.update { current ->
-            next = (current[key] ?: 0) + 1
-            current + (key to next)
+        val next = synchronized(lock) {
+            val n = (state.value[key] ?: 0) + 1
+            state.value = state.value + (key to n)
+            n
         }
         persist(key)
         return next
     }
 
     override fun reset(key: DiagnosticsCounterKey) {
-        state.update { current -> current + (key to 0) }
+        synchronized(lock) {
+            if (!loaded.isCompleted) resetBeforeLoad += key
+            state.value = state.value + (key to 0)
+        }
         persist(key)
     }
 
@@ -57,6 +68,7 @@ class DataStoreDiagnosticsCounters(
 
     private fun persist(key: DiagnosticsCounterKey) {
         scope.launch {
+            if (!loaded.await()) return@launch
             try {
                 store.edit { prefs -> prefs[prefKey(key)] = value(key) }
             } catch (e: IOException) {
@@ -65,16 +77,24 @@ class DataStoreDiagnosticsCounters(
         }
     }
 
-    private fun loadInitial(): Map<DiagnosticsCounterKey, Int> {
+    private suspend fun load() {
         val prefs = try {
-            runBlocking { store.data.first() }
+            store.data.first()
         } catch (e: IOException) {
-            Log.e(TAG, "Failed to read persisted diagnostics counters; starting from zero", e)
-            return emptyMap()
+            loaded.complete(false)
+            Log.e(TAG, "Failed to read persisted diagnostics counters; persistence disabled", e)
+            return
         }
-        return DiagnosticsCounterKey.entries.mapNotNull { key ->
-            prefs[prefKey(key)]?.takeIf { it >= 0 }?.let { key to it }
-        }.toMap()
+        synchronized(lock) {
+            val merged = state.value.toMutableMap()
+            DiagnosticsCounterKey.entries.forEach { key ->
+                val stored = prefs[prefKey(key)]?.takeIf { it >= 0 } ?: return@forEach
+                if (key !in resetBeforeLoad) merged[key] = stored + (merged[key] ?: 0)
+            }
+            state.value = merged.toMap()
+            resetBeforeLoad.clear()
+            loaded.complete(true)
+        }
     }
 
     private fun prefKey(key: DiagnosticsCounterKey) = intPreferencesKey(key.name)
