@@ -107,7 +107,8 @@ touching the phone.
   Data handshake, and listens for a weigh-in, with a foreground fallback for
   when background scanning is not enough.
 - Full body composition, not just weight: body fat, body water, muscle,
-  BMI, BMR, AMR, impedance and soft lean mass are decoded and delivered.
+  BMI, BMR and AMR are decoded and delivered. Impedance and soft lean mass
+  are decoded and stored on the device but are not sent to VitalForge.
 - Scale registration and profile management, including linking an existing
   profile on a scale that is already registered.
 - "Weigh now" — a bounded scan on both the Scale and History screens, for
