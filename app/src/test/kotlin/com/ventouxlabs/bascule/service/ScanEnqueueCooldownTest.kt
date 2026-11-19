@@ -3,6 +3,7 @@ package com.ventouxlabs.bascule.service
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.ventouxlabs.bascule.ble.session.SessionBudget
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -144,7 +145,7 @@ class ScanEnqueueCooldownTest {
     /**
      * The lockout this whole mechanism existed to cause, now closed. A session
      * that never reached the radio — the staleness abort, overwhelmingly — used
-     * to hold the address for the full five minutes, so the user standing on
+     * to hold the address for the full cooldown window, so the user standing on
      * the scale generated advertisements that could not enqueue anything and
      * saw nothing happen until long after they had stepped off.
      */
@@ -376,6 +377,24 @@ class ScanEnqueueCooldownTest {
         assertFalse("the expired address must be pruned", keys.contains(ADDRESS))
         assertFalse("its streak must be pruned with it", keys.contains("fails:$ADDRESS"))
         assertTrue(keys.contains(OTHER_ADDRESS))
+    }
+
+    /**
+     * The cross-package invariant that used to live only in comments: the
+     * production window must outlast the longest possible session, plus the
+     * 20 s staleness budget the foreground-service claim path absorbs. A window
+     * shorter than the session expires mid-listen and lets every remaining
+     * advertisement re-enqueue against it.
+     */
+    @Test
+    fun productionWindowOutlastsTheHardSessionCeiling() {
+        val stalenessAllowanceMillis = 20L * 1_000
+        val requiredMillis = SessionBudget.HARD_SESSION_CEILING.inWholeMilliseconds + stalenessAllowanceMillis
+        assertTrue(
+            "DEFAULT_WINDOW_MILLIS (${ScanEnqueueCooldown.DEFAULT_WINDOW_MILLIS}) must exceed " +
+                "HARD_SESSION_CEILING + 20 s ($requiredMillis)",
+            ScanEnqueueCooldown.DEFAULT_WINDOW_MILLIS > requiredMillis,
+        )
     }
 
     private companion object {

@@ -55,7 +55,7 @@ class ScaleSessionWorker(context: Context, params: WorkerParameters) : Coroutine
      * [SessionExit]: the exits that matter most are the early ones — a stale
      * advertisement above all — and a release hooked into [resultFor] alone
      * would leave exactly those paths holding the address down for the full
-     * five-minute window, which is the lockout the split exists to end.
+     * full cooldown window ([ScanEnqueueCooldown.DEFAULT_WINDOW_MILLIS]), which is the lockout the split exists to end.
      */
     override suspend fun doWork(): Result {
         // Nothing to settle without an address, and nothing claimed one either.
@@ -380,7 +380,7 @@ internal enum class SessionExitReason {
      * The session threw, or was cancelled before it could classify itself.
      * Present so that the `finally` in [ScaleSessionWorker.doWork] always has a
      * reason to settle with — an unclassified failure that skipped settling
-     * would reinstate the five-minute lockout by the back door.
+     * would reinstate the full-window lockout by the back door.
      */
     UNEXPECTED_ERROR,
 }

@@ -6,7 +6,7 @@ import org.junit.Test
 
 /**
  * The policy half of the fix for the scan-cooldown lockout: a session used to
- * hold its scale's address for the full five-minute window no matter how it
+ * hold its scale's address for the full cooldown window no matter how it
  * ended, so one failure swallowed every retry — including the user stepping
  * straight back on the scale.
  *
@@ -97,7 +97,7 @@ class CooldownDispositionTest {
     /**
      * Needs the user, not a retry; but Android re-raises its pairing request on
      * the next session, so a widening backoff keeps offering chances without a
-     * five-minute lockout between them.
+     * full-window lockout between them.
      */
     @Test
     fun aPairingThatNeedsTheUserBacksOffRatherThanHolding() {
@@ -107,7 +107,7 @@ class CooldownDispositionTest {
     /**
      * The back door the `finally` in `doWork` exists to shut: a session that
      * threw or was cancelled must still release its hold, or an unclassified
-     * failure reinstates the five-minute lockout without ever being named.
+     * failure reinstates the full-window lockout without ever being named.
      */
     @Test
     fun anUnexpectedFailureBacksOffRatherThanHolding() {
@@ -119,10 +119,10 @@ class CooldownDispositionTest {
 
     /**
      * A tripwire, not a restatement: every exit must be classified, and the two
-     * treatments that can cost a weigh-in — holding for five minutes — stay
+     * treatments that can cost a weigh-in — holding for the full window — stay
      * restricted to the two reasons that genuinely earn it. A new
      * [SessionExitReason] added without thought fails here rather than silently
-     * inheriting a five-minute lockout.
+     * inheriting a full-window lockout.
      */
     @Test
     fun onlyACaptureOrAnIncompatibleDeviceEverHoldsTheFullWindow() {
