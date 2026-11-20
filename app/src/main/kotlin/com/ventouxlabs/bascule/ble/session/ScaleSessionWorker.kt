@@ -16,6 +16,8 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
+import com.ventouxlabs.bascule.ble.CooldownDisposition
+import com.ventouxlabs.bascule.ble.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.ble.decoders.BeurerDecoder
 import com.ventouxlabs.bascule.data.IngestResult
 import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
@@ -24,9 +26,7 @@ import com.ventouxlabs.bascule.diagnostics.attentionTransition
 import com.ventouxlabs.bascule.diagnostics.DiagnosticsCounterKey
 import com.ventouxlabs.bascule.runNonCancelling
 import com.ventouxlabs.bascule.service.CaptureAttentionNotifier
-import com.ventouxlabs.bascule.service.CooldownDisposition
 import com.ventouxlabs.bascule.service.HeldReadingNotifier
-import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext

@@ -11,7 +11,6 @@ import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.ble.session.ScaleSessionEnqueuer
 import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
 import com.ventouxlabs.bascule.runNonCancelling
-import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

@@ -5,12 +5,12 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.ventouxlabs.bascule.BasculeApplication
+import com.ventouxlabs.bascule.ble.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.data.ConfigStore
 import com.ventouxlabs.bascule.data.ReadingDao
 import com.ventouxlabs.bascule.data.ScaleProfile
 import com.ventouxlabs.bascule.diagnostics.CaptureAttemptLog
 import com.ventouxlabs.bascule.diagnostics.LastCaptureAttempt
-import com.ventouxlabs.bascule.service.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.data.ScaleProfileStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers

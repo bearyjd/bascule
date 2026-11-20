@@ -1,4 +1,4 @@
-package com.ventouxlabs.bascule.service
+package com.ventouxlabs.bascule.ble
 
 import android.app.Application
 import android.content.Context
