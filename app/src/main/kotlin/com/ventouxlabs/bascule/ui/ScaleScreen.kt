@@ -102,12 +102,15 @@ fun ScaleScreen(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Scale status")
-                Text("Battery level and live status are only available while the app is connected to your scale.")
+                Text(SCALE_STATUS_NOTE)
                 Text("Removing a profile only forgets it on this phone — the BF720 keeps its own copy of the slot.")
             }
         }
     }
 }
+
+internal const val SCALE_STATUS_NOTE =
+    "Live status is only available while the app is connected to your scale."
 
 /** Re-reads state the user can change in a system screen (e.g. battery exemption). */
 @Composable
