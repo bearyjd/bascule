@@ -7,6 +7,14 @@ GitHub Releases carry auto-generated notes linking the merged PRs; this file
 is the human-readable view and leads with what changed for the person using
 the app, not with internals.
 
+## Unreleased
+
+### The Scale screen no longer promises a battery level
+
+The Scale status card said battery level was available while connected, but
+the app does not read the scale's Battery Level characteristic. The text now
+says only that live status is available while connected.
+
 ## v0.3.1
 
 ### The app now tells you when Android is blocking background weigh-ins
