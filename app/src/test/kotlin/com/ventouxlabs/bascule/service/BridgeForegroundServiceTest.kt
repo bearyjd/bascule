@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanResult
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
+import com.ventouxlabs.bascule.ble.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.ble.fake.FakeScaleSessionEnqueuer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

@@ -1,4 +1,4 @@
-package com.ventouxlabs.bascule.service
+package com.ventouxlabs.bascule.ble
 
 import android.content.Context
 import android.content.SharedPreferences

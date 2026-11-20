@@ -1,6 +1,6 @@
 package com.ventouxlabs.bascule.ble.session
 
-import com.ventouxlabs.bascule.service.CooldownDisposition
+import com.ventouxlabs.bascule.ble.CooldownDisposition
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

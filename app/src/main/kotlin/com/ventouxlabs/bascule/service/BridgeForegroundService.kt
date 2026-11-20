@@ -24,6 +24,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.ventouxlabs.bascule.BasculeApplication
 import com.ventouxlabs.bascule.R
+import com.ventouxlabs.bascule.ble.ScanEnqueueCooldown
 import com.ventouxlabs.bascule.ble.decoders.SigWeightProfile
 import com.ventouxlabs.bascule.ble.session.ScaleSessionEnqueuer
 import com.ventouxlabs.bascule.ble.session.WorkManagerScaleSessionEnqueuer
