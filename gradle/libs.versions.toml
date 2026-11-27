@@ -1,7 +1,7 @@
 [versions]
 # Toolchain — pinned to latest stable as of 2026-08-22 (Phase 2 exit gate:
 # "pin the toolchain", bascule-agent-prompt.md §Phase 2 item 3).
-agp = "9.4.1"
+agp = "9.5.0"
 kotlin = "2.4.21"
 ksp = "2.3.12"
 detekt = "1.23.8"
@@ -26,7 +26,7 @@ datastorePreferences = "1.3.0"
 coroutines = "1.11.0"
 # Used as a plain runtime library (JsonObject/JsonPrimitive), not via the
 # serialization compiler plugin — no @Serializable classes exist.
-serialization = "1.11.0"
+serialization = "1.12.0"
 
 # OkHttp is the one non-AndroidX/kotlinx runtime dependency — justified in
 # docs/prp/02-interface-revision.md §6.
